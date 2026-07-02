@@ -19,7 +19,7 @@ use anyhow::Result;
 use clap::{Arg, ArgAction};
 
 use manifest::ParamKind;
-use resolver::Resolved;
+use resolver::{PinInfo, Resolved};
 
 fn main() {
     match run() {
@@ -83,7 +83,15 @@ fn run() -> Result<i32> {
     }
 
     if matches.get_flag("list") {
-        print_list(&resolved);
+        if matches.get_flag("json") {
+            let trusted = trust::is_trusted(&resolved.path, &resolved.trust_hash)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&list_json(&resolved, trusted))?
+            );
+        } else {
+            print_list(&resolved);
+        }
         return Ok(0);
     }
 
@@ -130,6 +138,13 @@ fn build_cli(resolved: &Resolved) -> clap::Command {
                 .long("list")
                 .action(ArgAction::SetTrue)
                 .help("List the commands this repo declares"),
+        )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .requires("list")
+                .action(ArgAction::SetTrue)
+                .help("With --list: machine-readable JSON (stable schema, for tooling/agents)"),
         )
         .arg(
             Arg::new("trust")
@@ -183,6 +198,81 @@ fn build_cli(resolved: &Resolved) -> clap::Command {
     cli
 }
 
+/// The `--list --json` document — the stable machine-readable surface for
+/// agents and tooling. Schema 1; changes are additive only, breaking changes
+/// bump `schema`. `trusted` is passed in so this stays a pure function of the
+/// resolved manifest (the caller consults the trust store).
+fn list_json(resolved: &Resolved, trusted: bool) -> serde_json::Value {
+    use serde_json::json;
+    let includes: Vec<_> = resolved
+        .pins
+        .iter()
+        .map(|pin| match pin {
+            PinInfo::Local { source } => json!({ "source": source, "kind": "local" }),
+            PinInfo::Git {
+                source,
+                url,
+                rev,
+                rev_kind,
+                resolved_sha,
+            } => json!({
+                "source": source,
+                "kind": "git",
+                "url": url,
+                "rev": rev,
+                "rev_kind": rev_kind,
+                "resolved_sha": resolved_sha,
+            }),
+        })
+        .collect();
+    let commands: Vec<_> = resolved
+        .commands
+        .iter()
+        .map(|cmd| {
+            let params: Vec<_> = cmd
+                .params
+                .iter()
+                .map(|(name, def)| match def.kind() {
+                    ParamKind::Pick(pick) => match (&pick.options, &pick.from) {
+                        (Some(options), _) => {
+                            json!({ "name": name, "kind": "pick", "options": options })
+                        }
+                        (None, Some(from)) => json!({
+                            "name": name,
+                            "kind": "pick",
+                            "source": from,
+                            // params whose values the source interpolates —
+                            // an invoker must supply these first
+                            "depends_on": interp::placeholders(from).unwrap_or_default(),
+                        }),
+                        (None, None) => unreachable!("validated at load: options or from"),
+                    },
+                    ParamKind::Input(input) => {
+                        json!({ "name": name, "kind": "input", "default": input.default })
+                    }
+                    ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
+                })
+                .collect();
+            json!({
+                "id": cmd.id,
+                "title": cmd.title,
+                "origin": cmd.origin,
+                "params": params,
+            })
+        })
+        .collect();
+    json!({
+        "schema": 1,
+        "pult_version": env!("CARGO_PKG_VERSION"),
+        "name": resolved.name,
+        "manifest": resolved.path,
+        "dir": resolved.dir,
+        "trusted": trusted,
+        "includes": includes,
+        "commands": commands,
+    })
+}
+
 fn print_list(resolved: &Resolved) {
     let width = resolved
         .commands
@@ -207,5 +297,47 @@ fn print_list(resolved: &Resolved) {
             line.push_str(&format!("  ← {origin}"));
         }
         println!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_json_exposes_params_and_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            r#"
+version: 1
+name: demo
+commands:
+  - id: shell
+    title: Open a shell
+    params:
+      env: { pick: { options: [dev, uat] } }
+      customer: { pick: { from: "./bin/impl list --env {env}" } }
+      note: { input: { default: "" } }
+    run: "./bin/impl shell {customer} {env}"
+"#,
+        )
+        .unwrap();
+        let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
+        let resolved = resolver::resolve(loaded).unwrap();
+        let doc = list_json(&resolved, false);
+
+        assert_eq!(doc["schema"], 1);
+        assert_eq!(doc["name"], "demo");
+        assert_eq!(doc["trusted"], false);
+        let cmd = &doc["commands"][0];
+        assert_eq!(cmd["id"], "shell");
+        assert_eq!(cmd["origin"], serde_json::Value::Null);
+        let params = cmd["params"].as_array().unwrap();
+        assert_eq!(params[0]["kind"], "pick");
+        assert_eq!(params[0]["options"][0], "dev");
+        assert_eq!(params[1]["depends_on"][0], "env");
+        assert_eq!(params[2]["kind"], "input");
+        assert_eq!(params[2]["default"], "");
     }
 }

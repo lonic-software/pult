@@ -46,6 +46,7 @@ always run with the manifest's directory as the working directory.
 ```sh
 pult              # guided flow: pick a command, answer the prompts
 pult --list       # what does this repo offer? (with argument names and origins)
+pult --list --json             # the same, machine-readable (tooling, agents)
 pult shell demo-leeds dev      # direct: values in declared order
 pult shell demo-leeds          # partial: missing values are prompted
 pult shell --help              # per-command help, generated from the manifest
@@ -64,7 +65,8 @@ pult deploy --print            # show the exact script it would run, don't run i
 
 A `pult.yaml` is a list of things to *execute*, so the first time you run
 anything from a given manifest — and any time it or a module it includes
-changes — `pult` shows you what resolved and asks once:
+changes (the yaml, or any file a local module directory ships, executables
+included) — `pult` shows you what resolved and asks once:
 
 ```
 Trust the manifest /repo/pult.yaml?
@@ -79,7 +81,9 @@ non-interactive contexts (CI), an untrusted manifest is refused; pass
 invocation like `pult --trust --list`.
 
 Treat this prompt like `curl | sh`: read it. If a manifest changed and you
-didn't expect it to, that's the moment to look.
+didn't expect it to, that's the moment to look. And know what the prompt is
+not: it's change visibility, not a sandbox — a trusted command runs as
+ordinary shell with your credentials.
 
 ## Git modules, pins, and the cache
 

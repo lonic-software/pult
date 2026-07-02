@@ -11,6 +11,32 @@ The consumer footprint stays language-agnostic: a Java, Rust, or TypeScript
 repo drops a `pult.yaml` and shells out to its own native tooling. No Node,
 no foreign runtime — commands travel in git, current for everyone who pulls.
 
+## What that unlocks
+
+The mechanics below — pinned includes, an immutable module cache,
+trust-on-change, guided prompts — add up to more than a task runner: a
+**distribution and trust layer for executable command sets**. The same binary,
+pointed at different kinds of command set:
+
+- **An org-wide paved road.** A platform team publishes
+  `github.com/your-org/paved-road@v2`; every service repo includes it. Now
+  `deploy`, `rotate-creds`, and `tail-logs` are the same named commands in
+  every repo, versioned centrally, rolled out by bumping one pin — with
+  `pult includes verify` in CI to catch drift.
+- **Incident runbooks that execute.** At 3am nobody wants to reconstruct the
+  exact `aws ecs execute-command` incantation. Run `pult`, arrow through, and
+  live pickers fill the blanks. Wikis can't execute; shell scripts can't
+  prompt; `pult` reads back what it will run before anything runs.
+- **Something you hand to someone else.** Ship a client a repo they can
+  deploy and maintain without you, or a workshop repo where the guided flow
+  replaces a wall of copy-paste — pinned includes make it reproducible, and
+  the trust prompt means they read what they execute.
+- **A tool surface for agents.** `pult --list --json` gives an LLM agent an
+  enumerable set of named operations with declared parameters and origins —
+  a bounded, human-vetted, versioned alternative to handing it raw shell.
+
+None of these need anything beyond a `pult.yaml`.
+
 ## Install
 
 macOS / Linux / Git Bash:
@@ -52,9 +78,10 @@ static-musl, and Windows x64, with sha256 checksums).
 
 ```sh
 cd examples
-pult              # guided flow: menu → pickers → run
-pult --list       # what does this repo declare?
-pult greet hello  # direct; missing params are prompted for
+pult                 # guided flow: menu → pickers → run
+pult --list          # what does this repo declare?
+pult --list --json   # the same, machine-readable (for tooling and agents)
+pult greet hello     # direct; missing params are prompted for
 ```
 
 ## The manifest
@@ -123,8 +150,10 @@ not set output Y"), and shell variables are the wiring between steps.
 `pult <cmd> --print` shows the composed script instead of running it. Modules
 can ship executables next to their yaml, addressed as `${module.dir}/bin/…` —
 that's where real logic belongs; the yaml only composes. Trust covers the
-resolved whole: editing an included module re-triggers the trust prompt on
-every consuming manifest.
+resolved whole, shipped executables included: editing anything in an included
+module directory re-triggers the trust prompt on every consuming manifest
+(git modules get this from the pinned commit; local directory modules are
+tree-hashed).
 
 Git modules must be pinned to a **tag or full commit sha** — branches are
 rejected, so the same manifest always resolves to the same commands. Fetches
@@ -143,9 +172,14 @@ Try it: `cd examples && pult --list`, then `pult announce`, and
 
 A discovered manifest is a list of things to *execute*, so `pult`
 does direnv-style trust-on-first-use: the first time it sees a manifest — and
-whenever the file changes — it asks before running anything, and remembers the
-answer (sha256 per path, stored in `~/Library/Application Support/pult/trust.json`
-on macOS; override with `PULT_TRUST_STORE`). Non-interactive contexts refuse
+whenever anything it resolves changes — it asks before running anything, and
+remembers the answer (sha256 per path, stored in
+`~/Library/Application Support/pult/trust.json` on macOS; override with
+`PULT_TRUST_STORE`). The hash covers the resolved whole: the root file, every
+include's pin, module yaml, and — for local directory modules — every file
+the module ships. What trust does **not** do is sandbox: a trusted command is
+ordinary shell with your credentials. The guarantees are change visibility
+and pin immutability — you always get a prompt before anything different runs. Non-interactive contexts refuse
 untrusted manifests; pass `--trust` to accept explicitly (e.g. CI).
 
 ## Layout

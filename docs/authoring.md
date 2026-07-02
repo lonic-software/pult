@@ -171,6 +171,11 @@ The pieces:
   the yaml, in any language; the step is the interface, the executable is the
   implementation. You can rewrite `bin/find-task` from bash to Rust and no
   consumer changes anything.
+- **Shipped files are part of the trust unit.** For a local directory module,
+  the whole tree is hashed — editing `bin/find-task` re-triggers the trust
+  prompt on every consuming manifest, same as editing the yaml. (Git modules
+  get this from the pinned commit.) A single-file include covers only that
+  file, so ship executables in directory modules, not next to a bare yaml.
 - Modules cannot have `includes:` of their own (no transitivity).
 
 ## 4 · Consuming a module

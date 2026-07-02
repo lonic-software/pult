@@ -59,6 +59,14 @@ pub fn ensure_trusted(
     save_store(&store_path, &store)
 }
 
+/// Read-only query: is this manifest currently trusted at exactly this hash?
+/// Used by `--list --json` so tooling can tell whether invoking would prompt.
+pub fn is_trusted(path: &Path, resolved_hash: &str) -> Result<bool> {
+    let store = load_store(&store_path()?)?;
+    let key = path.to_string_lossy();
+    Ok(store.get(key.as_ref()).map(String::as_str) == Some(resolved_hash))
+}
+
 /// Overridable via PULT_TRUST_STORE (used by tests and CI).
 fn store_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("PULT_TRUST_STORE") {

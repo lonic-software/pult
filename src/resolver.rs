@@ -208,13 +208,13 @@ fn load_module(
     cache_root: &std::path::Path,
     trust_input: &mut String,
 ) -> Result<LoadedModule> {
-    let (file, pin, summary) = match fetch::parse_source(&inc.source)? {
+    let (file, pin, summary, local_tree) = match fetch::parse_source(&inc.source)? {
         Source::Local => {
             let target = root_dir.join(&inc.source);
-            let file = if target.is_dir() {
-                target.join("module.yaml")
+            let (file, tree) = if target.is_dir() {
+                (target.join("module.yaml"), Some(target))
             } else {
-                target
+                (target, None)
             };
             (
                 file,
@@ -222,6 +222,7 @@ fn load_module(
                     source: inc.source.clone(),
                 },
                 inc.source.clone(),
+                tree,
             )
         }
         Source::Git(git_src) => {
@@ -242,6 +243,7 @@ fn load_module(
                     resolved_sha: meta.resolved_sha.clone(),
                 },
                 format!("{} (commit {short})", inc.source),
+                None,
             )
         }
     };
@@ -265,6 +267,13 @@ fn load_module(
         trust_input.push_str(resolved_sha);
     }
     trust_input.push_str(&raw);
+    // A directory module ships more than its yaml — executables under
+    // ${module.dir} run too, so the whole tree is part of the trust unit.
+    // (Git modules need no equivalent: the pinned sha identifies the tree.
+    // Single-file includes cover only the file; their module.dir is ambient.)
+    if let Some(tree) = &local_tree {
+        trust_input.push_str(&hash_dir_tree(tree)?);
+    }
 
     let mut module = manifest::parse(&raw, &file)?;
     if !module.includes.is_empty() {
@@ -314,6 +323,60 @@ fn load_module(
         summary,
         pin,
     })
+}
+
+/// Deterministic digest of a local module directory: relative paths, contents,
+/// and (on unix) the executable bit — so editing a shipped script, adding a
+/// file, or flipping a mode re-triggers trust the same way editing the yaml
+/// does. `.git` is skipped in case the include points at a checkout.
+fn hash_dir_tree(root: &std::path::Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hash_dir_into(root, root, &mut hasher)?;
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn hash_dir_into(root: &std::path::Path, dir: &std::path::Path, hasher: &mut Sha256) -> Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .and_then(|it| it.collect::<std::io::Result<Vec<_>>>())
+        .with_context(|| format!("failed to read {}", dir.display()))?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path.strip_prefix(root).expect("entry is under root");
+        let meta = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&path)
+                .with_context(|| format!("failed to read link {}", path.display()))?;
+            hasher.update(b"l");
+            hasher.update(rel.to_string_lossy().as_bytes());
+            hasher.update([0]);
+            hasher.update(target.to_string_lossy().as_bytes());
+            hasher.update([0]);
+        } else if meta.is_dir() {
+            hash_dir_into(root, &path, hasher)?;
+        } else {
+            hasher.update(b"f");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if meta.permissions().mode() & 0o111 != 0 {
+                    hasher.update(b"x");
+                }
+            }
+            hasher.update(rel.to_string_lossy().as_bytes());
+            hasher.update([0]);
+            let contents = std::fs::read(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            hasher.update((contents.len() as u64).to_le_bytes());
+            hasher.update(&contents);
+        }
+    }
+    Ok(())
 }
 
 fn merge_module(
@@ -1256,6 +1319,49 @@ commands:
             r1.unwrap().trust_hash,
             r2.unwrap().trust_hash,
             "changing an included module must change the trust hash"
+        );
+    }
+
+    #[test]
+    fn trust_hash_covers_local_module_executables() {
+        let root = "version: 1\nincludes:\n  - source: ./mod\ncommands:\n  - { id: c, title: C, run: \"true\" }\n";
+        let module = "version: 1\nsteps:\n  s: \"${module.dir}/bin/tool\"\ncommands: []\n";
+        let (_d1, r1) = setup(
+            root,
+            &[("mod/module.yaml", module), ("mod/bin/tool", "echo one")],
+        );
+        let (_d2, r2) = setup(
+            root,
+            &[("mod/module.yaml", module), ("mod/bin/tool", "echo two")],
+        );
+        assert_ne!(
+            r1.unwrap().trust_hash,
+            r2.unwrap().trust_hash,
+            "changing a shipped executable must change the trust hash"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trust_hash_covers_exec_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = "version: 1\nincludes:\n  - source: ./mod\ncommands:\n  - { id: c, title: C, run: \"true\" }\n";
+        let files: &[(&str, &str)] = &[
+            ("mod/module.yaml", "version: 1\ncommands: []\n"),
+            ("mod/bin/tool", "echo hi"),
+        ];
+        let (dir, before) = setup(root, files);
+        let before = before.unwrap().trust_hash;
+        std::fs::set_permissions(
+            dir.path().join("mod/bin/tool"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
+        let after = resolve(loaded).unwrap().trust_hash;
+        assert_ne!(
+            before, after,
+            "flipping the exec bit must change the trust hash"
         );
     }
 

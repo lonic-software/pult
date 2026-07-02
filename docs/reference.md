@@ -146,7 +146,13 @@ step names across the merged whole are errors (disambiguate with `prefix:`).
 
 Trust-on-first-use over the **resolved whole**: the stored hash covers the
 root manifest bytes, every include's source string, resolved commit (for git),
-and module bytes. Any change → re-prompt. Stored per user in
+module bytes, and — for local **directory** modules — a digest of the whole
+module tree (relative paths, file contents, symlink targets, and the unix
+executable bit; `.git` skipped). Editing a shipped executable re-prompts the
+same way editing the yaml does. Git modules need no separate tree digest: the
+resolved commit sha identifies the tree, and the cache is immutable.
+Single-file local includes (`./steps.yaml`) cover only that file — a module
+that ships executables should be a directory module. Any change → re-prompt. Stored per user in
 `<config>/pult/trust.json` (macOS: `~/Library/Application Support/pult/`,
 Linux: `~/.config/pult/`, Windows: `%APPDATA%\pult\`); override with
 `PULT_TRUST_STORE`. Non-TTY + untrusted = refusal; `--trust` accepts
@@ -169,12 +175,66 @@ pult                          guided flow
 pult <command> [values…]      direct invocation (missing values are prompted)
 pult <command> --help         generated per-command help
 pult --list                   commands, params, and origins
+pult --list --json            the same, machine-readable (schema below)
 pult <command> --print        print the composed script instead of running
 pult --trust …                trust this manifest without prompting (records immediately)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
 pult update [VERSION]         self-update to the latest (or given) release; needs no manifest
 pult --version / -V           engine version
 ```
+
+## Machine-readable listing — `pult --list --json`
+
+The stable surface for tooling and agents. `schema` is `1`; changes within a
+schema version are **additive only** (new fields may appear; existing fields
+keep their meaning), breaking changes bump `schema`.
+
+```json
+{
+  "schema": 1,
+  "pult_version": "0.1.0",
+  "name": "demo",
+  "manifest": "/repo/pult.yaml",
+  "dir": "/repo",
+  "trusted": false,
+  "includes": [
+    { "source": "./tools", "kind": "local" },
+    { "source": "github.com/opskit/aws-common@v1.4.2", "kind": "git",
+      "url": "https://github.com/opskit/aws-common",
+      "rev": "v1.4.2", "rev_kind": "tag", "resolved_sha": "8a6e6fd4…" }
+  ],
+  "commands": [
+    {
+      "id": "shell",
+      "title": "Open a shell",
+      "origin": null,
+      "params": [
+        { "name": "env", "kind": "pick", "options": ["dev", "uat", "pre"] },
+        { "name": "customer", "kind": "pick",
+          "source": "./bin/impl list --env {env}", "depends_on": ["env"] },
+        { "name": "note", "kind": "input", "default": "" }
+      ]
+    }
+  ]
+}
+```
+
+Field notes:
+
+- `trusted` — whether this manifest is trusted **at its current resolved
+  hash**. `false` means invoking a command will prompt interactively (or be
+  refused non-interactively without `--trust`) — tooling should surface that
+  to a human rather than pass `--trust` itself.
+- `origin` — the include source a command came from; `null` = declared in the
+  root manifest.
+- Params appear in **declared order**, which is also positional-argument
+  order: `pult <id> <first> <second> …`.
+- Param kinds: `pick` with `options` (static; CLI values are validated
+  against it), `pick` with `source` (a shell-out; its stdout lines become
+  options; `depends_on` lists params the source interpolates — supply those
+  first), and `input` (free text, `default` may be `null`).
+- `pult <id> <values…> --print` prints the exact composed script without
+  running it — the natural dry-run step before an agent executes anything.
 
 ## Exit codes
 
