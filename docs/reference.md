@@ -41,7 +41,7 @@ future phase and rejected with an explanatory error.
 
 ```yaml
 - id: shell               # unique after merging; reserved ids: `includes`, `registry`,
-  title: Open a shell     #   `module`, `update`, `self`, `init`, `trust`, `cache`
+  title: Open a shell     #   `module`, `update`, `self`, `init`, `trust`, `cache`, `ui`, `events`
   params:                 # ordered map — prompted in this order
     <name>: <param>
   run: <run>

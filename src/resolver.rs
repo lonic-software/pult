@@ -16,8 +16,8 @@ use crate::manifest::{
 /// breaks any manifest already using it, so anything the engine might
 /// plausibly want is parked now (`self` is the umbrella for everything
 /// unforeseen). Everything NOT on this list is promised to manifests forever.
-const RESERVED_IDS: [&str; 8] = [
-    "includes", "registry", "module", "update", "self", "init", "trust", "cache",
+const RESERVED_IDS: [&str; 10] = [
+    "includes", "registry", "module", "update", "self", "init", "trust", "cache", "ui", "events",
 ];
 
 /// A root manifest with all includes resolved, vars substituted, `use:`

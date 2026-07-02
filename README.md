@@ -222,5 +222,25 @@ untrusted manifests; pass `--trust` to accept explicitly (e.g. CI).
 
 - **Registry sources** — https static hosts and S3 as module backends, with
   token-helper / cloud-credential auth (decentralized, like Homebrew taps).
-- **Full-screen dashboard** (maybe) — a ratatui view over the same manifest
-  with live status, if a launcher-with-prompts ever proves insufficient.
+
+Then a richer interactive surface, in three independently useful steps —
+each **optional for command authors**, and none may weaken the properties
+that make pult work: inherited stdio for interactive commands, plain
+scriptable output, no runtime.
+
+1. **Events protocol** — scripts *may* write `progress` / `status` lines to
+   a `PULT_EVENTS` descriptor (stdout stays untouched; non-emitting scripts
+   lose nothing). Plain-CLI pult translates to OSC 9;4, so terminals that
+   render progress natively (Windows Terminal, WezTerm, Ghostty) show it
+   with zero drawing on our side. Tiny, versioned vocabulary — this must
+   never grow into a framework contract.
+2. **Launcher palette** — evolve the bare-`pult` flow into a scope-aware,
+   searchable palette (repo + user side by side; menus don't have the CLI's
+   namespace-collision problem). The palette always *exits before the
+   command runs* — commands keep the real terminal.
+3. **Pane runner** (`pult ui`, id reserved) — long-running non-interactive
+   commands run in a pane with live output and event-driven progress
+   (portable-pty + a vt100 grid); commands marked `interactive:` get a
+   full-terminal handoff, lazygit-style, preserving today's guarantee.
+   Output teed to a file becomes an audit artifact. The big one — only
+   after 1 and 2 prove the demand.
