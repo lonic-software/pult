@@ -76,7 +76,16 @@ as shell aliases. Two differences worth knowing:
   only, so nothing personal ever shadows or leaks into a repo's namespace.
 
 Your user manifest can `include:` pinned git modules like any other, so a
-shared personal-tooling module travels the same way repo modules do.
+shared personal-tooling module travels the same way repo modules do — and you
+don't have to create any of it by hand:
+
+```sh
+pult includes add github.com/your-org/ops-modules//ecs --prefix ecs --user
+```
+
+pins the module's latest version tag, shows what commands it brings, and
+writes the include (creating the user manifest if this is your first). The
+same command without `--user` adds to the current repo's manifest instead.
 
 ## The trust prompt
 

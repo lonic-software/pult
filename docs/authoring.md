@@ -180,6 +180,10 @@ The pieces:
 
 ## 4 · Consuming a module
 
+The quick path is `pult includes add <source> [--prefix aws]` — it pins the
+latest version tag, prompts for required vars, and writes the include for
+you. What it writes is the following, which you can also author by hand:
+
 ```yaml
 version: 1
 name: my-service

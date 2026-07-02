@@ -159,6 +159,16 @@ module directory re-triggers the trust prompt on every consuming manifest
 (git modules get this from the pinned commit; local directory modules are
 tree-hashed).
 
+Adding an include by hand is optional — **`pult includes add <source>`** pins
+the source's latest version tag, shows what commands it brings, and appends
+it to the nearest manifest (or your user manifest with `--user`, creating it
+if needed):
+
+```sh
+pult includes add github.com/your-org/ops-modules//ecs --prefix ecs --user
+pult ecs:shell    # available everywhere, pinned, trust-prompted on first run
+```
+
 Git modules must be pinned to a **tag or full commit sha** — branches are
 rejected, so the same manifest always resolves to the same commands. Fetches
 are shallow, via your system `git` (ssh keys and credential helpers just
@@ -207,11 +217,6 @@ untrusted manifests; pass `--trust` to accept explicitly (e.g. CI).
 
 ## Roadmap
 
-- **Installing command sets** — `pult includes add <source> [--prefix aws]
-  [--user]`: resolve the source's latest tag, pin it, and append the include
-  to the nearest repo manifest (or your user manifest with `--user`), showing
-  what commands it brings. One command from a URL to runnable, trusted,
-  pinned commands — e.g. adding a shared `ecs-exec` module to your toolbox.
 - **Registry sources** — https static hosts and S3 as module backends, with
   token-helper / cloud-credential auth (decentralized, like Homebrew taps).
 - **Full-screen dashboard** (maybe) — a ratatui view over the same manifest

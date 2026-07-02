@@ -42,15 +42,26 @@ pub struct CacheMeta {
 /// - `host.tld/org/repo[//sub]@rev`    → git over https (GitHub-style shorthand)
 /// - `git::<url>[//sub]@rev`           → git, any transport (ssh, file, https)
 pub fn parse_source(source: &str) -> Result<Source> {
+    parse_source_with(source, true)
+}
+
+/// Like `parse_source`, but a git source may omit its pin (`rev` comes back
+/// empty). Only for `includes add`, which resolves the latest version tag —
+/// manifests themselves must always be pinned.
+pub fn parse_source_lenient(source: &str) -> Result<Source> {
+    parse_source_with(source, false)
+}
+
+fn parse_source_with(source: &str, require_pin: bool) -> Result<Source> {
     if source.starts_with("./") || source.starts_with("../") {
         return Ok(Source::Local);
     }
     if let Some(rest) = source.strip_prefix("git::") {
-        return Ok(Source::Git(parse_git(source, rest, true)?));
+        return Ok(Source::Git(parse_git(source, rest, true, require_pin)?));
     }
     let first_seg = source.split('/').next().unwrap_or("");
     if first_seg.contains('.') && !first_seg.contains('@') {
-        return Ok(Source::Git(parse_git(source, source, false)?));
+        return Ok(Source::Git(parse_git(source, source, false, require_pin)?));
     }
     bail!(
         "source `{source}` is not recognized — use `./path` for local modules, \
@@ -59,12 +70,18 @@ pub fn parse_source(source: &str) -> Result<Source> {
     );
 }
 
-fn parse_git(display: &str, rest: &str, explicit_url: bool) -> Result<GitSource> {
+fn parse_git(
+    display: &str,
+    rest: &str,
+    explicit_url: bool,
+    require_pin: bool,
+) -> Result<GitSource> {
     // The pin is after the last `@` and cannot contain `/` (ssh URLs contain `@`).
     let (body, rev) = match rest.rfind('@') {
         Some(i) if i + 1 < rest.len() && !rest[i + 1..].contains('/') => {
             (&rest[..i], rest[i + 1..].to_string())
         }
+        _ if !require_pin => (rest, String::new()),
         _ => bail!(
             "git module `{display}` must be pinned — append `@<tag>` or `@<full-commit-sha>` \
              (branches are not accepted)"
@@ -301,6 +318,33 @@ pub fn remote_tag_sha(url: &str, tag: &str) -> Result<Option<String>> {
     Ok(peeled.or(plain))
 }
 
+/// The highest version-looking tag on the remote (`v1.2.3` / `1.2.3` shapes;
+/// anything with a suffix — rc, beta — is skipped). `Ok(None)` = no such tag.
+pub fn latest_version_tag(url: &str) -> Result<Option<String>> {
+    let ls = git(&["ls-remote", "--tags", "--refs", url], None)
+        .with_context(|| format!("listing tags of {url}"))?;
+    let tags = ls.lines().filter_map(|line| {
+        let (_sha, r) = line.split_once('\t')?;
+        Some(r.strip_prefix("refs/tags/")?.to_string())
+    });
+    Ok(pick_latest_version(tags))
+}
+
+fn pick_latest_version(tags: impl Iterator<Item = String>) -> Option<String> {
+    tags.filter_map(|tag| Some((version_key(&tag)?, tag)))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, tag)| tag)
+}
+
+/// `v1.2.3` / `1.2.3` → a comparable component vector; anything else → None.
+fn version_key(tag: &str) -> Option<Vec<u64>> {
+    let digits = tag.strip_prefix('v').unwrap_or(tag);
+    digits
+        .split('.')
+        .map(|seg| seg.parse::<u64>().ok())
+        .collect()
+}
+
 fn is_full_sha(rev: &str) -> bool {
     rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -383,6 +427,33 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("without `..`"), "got: {err}");
+    }
+
+    #[test]
+    fn lenient_parse_allows_missing_pin() {
+        let Source::Git(g) = parse_source_lenient("github.com/org/repo//sub").unwrap() else {
+            panic!()
+        };
+        assert_eq!(g.url, "https://github.com/org/repo");
+        assert_eq!(g.subpath.as_deref(), Some("sub"));
+        assert_eq!(g.rev, "");
+        // ssh URLs contain `@` — that must not be mistaken for a pin
+        let Source::Git(g) = parse_source_lenient("git::ssh://git@corp/ops.git").unwrap() else {
+            panic!()
+        };
+        assert_eq!(g.url, "ssh://git@corp/ops.git");
+        assert_eq!(g.rev, "");
+    }
+
+    #[test]
+    fn picks_highest_version_tag() {
+        let tags = ["v1.2.0", "v1.10.0", "0.9", "beta", "v2.0.0-rc1", "list"]
+            .into_iter()
+            .map(String::from);
+        assert_eq!(pick_latest_version(tags).as_deref(), Some("v1.10.0"));
+        assert_eq!(pick_latest_version(std::iter::empty()), None);
+        let plain = ["2", "v1.9.9"].into_iter().map(String::from);
+        assert_eq!(pick_latest_version(plain).as_deref(), Some("2"));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod add;
 mod compile;
 mod discovery;
 mod exec;
@@ -42,6 +43,13 @@ fn run() -> Result<i32> {
     if args.first().map(String::as_str) == Some("update") {
         let requested = args.get(1).filter(|a| !a.starts_with('-'));
         return selfupdate::run(requested.map(String::as_str));
+    }
+    // `includes add` is intercepted too: with `--user` it must work even
+    // where no manifest exists yet (it can create the user manifest).
+    if args.first().map(String::as_str) == Some("includes")
+        && args.get(1).map(String::as_str) == Some("add")
+    {
+        return add::run_cli(&args[2..]);
     }
 
     let (loaded, scope) = match discovery::find_manifest() {
@@ -107,7 +115,7 @@ fn run() -> Result<i32> {
         Some(("includes", sub)) => match sub.subcommand() {
             Some(("verify", _)) => verify::run(&resolved),
             _ => {
-                eprintln!("usage: pult includes verify");
+                eprintln!("usage: pult includes <verify | add <SOURCE> [--prefix P] [--user]>");
                 Ok(2)
             }
         },
@@ -147,9 +155,10 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
         .disable_help_subcommand(true)
         .after_help(
             "pult itself:\n  \
-               pult update [VERSION]   self-update to the latest (or given) release\n  \
-               pult includes verify    check every pin still resolves and no tag moved\n  \
-               pult --list [--json]    what this manifest declares (--json for tooling)\n\n\
+               pult update [VERSION]        self-update to the latest (or given) release\n  \
+               pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
+               pult includes verify         check every pin still resolves and no tag moved\n  \
+               pult --list [--json]         what this manifest declares (--json for tooling)\n\n\
              Run bare `pult` for the guided flow.",
         )
         .arg(
@@ -188,6 +197,12 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 .subcommand(
                     clap::Command::new("verify")
                         .about("Check every include still resolves and no git tag has moved"),
+                )
+                // `includes add` is intercepted before clap runs (main.rs);
+                // registered here so `pult includes --help` stays truthful.
+                .subcommand(
+                    clap::Command::new("add")
+                        .about("Pin a module source and add it to a manifest's includes"),
                 ),
         )
         // `update` is intercepted before clap runs so it also works with no

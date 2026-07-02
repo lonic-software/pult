@@ -150,6 +150,20 @@ sha. Branch names are rejected. `sha256:` mismatches are hard errors.
 Merge order: includes in declared order, then local. Duplicate command/param/
 step names across the merged whole are errors (disambiguate with `prefix:`).
 
+### `pult includes add`
+
+`pult includes add <SOURCE> [--prefix P] [--user]` appends an include without
+hand-editing yaml. A git source without a pin resolves to the remote's highest
+version-shaped tag (`v1.2.3` / `1.2.3`; suffixed tags like `-rc1` are ignored)
+— the written include is always pinned. It fetches the module, prints the
+commands it brings, prompts for any **required vars** (interactively only),
+asks for confirmation on a TTY, and edits the manifest **textually** so
+comments and formatting survive. After writing it re-resolves the manifest and
+**rolls back** on any error (collisions, invalid module), so a broken manifest
+is never left behind. A source already included (same base, any pin) is
+refused. Default target is the nearest manifest; `--user` targets the user
+manifest and creates it if missing.
+
 ## Trust model
 
 Trust-on-first-use over the **resolved whole**: the stored hash covers the
@@ -186,6 +200,8 @@ pult --list                   commands, params, and origins
 pult --list --json            the same, machine-readable (schema below)
 pult <command> --print        print the composed script instead of running
 pult --trust …                trust this manifest without prompting (records immediately)
+pult includes add <SOURCE>    pin a module and append it to a manifest's includes
+     [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
 pult update [VERSION]         self-update to the latest (or given) release; needs no manifest
 pult --version / -V           engine version
