@@ -1,6 +1,6 @@
 [package]
 name = "pult"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "pult — manifest-driven launcher for your repo's operational commands"
 license = "MIT"
