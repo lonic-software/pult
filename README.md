@@ -87,7 +87,10 @@ pult greet hello     # direct; missing params are prompted for
 ## The manifest
 
 Starting from zero? **`pult init`** drops a commented starter manifest in the
-current directory (`--user` for your personal one) that runs immediately.
+current directory (`--user` for your personal one) that runs immediately — and
+includes a JSON Schema modeline, so an editor with the YAML language server
+gives you completion and inline validation as you author. (`pult self schema`
+prints the schema for CI or offline use.)
 
 `pult` discovers the nearest `pult.yaml` walking up from the current directory
 (the way eslint/vite find their config). Commands run with the manifest's

@@ -23,6 +23,7 @@ pub struct Loaded {
 /// One file's worth of schema — serves both root manifests and included
 /// modules; the resolver enforces which fields are legal in which role.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// Checked via `VersionProbe` before full parsing; kept so the schema is
@@ -40,6 +41,7 @@ pub struct Manifest {
     pub includes: Vec<IncludeDef>,
     /// Reserved for Phase C — rejected with a clear message if present.
     #[serde(default)]
+    #[cfg_attr(test, schemars(with = "Option<serde_json::Value>"))]
     pub registries: Option<serde_yaml::Value>,
     /// Modules only: variables the include site binds.
     #[serde(default)]
@@ -55,6 +57,7 @@ pub struct Manifest {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct IncludeDef {
     pub source: String,
@@ -67,6 +70,7 @@ pub struct IncludeDef {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct VarDef {
     #[serde(default)]
@@ -79,6 +83,7 @@ pub struct VarDef {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CommandDef {
     pub id: String,
@@ -91,6 +96,7 @@ pub struct CommandDef {
 /// A param is a picker, free input, or a reference to a named param; exactly
 /// one of the three must be set (validated at load, so `kind()` is infallible).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ParamDef {
     #[serde(default)]
@@ -119,6 +125,7 @@ impl ParamDef {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PickDef {
     /// Static option list.
@@ -131,6 +138,7 @@ pub struct PickDef {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct InputDef {
     #[serde(default)]
@@ -139,6 +147,7 @@ pub struct InputDef {
 
 /// A step: a plain script string, or a script with a declared contract.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum StepDef {
     Plain(String),
@@ -146,6 +155,7 @@ pub enum StepDef {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FullStep {
     pub script: String,
@@ -173,6 +183,7 @@ impl StepDef {
 /// `run:` is a single command line (executed via `sh -c`, exactly the original
 /// behavior) or a step list compiled into one bash script (see compile.rs).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum RunSpec {
     Script(String),
@@ -180,6 +191,7 @@ pub enum RunSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum RunEntry {
     Inline(String),
@@ -188,6 +200,7 @@ pub enum RunEntry {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UseRef {
     #[serde(rename = "use")]
@@ -202,12 +215,14 @@ pub struct UseRef {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PipeGroup {
     pub pipe: Vec<PipeEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum PipeEntry {
     Inline(String),
@@ -216,6 +231,7 @@ pub enum PipeEntry {
 
 /// A step in a pipe contributes stdout only, so no `exports:` here.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PipeUseRef {
     #[serde(rename = "use")]
@@ -366,10 +382,45 @@ fn validate_step(name: &str, step: &StepDef) -> Result<()> {
     Ok(())
 }
 
+/// The manifest JSON Schema, pretty-printed with a trailing newline. Derived
+/// from the structs above (test-only), so it can't drift from what pult
+/// actually parses. The committed `pult.schema.json` — served by
+/// `pult self schema` and referenced by `pult init`'s modeline — must equal
+/// this; the drift test enforces it, the (ignored) regen test rewrites it.
+#[cfg(test)]
+fn generated_schema() -> String {
+    let schema = schemars::schema_for!(Manifest);
+    let mut s = serde_json::to_string_pretty(&schema).expect("schema serializes");
+    s.push('\n');
+    s
+}
+
+#[cfg(test)]
+const SCHEMA_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/pult.schema.json");
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn committed_schema_is_current() {
+        let committed = std::fs::read_to_string(SCHEMA_PATH).unwrap_or_default();
+        assert_eq!(
+            committed,
+            generated_schema(),
+            "pult.schema.json is stale — regenerate: \
+             `cargo test regenerate_schema -- --ignored`"
+        );
+    }
+
+    /// Not a test — the writer for the committed schema. Run explicitly after
+    /// changing the manifest structs: `cargo test regenerate_schema -- --ignored`.
+    #[test]
+    #[ignore = "writer, not a check"]
+    fn regenerate_schema() {
+        std::fs::write(SCHEMA_PATH, generated_schema()).unwrap();
+    }
 
     fn write_manifest(content: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();

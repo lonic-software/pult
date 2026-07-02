@@ -11,8 +11,11 @@ script or program and have the yaml call it — never grow logic into the yaml.
 
 ## 1 · Your first command
 
-`pult init` scaffolds a starter manifest; this is what it looks like filled
-in — a `pult.yaml` at the repo root:
+`pult init` scaffolds a starter manifest — and writes a schema modeline into
+it, so an editor with the YAML language server gives you completion, typo
+flagging, and hover docs as you type (see
+[reference.md](reference.md#editor-support-json-schema)). This is what a
+filled-in `pult.yaml` at the repo root looks like:
 
 ```yaml
 version: 1            # required — lets future engines fail with "upgrade pult"

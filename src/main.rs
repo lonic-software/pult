@@ -37,6 +37,24 @@ fn main() {
     }
 }
 
+/// Authoring guide, pinned to this binary's version so the docs an author
+/// reads match the pult they have.
+pub(crate) fn docs_url() -> String {
+    format!(
+        "https://github.com/lonic-software/pult/blob/v{}/docs/authoring.md",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// The manifest JSON Schema for this version — what `pult init` points the
+/// editor modeline at. Version-pinned so the schema matches the binary.
+pub(crate) fn schema_url() -> String {
+    format!(
+        "https://raw.githubusercontent.com/lonic-software/pult/v{}/pult.schema.json",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 fn run() -> Result<i32> {
     // `pult update` needs no manifest (the id is reserved, so no manifest
     // command can ever claim it) — handle it before discovery.
@@ -55,6 +73,20 @@ fn run() -> Result<i32> {
     // As is `init` — its whole point is running where no manifest exists.
     if args.first().map(String::as_str) == Some("init") {
         return init::run_cli(&args[1..]);
+    }
+    // `pult self schema` prints the manifest JSON Schema (compiled in, so it
+    // always matches this binary and works offline). No manifest needed.
+    if args.first().map(String::as_str) == Some("self") {
+        return match args.get(1).map(String::as_str) {
+            Some("schema") => {
+                print!("{}", include_str!("../pult.schema.json"));
+                Ok(0)
+            }
+            _ => {
+                eprintln!("usage: pult self schema");
+                Ok(2)
+            }
+        };
     }
 
     let (loaded, scope) = match discovery::find_manifest() {
@@ -75,7 +107,9 @@ fn run() -> Result<i32> {
                      Bare `pult` opens the guided flow; `pult <command> [values…]`\n\
                      runs directly. `pult update` updates pult itself.\n\n\
                      No manifest was found (current directory upward, then the user\n\
-                     manifest)."
+                     manifest).\n\n\
+                     Authoring guide: {}",
+                    docs_url()
                 );
                 return Ok(0);
             }
@@ -159,15 +193,17 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
         .version(env!("CARGO_PKG_VERSION"))
         .about(format!("{} · {source}", resolved.name))
         .disable_help_subcommand(true)
-        .after_help(
+        .after_help(format!(
             "pult itself:\n  \
                pult update [VERSION]        self-update to the latest (or given) release\n  \
                pult init [--user]           scaffold a starter manifest\n  \
                pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
                pult includes verify         check every pin still resolves and no tag moved\n  \
+               pult self schema             print the manifest JSON Schema (editors/CI)\n  \
                pult --list [--json]         what this manifest declares (--json for tooling)\n\n\
-             Run bare `pult` for the guided flow.",
-        )
+             Run bare `pult` for the guided flow.  Authoring guide: {}",
+            docs_url()
+        ))
         .arg(
             Arg::new("list")
                 .long("list")

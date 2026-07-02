@@ -1,0 +1,359 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Manifest",
+  "description": "One file's worth of schema — serves both root manifests and included modules; the resolver enforces which fields are legal in which role.",
+  "type": "object",
+  "required": [
+    "version"
+  ],
+  "properties": {
+    "commands": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/CommandDef"
+      }
+    },
+    "description": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "includes": {
+      "description": "Root manifests only. Local `./path` sources in Phase A.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/IncludeDef"
+      }
+    },
+    "name": {
+      "description": "Display name shown in the guided flow header; defaults to the directory name.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "params": {
+      "description": "Named, reusable param definitions (referenced via `use:`).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/ParamDef"
+      }
+    },
+    "registries": {
+      "description": "Reserved for Phase C — rejected with a clear message if present.",
+      "default": null
+    },
+    "steps": {
+      "description": "Named, reusable script fragments (referenced via `use:` in run lists).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/StepDef"
+      }
+    },
+    "vars": {
+      "description": "Modules only: variables the include site binds.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/VarDef"
+      }
+    },
+    "version": {
+      "description": "Checked via `VersionProbe` before full parsing; kept so the schema is complete and future versions can branch on it.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "CommandDef": {
+      "type": "object",
+      "required": [
+        "id",
+        "run",
+        "title"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/ParamDef"
+          }
+        },
+        "run": {
+          "$ref": "#/definitions/RunSpec"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "FullStep": {
+      "type": "object",
+      "required": [
+        "script"
+      ],
+      "properties": {
+        "outputs": {
+          "description": "Shell variable names this step promises to set.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "script": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IncludeDef": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "prefix": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "vars": {
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "InputDef": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ParamDef": {
+      "description": "A param is a picker, free input, or a reference to a named param; exactly one of the three must be set (validated at load, so `kind()` is infallible).",
+      "type": "object",
+      "properties": {
+        "input": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InputDef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pick": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PickDef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "use": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PickDef": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "Shell command whose stdout lines become the options. May interpolate `{param}` for params declared *earlier* in the same command.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "options": {
+          "description": "Static option list.",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PipeEntry": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/PipeUseRef"
+        }
+      ]
+    },
+    "PipeGroup": {
+      "type": "object",
+      "required": [
+        "pipe"
+      ],
+      "properties": {
+        "pipe": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PipeEntry"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PipeUseRef": {
+      "description": "A step in a pipe contributes stdout only, so no `exports:` here.",
+      "type": "object",
+      "required": [
+        "use"
+      ],
+      "properties": {
+        "use": {
+          "type": "string"
+        },
+        "with": {
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RunEntry": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/UseRef"
+        },
+        {
+          "$ref": "#/definitions/PipeGroup"
+        }
+      ]
+    },
+    "RunSpec": {
+      "description": "`run:` is a single command line (executed via `sh -c`, exactly the original behavior) or a step list compiled into one bash script (see compile.rs).",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RunEntry"
+          }
+        }
+      ]
+    },
+    "StepDef": {
+      "description": "A step: a plain script string, or a script with a declared contract.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/FullStep"
+        }
+      ]
+    },
+    "UseRef": {
+      "type": "object",
+      "required": [
+        "use"
+      ],
+      "properties": {
+        "exports": {
+          "description": "Rename the step's declared outputs: `{ TASK: BACKEND_TASK }`.",
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "use": {
+          "type": "string"
+        },
+        "with": {
+          "description": "Rebind the step's `{placeholder}` names (values may reference this command's params).",
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "VarDef": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

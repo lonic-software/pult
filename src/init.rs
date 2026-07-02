@@ -49,6 +49,8 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
         );
     }
     println!("   next: `pult` for the guided flow, `pult --list`, then edit away");
+    println!("   tip: the file has a schema modeline — open it in an editor with the");
+    println!("        YAML extension for completion and inline validation as you type");
     Ok(0)
 }
 
@@ -72,8 +74,14 @@ pub fn init_at(target: &Path, name: &str) -> Result<()> {
 }
 
 fn template(name: &str) -> String {
+    // The modeline gives editors running the YAML language server (VS Code's
+    // Red Hat extension, yaml-language-server anywhere) live completion,
+    // typo-flagging, and hover docs on this file. Both URLs are version-pinned
+    // so they match this binary.
     format!(
-        r#"version: 1
+        r#"# yaml-language-server: $schema={schema}
+# pult manifest — authoring guide: {docs}
+version: 1
 name: {name}
 
 commands:
@@ -99,7 +107,10 @@ commands:
 # includes:
 #   - source: github.com/org/ops-modules//aws@v1.0.0
 #     prefix: aws
-"#
+"#,
+        schema = crate::schema_url(),
+        docs = crate::docs_url(),
+        name = name,
     )
 }
 

@@ -204,6 +204,7 @@ pult includes add <SOURCE>    pin a module and append it to a manifest's include
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
 pult init [--user]            scaffold a starter manifest here (or your user manifest)
+pult self schema              print the manifest JSON Schema (draft-07) to stdout
 pult update [VERSION]         self-update to the latest (or given) release; needs no manifest
 pult --version / -V           engine version
 ```
@@ -285,6 +286,24 @@ Field notes:
 | `PULT_USER_MANIFEST` | alternate user-manifest path (default: `~/.config/pult/pult.yaml`) |
 | `PULT_REPO` | GitHub repo slug `pult update` fetches from |
 | `PULT_BASE_URL` | asset base URL for `pult update` (mirrors / air-gapped; bypasses GitHub) |
+
+## Editor support (JSON Schema)
+
+pult ships a JSON Schema for the manifest (`pult.schema.json`, draft-07,
+generated from the parser's own types so it can't drift). Any editor running
+the YAML language server (VS Code's Red Hat YAML extension, `yaml-language-server`
+in Neovim/others) uses it for completion, inline validation, and hover docs.
+
+`pult init` writes the modeline for you; to add it to an existing manifest,
+put this first line in the file (version-pinned to match your binary):
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/lonic-software/pult/vX.Y.Z/pult.schema.json
+```
+
+Offline or in CI, `pult self schema` prints the compiled-in schema (it always
+matches the running binary) — pipe it to a file and point the modeline at a
+local path, or validate manifests in CI with any JSON-Schema validator.
 
 ## Requirements
 

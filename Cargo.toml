@@ -19,3 +19,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+# Test-only: derives the JSON Schema from the manifest structs so the
+# committed pult.schema.json can't drift. Not in the shipped binary — the
+# schema is compiled in via include_str! (see `pult self schema`).
+schemars = { version = "0.8", features = ["indexmap2"] }
