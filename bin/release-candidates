@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Option source for the release version picker: next patch / minor / major,
+# computed from the latest v* tag. First line is the picker default.
+set -euo pipefail
+
+# Best effort — the picker should work offline; bin/release re-fetches and
+# hard-fails on anything stale before touching the repo.
+git fetch --tags --quiet 2>/dev/null || true
+
+latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+latest=${latest#v}
+: "${latest:=0.0.0}"
+
+IFS=. read -r major minor patch <<<"$latest"
+echo "$major.$minor.$((patch + 1))"
+echo "$major.$((minor + 1)).0"
+echo "$((major + 1)).0.0"

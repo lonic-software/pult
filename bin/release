@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Cut a release: preflight → CI checks → bump Cargo.toml → commit → tag → push.
+# Pushing the v* tag triggers .github/workflows/release.yml, which builds all
+# five targets and publishes the GitHub release with checksums.
+#
+# usage: release <version> [--dry-run]
+#   <version>   x.y.z (a leading v is tolerated)
+#   --dry-run   run every check, then stop before modifying anything
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+version=${1:?usage: release <version> [--dry-run]}
+version=${version#v}
+dry_run=${2:-}
+
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+  { echo "release: '$version' is not x.y.z" >&2; exit 1; }
+
+echo "── preflight"
+[ -z "$(git status --porcelain)" ] ||
+  { echo "release: working tree not clean" >&2; exit 1; }
+[ "$(git rev-parse --abbrev-ref HEAD)" = main ] ||
+  { echo "release: not on main" >&2; exit 1; }
+git fetch --tags origin main
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] ||
+  { echo "release: main is not in sync with origin/main" >&2; exit 1; }
+! git rev-parse --verify --quiet "refs/tags/v$version" >/dev/null ||
+  { echo "release: tag v$version already exists" >&2; exit 1; }
+
+./bin/check
+
+if [ "$dry_run" = "--dry-run" ]; then
+  echo "release: dry run — would have released v$version"
+  exit 0
+fi
+
+echo "── bump to $version"
+V="$version" perl -pi -e '
+  s/^version = ".*"$/version = "$ENV{V}"/ and $n++;
+  END { $n == 1 or die "expected exactly one version line in Cargo.toml\n" }
+' Cargo.toml
+cargo check --quiet   # refresh Cargo.lock's own version entry
+git --no-pager diff --stat
+
+echo "── commit, tag, push"
+git add Cargo.toml Cargo.lock
+git commit -m "release v$version"
+git tag "v$version"
+git push origin main "v$version"
+
+echo
+echo "release: v$version pushed — CI is building:"
+echo "  https://github.com/lonic-software/pult/actions"
+echo "when it finishes: pult update"

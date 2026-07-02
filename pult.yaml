@@ -1,0 +1,18 @@
+version: 1
+name: pult
+
+commands:
+  - id: release
+    title: Cut a release (bump → tag → push; CI builds and publishes)
+    params:
+      # next patch / minor / major from the latest v* tag; patch is the default
+      version: { pick: { from: "./bin/release-candidates" } }
+    run: "./bin/release {version}"
+
+  - id: check
+    title: Run exactly what CI runs (fmt, clippy, tests)
+    run: "./bin/check"
+
+  - id: install
+    title: Build this checkout and install it as your pult
+    run: "cargo install --path . --locked"
