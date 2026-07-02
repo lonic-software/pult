@@ -22,8 +22,12 @@ pub struct Resolved {
     pub name: String,
     /// Root manifest path (trust identity).
     pub path: PathBuf,
-    /// Root manifest directory; all commands run with this as cwd.
+    /// Root manifest directory — the base local includes resolve against.
     pub dir: PathBuf,
+    /// Where commands and option sources run. Defaults to `dir`; user-scoped
+    /// manifests override it to the invocation directory (personal commands
+    /// act on wherever you are, not on ~/.config/pult).
+    pub run_dir: PathBuf,
     /// Hash over the root + every resolved include — the trust unit.
     pub trust_hash: String,
     /// One line per include, for the trust prompt.
@@ -185,6 +189,7 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
     Ok(Resolved {
         name,
         path,
+        run_dir: dir.clone(),
         dir,
         trust_hash,
         include_summary,

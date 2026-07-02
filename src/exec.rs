@@ -45,7 +45,7 @@ pub fn execute(
             }
             (Some(v), ParamKind::Input(_)) => v.clone(),
             (None, ParamKind::Pick(pick)) => {
-                let opts = options::resolve_pick(pick, &values, &resolved.dir)?;
+                let opts = options::resolve_pick(pick, &values, &resolved.run_dir)?;
                 prompt::select(&format!("{name}?"), opts)?
             }
             (None, ParamKind::Input(input)) => {
@@ -63,7 +63,7 @@ pub fn execute(
                 println!("{cmdline}");
                 return Ok(0);
             }
-            runner::run_sh(&cmdline, &resolved.dir)
+            runner::run_sh(&cmdline, &resolved.run_dir)
         }
         ResolvedRun::Steps(_) => {
             let script = compile::compile(cmd, &values)?;
@@ -71,7 +71,7 @@ pub fn execute(
                 println!("{script}");
                 return Ok(0);
             }
-            runner::run_bash(&script, &cmd.id, &resolved.dir)
+            runner::run_bash(&script, &cmd.id, &resolved.run_dir)
         }
     }
 }

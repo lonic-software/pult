@@ -7,8 +7,16 @@ Complete schema, CLI, and behavior reference. Narrative introductions:
 ## Manifest discovery
 
 `pult` searches for `pult.yaml`, then `pult.yml`, in the current directory and
-each ancestor, nearest wins. All commands and option sources run with the
-manifest's directory as cwd.
+each ancestor, nearest wins (**repo scope**). If nothing is found all the way
+up, it falls back to the **user manifest**: `$PULT_USER_MANIFEST`, or
+`~/.config/pult/pult.{yaml,yml}` (**user scope**). A repo manifest always
+wins; user commands are never merged into a repo's namespace.
+
+The scopes differ in one deliberate way — the working directory of commands
+and option sources. Repo scope runs them at the manifest's directory; user
+scope runs them at the *invocation* directory (personal commands act on
+wherever you are). In both scopes, local `includes:` resolve relative to the
+manifest, and trust is per manifest path as usual.
 
 ## Manifest schema
 
@@ -196,6 +204,8 @@ keep their meaning), breaking changes bump `schema`.
   "name": "demo",
   "manifest": "/repo/pult.yaml",
   "dir": "/repo",
+  "run_dir": "/repo",
+  "scope": "repo",
   "trusted": false,
   "includes": [
     { "source": "./tools", "kind": "local" },
@@ -221,6 +231,9 @@ keep their meaning), breaking changes bump `schema`.
 
 Field notes:
 
+- `scope` — `"repo"` or `"user"` (see Manifest discovery); `dir` is the
+  manifest's directory (the include base), `run_dir` is where commands and
+  option sources execute — they differ only in user scope.
 - `trusted` — whether this manifest is trusted **at its current resolved
   hash**. `false` means invoking a command will prompt interactively (or be
   refused non-interactively without `--trust`) — tooling should surface that
@@ -252,6 +265,7 @@ Field notes:
 |---|---|
 | `PULT_TRUST_STORE` | alternate trust-store path |
 | `PULT_CACHE_DIR` | alternate module cache root |
+| `PULT_USER_MANIFEST` | alternate user-manifest path (default: `~/.config/pult/pult.yaml`) |
 | `PULT_REPO` | GitHub repo slug `pult update` fetches from |
 | `PULT_BASE_URL` | asset base URL for `pult update` (mirrors / air-gapped; bypasses GitHub) |
 

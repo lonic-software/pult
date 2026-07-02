@@ -61,6 +61,23 @@ pult deploy --print            # show the exact script it would run, don't run i
 - Interactive things (shells into containers, tunnels) just work — `pult` runs
   commands with your terminal attached.
 
+## Your personal launcher
+
+When you run `pult` somewhere with no repo manifest anywhere up the tree, it
+falls back to your **user manifest** at `~/.config/pult/pult.yaml` (override
+with `PULT_USER_MANIFEST`). Same format, same trust prompt, same everything —
+it's your personal toolbox for commands that don't belong to any repo: VPN
+up/down, docker cleanup, cloud session helpers, the things that otherwise live
+as shell aliases. Two differences worth knowing:
+
+- Personal commands run in your **current directory** (repo commands run at
+  the manifest's directory).
+- A repo manifest **always wins** — inside a repo you see the repo's commands
+  only, so nothing personal ever shadows or leaks into a repo's namespace.
+
+Your user manifest can `include:` pinned git modules like any other, so a
+shared personal-tooling module travels the same way repo modules do.
+
 ## The trust prompt
 
 A `pult.yaml` is a list of things to *execute*, so the first time you run
@@ -119,13 +136,15 @@ already have (ssh keys, credential helpers) — there is nothing to log into.
 |---|---|
 | `PULT_TRUST_STORE` | alternate trust-store file (default: `<config>/pult/trust.json`) |
 | `PULT_CACHE_DIR` | alternate module cache (default: `<cache>/pult/modules`) |
+| `PULT_USER_MANIFEST` | alternate user manifest (default: `~/.config/pult/pult.yaml`) |
 
 ## Troubleshooting
 
 - **"manifest … is not trusted"** in a script/CI → run interactively once, or
   pass `--trust`.
-- **"no pult.yaml found"** → you're not inside a repo that has one (it searches
-  upward from the current directory).
+- **"no pult.yaml found"** → you're not inside a repo that has one (it
+  searches upward from the current directory), and you have no user manifest
+  at `~/.config/pult/pult.yaml` to fall back to.
 - **A picker shows no options / errors** → the option source is a shell
   command defined in the manifest; the error includes its stderr. Often an
   expired cloud session — refresh it and retry.

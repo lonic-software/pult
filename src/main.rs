@@ -15,9 +15,10 @@ mod verify;
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Arg, ArgAction};
 
+use discovery::Scope;
 use manifest::ParamKind;
 use resolver::{PinInfo, Resolved};
 
@@ -43,8 +44,8 @@ fn run() -> Result<i32> {
         return selfupdate::run(requested.map(String::as_str));
     }
 
-    let loaded = match discovery::find_manifest() {
-        Ok(loaded) => loaded,
+    let (loaded, scope) = match discovery::find_manifest() {
+        Ok(found) => found,
         Err(e) => {
             // --version / --help should still work with no manifest around.
             let args: Vec<String> = std::env::args().skip(1).collect();
@@ -55,19 +56,26 @@ fn run() -> Result<i32> {
             if args.iter().any(|a| a == "-h" || a == "--help") {
                 println!(
                     "pult — manifest-driven ops launcher\n\n\
-                     Run inside a repo containing a pult.yaml. Bare `pult` opens the\n\
-                     guided flow; `pult <command> [values…]` runs directly.\n\
+                     Run inside a repo containing a pult.yaml, or create a personal\n\
+                     one at ~/.config/pult/pult.yaml. Bare `pult` opens the guided\n\
+                     flow; `pult <command> [values…]` runs directly.\n\
                      `pult update` updates pult itself to the latest release.\n\n\
-                     No pult.yaml was found from the current directory upward."
+                     No manifest was found (current directory upward, then the user\n\
+                     manifest)."
                 );
                 return Ok(0);
             }
             return Err(e);
         }
     };
-    let resolved = resolver::resolve(loaded)?;
+    let mut resolved = resolver::resolve(loaded)?;
+    if scope == Scope::User {
+        // Personal commands act on wherever you are; the manifest dir
+        // (~/.config/pult) stays the base for the manifest's own includes.
+        resolved.run_dir = std::env::current_dir().context("failed to read current directory")?;
+    }
 
-    let matches = build_cli(&resolved).get_matches();
+    let matches = build_cli(&resolved, scope).get_matches();
     let assume_trusted = matches.get_flag("trust");
     let print = matches.get_flag("print");
 
@@ -87,7 +95,7 @@ fn run() -> Result<i32> {
             let trusted = trust::is_trusted(&resolved.path, &resolved.trust_hash)?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&list_json(&resolved, trusted))?
+                serde_json::to_string_pretty(&list_json(&resolved, trusted, scope))?
             );
         } else {
             print_list(&resolved);
@@ -124,15 +132,26 @@ fn run() -> Result<i32> {
 /// Build the CLI dynamically from the resolved manifest: every command becomes
 /// a subcommand, every param a positional arg (optional — missing ones are
 /// prompted for, so partial invocations degrade into a shorter guided flow).
-fn build_cli(resolved: &Resolved) -> clap::Command {
+///
+/// Help keeps the two surfaces apart: the subcommand list is purely what the
+/// manifest declares (the product); pult's own subcommands are hidden from it
+/// and documented in a separate section below.
+fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
+    let source = match scope {
+        Scope::Repo => format!("commands from {}", resolved.path.display()),
+        Scope::User => format!("your user manifest · {}", resolved.path.display()),
+    };
     let mut cli = clap::Command::new("pult")
         .version(env!("CARGO_PKG_VERSION"))
-        .about(format!(
-            "{} · commands from {}",
-            resolved.name,
-            resolved.path.display()
-        ))
-        .after_help("Run bare `pult` for the guided flow.")
+        .about(format!("{} · {source}", resolved.name))
+        .disable_help_subcommand(true)
+        .after_help(
+            "pult itself:\n  \
+               pult update [VERSION]   self-update to the latest (or given) release\n  \
+               pult includes verify    check every pin still resolves and no tag moved\n  \
+               pult --list [--json]    what this manifest declares (--json for tooling)\n\n\
+             Run bare `pult` for the guided flow.",
+        )
         .arg(
             Arg::new("list")
                 .long("list")
@@ -160,18 +179,22 @@ fn build_cli(resolved: &Resolved) -> clap::Command {
                 .action(ArgAction::SetTrue)
                 .help("Print the composed script instead of running it"),
         )
+        // Engine subcommands are hidden from the Commands list (that list is
+        // the manifest's surface) and documented in after_help instead.
         .subcommand(
             clap::Command::new("includes")
+                .hide(true)
                 .about("Include maintenance (the id `includes` is reserved)")
                 .subcommand(
                     clap::Command::new("verify")
                         .about("Check every include still resolves and no git tag has moved"),
                 ),
         )
-        // Listed for help only — `update` is intercepted before clap runs so
-        // it also works with no manifest around.
+        // `update` is intercepted before clap runs so it also works with no
+        // manifest around; registered so `pult update --help` still resolves.
         .subcommand(
             clap::Command::new("update")
+                .hide(true)
                 .about("Update pult itself to the latest release (or a given version)")
                 .arg(Arg::new("version").required(false).value_name("VERSION")),
         );
@@ -202,7 +225,7 @@ fn build_cli(resolved: &Resolved) -> clap::Command {
 /// agents and tooling. Schema 1; changes are additive only, breaking changes
 /// bump `schema`. `trusted` is passed in so this stays a pure function of the
 /// resolved manifest (the caller consults the trust store).
-fn list_json(resolved: &Resolved, trusted: bool) -> serde_json::Value {
+fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Value {
     use serde_json::json;
     let includes: Vec<_> = resolved
         .pins
@@ -267,6 +290,8 @@ fn list_json(resolved: &Resolved, trusted: bool) -> serde_json::Value {
         "name": resolved.name,
         "manifest": resolved.path,
         "dir": resolved.dir,
+        "run_dir": resolved.run_dir,
+        "scope": match scope { Scope::Repo => "repo", Scope::User => "user" },
         "trusted": trusted,
         "includes": includes,
         "commands": commands,
@@ -325,11 +350,13 @@ commands:
         .unwrap();
         let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
         let resolved = resolver::resolve(loaded).unwrap();
-        let doc = list_json(&resolved, false);
+        let doc = list_json(&resolved, false, Scope::Repo);
 
         assert_eq!(doc["schema"], 1);
         assert_eq!(doc["name"], "demo");
+        assert_eq!(doc["scope"], "repo");
         assert_eq!(doc["trusted"], false);
+        assert_eq!(doc["run_dir"], doc["dir"]);
         let cmd = &doc["commands"][0];
         assert_eq!(cmd["id"], "shell");
         assert_eq!(cmd["origin"], serde_json::Value::Null);

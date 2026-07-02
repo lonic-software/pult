@@ -88,7 +88,11 @@ pult greet hello     # direct; missing params are prompted for
 
 `pult` discovers the nearest `pult.yaml` walking up from the current directory
 (the way eslint/vite find their config). Commands run with the manifest's
-directory as cwd.
+directory as cwd. When no repo manifest exists anywhere up the tree, `pult`
+falls back to your **user manifest** (`~/.config/pult/pult.yaml`) — the same
+format, your personal toolbox, available wherever a repo isn't. User-scoped
+commands run in your invocation directory instead; a repo manifest always
+wins, so nothing personal ever shadows a repo's commands.
 
 ```yaml
 version: 1            # required; newer versions fail with "upgrade pult"
