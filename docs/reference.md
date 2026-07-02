@@ -203,6 +203,7 @@ pult --trust …                trust this manifest without prompting (records i
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
+pult init [--user]            scaffold a starter manifest here (or your user manifest)
 pult update [VERSION]         self-update to the latest (or given) release; needs no manifest
 pult --version / -V           engine version
 ```

@@ -11,7 +11,8 @@ script or program and have the yaml call it — never grow logic into the yaml.
 
 ## 1 · Your first command
 
-Drop a `pult.yaml` at the repo root:
+`pult init` scaffolds a starter manifest; this is what it looks like filled
+in — a `pult.yaml` at the repo root:
 
 ```yaml
 version: 1            # required — lets future engines fail with "upgrade pult"

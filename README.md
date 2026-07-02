@@ -86,6 +86,9 @@ pult greet hello     # direct; missing params are prompted for
 
 ## The manifest
 
+Starting from zero? **`pult init`** drops a commented starter manifest in the
+current directory (`--user` for your personal one) that runs immediately.
+
 `pult` discovers the nearest `pult.yaml` walking up from the current directory
 (the way eslint/vite find their config). Commands run with the manifest's
 directory as cwd. When no repo manifest exists anywhere up the tree, `pult`

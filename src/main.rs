@@ -4,6 +4,7 @@ mod discovery;
 mod exec;
 mod fetch;
 mod flow;
+mod init;
 mod interp;
 mod manifest;
 mod options;
@@ -51,6 +52,10 @@ fn run() -> Result<i32> {
     {
         return add::run_cli(&args[2..]);
     }
+    // As is `init` — its whole point is running where no manifest exists.
+    if args.first().map(String::as_str) == Some("init") {
+        return init::run_cli(&args[1..]);
+    }
 
     let (loaded, scope) = match discovery::find_manifest() {
         Ok(found) => found,
@@ -64,10 +69,11 @@ fn run() -> Result<i32> {
             if args.iter().any(|a| a == "-h" || a == "--help") {
                 println!(
                     "pult — manifest-driven ops launcher\n\n\
-                     Run inside a repo containing a pult.yaml, or create a personal\n\
-                     one at ~/.config/pult/pult.yaml. Bare `pult` opens the guided\n\
-                     flow; `pult <command> [values…]` runs directly.\n\
-                     `pult update` updates pult itself to the latest release.\n\n\
+                     Run inside a repo containing a pult.yaml, or create one:\n  \
+                       pult init          starter manifest in this directory\n  \
+                       pult init --user   your personal manifest (~/.config/pult/)\n\n\
+                     Bare `pult` opens the guided flow; `pult <command> [values…]`\n\
+                     runs directly. `pult update` updates pult itself.\n\n\
                      No manifest was found (current directory upward, then the user\n\
                      manifest)."
                 );
@@ -156,6 +162,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
         .after_help(
             "pult itself:\n  \
                pult update [VERSION]        self-update to the latest (or given) release\n  \
+               pult init [--user]           scaffold a starter manifest\n  \
                pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
                pult includes verify         check every pin still resolves and no tag moved\n  \
                pult --list [--json]         what this manifest declares (--json for tooling)\n\n\

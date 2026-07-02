@@ -46,7 +46,8 @@ pub fn find_manifest_from(start: &Path, user_manifest: Option<&Path>) -> Result<
         return Ok((manifest::load(path)?, Scope::User));
     }
     bail!(
-        "no pult.yaml found (searched from {} upward; no user manifest at {})",
+        "no pult.yaml found (searched from {} upward; no user manifest at {}) — \
+         `pult init` creates one here, `pult init --user` creates your personal one",
         start.display(),
         user_manifest
             .map(|p| p.display().to_string())
