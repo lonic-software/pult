@@ -235,6 +235,37 @@ your tag can't be re-pointed without `pult includes verify` flagging drift.
 Access control is your git host's: a private repo is a private module, using
 each consumer's existing git credentials.
 
+### One repo, many modules
+
+A module does **not** need its own repo. The `//subdir` source form means one
+"toolbox" repo can host any number of modules, each in its own directory:
+
+```
+ops-modules/
+  aws/module.yaml       # + aws/bin/…
+  github/module.yaml
+  oncall/module.yaml
+```
+
+```yaml
+includes:
+  - source: github.com/your-org/ops-modules//aws@v3.2.0
+    prefix: aws
+  - source: github.com/your-org/ops-modules//oncall@v3.2.0
+    prefix: oc
+```
+
+One pushed tag versions the whole toolbox, and consumers of several modules
+from the same repo@tag share a single cached checkout. Small modules — a few
+lines of yaml and a script — belong together in a toolbox repo; give a module
+its own repo only when it needs its own release cadence or access control.
+(Pins are per-repo: `@v3.2.0` names one commit of the whole toolbox. Per-module
+tags inside one repo aren't supported — a pin cannot contain `/`.)
+
+And below git modules there's an even lighter tier: modules that only one
+repo uses should just be local includes (`./tools`) in that repo — publishing
+is only for sharing across repos.
+
 Module design tips:
 
 - Declare `outputs:` on any step a consumer might chain from — it's the

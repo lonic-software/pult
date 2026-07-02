@@ -207,6 +207,11 @@ untrusted manifests; pass `--trust` to accept explicitly (e.g. CI).
 
 ## Roadmap
 
+- **Installing command sets** — `pult includes add <source> [--prefix aws]
+  [--user]`: resolve the source's latest tag, pin it, and append the include
+  to the nearest repo manifest (or your user manifest with `--user`), showing
+  what commands it brings. One command from a URL to runnable, trusted,
+  pinned commands — e.g. adding a shared `ecs-exec` module to your toolbox.
 - **Registry sources** — https static hosts and S3 as module backends, with
   token-helper / cloud-credential auth (decentralized, like Homebrew taps).
 - **Full-screen dashboard** (maybe) — a ratatui view over the same manifest
