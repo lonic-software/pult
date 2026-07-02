@@ -1,0 +1,9 @@
+/target
+
+# IDE state
+.idea/
+*.iml
+
+# internal design/planning docs — not part of the published project
+docs/ops-tooling-spec.html
+docs/manifest-includes.md

@@ -1,0 +1,4 @@
+#!/bin/sh
+# A module-shipped executable — the module's yaml references it via
+# ${module.dir}/bin/words. Could be Rust, Python, anything.
+printf 'apple\nbanana\ncherry\nquince\n'

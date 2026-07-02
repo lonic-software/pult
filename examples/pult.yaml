@@ -1,0 +1,39 @@
+# Demo manifest — cd into this directory and run `pult` (or `pult greet hello world`).
+# Exercises the whole Phase A surface: plain commands, a local module include
+# with vars + prefix, composed run-lists with steps/outputs/exports/pipes.
+version: 1
+name: demo
+
+includes:
+  - source: ./tools
+    vars: { marker: "»" }
+    prefix: t
+
+commands:
+  - id: greet
+    title: Greet someone
+    params:
+      greeting: { pick: { options: [hello, hi, hey] } }
+      name: { input: { default: world } }
+    run: "echo {greeting}, {name}!"
+
+  - id: head
+    title: Show the first lines of a file
+    params:
+      # dynamic picker: options are the stdout lines of a shell-out
+      file: { pick: { from: "ls -1" } }
+      lines: { input: { default: "5" } }
+    run: "head -n {lines} {file}"
+
+  - id: announce
+    title: Announce (composed from module blocks)
+    params:
+      fruit: { use: t:fruit }            # picker exported by the module
+      message: { input: { default: fresh today } }
+    run:
+      - use: t:stamp                     # module step with a declared output
+        exports: { NOW: STAMP }
+      - pipe:                            # module step as a stream filter
+          - "echo \"{fruit}: {message}\""
+          - use: t:shout
+      - "echo \"(announced at $STAMP)\""

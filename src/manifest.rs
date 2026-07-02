@@ -1,0 +1,482 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use indexmap::IndexMap;
+use serde::Deserialize;
+
+/// The manifest schema version this binary understands.
+pub const SUPPORTED_VERSION: u32 = 1;
+
+/// A manifest together with where it came from.
+#[derive(Debug)]
+pub struct Loaded {
+    pub manifest: Manifest,
+    /// Absolute path to the pult.yaml file.
+    pub path: PathBuf,
+    /// Directory containing the manifest; all commands run with this as cwd.
+    pub dir: PathBuf,
+    /// Raw file contents, used for trust hashing.
+    pub raw: String,
+}
+
+/// One file's worth of schema — serves both root manifests and included
+/// modules; the resolver enforces which fields are legal in which role.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    /// Checked via `VersionProbe` before full parsing; kept so the schema is
+    /// complete and future versions can branch on it.
+    #[allow(dead_code)]
+    pub version: u32,
+    /// Display name shown in the guided flow header; defaults to the directory name.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)] // surfaced by future `pult module info`
+    pub description: Option<String>,
+    /// Root manifests only. Local `./path` sources in Phase A.
+    #[serde(default)]
+    pub includes: Vec<IncludeDef>,
+    /// Reserved for Phase C — rejected with a clear message if present.
+    #[serde(default)]
+    pub registries: Option<serde_yaml::Value>,
+    /// Modules only: variables the include site binds.
+    #[serde(default)]
+    pub vars: IndexMap<String, VarDef>,
+    /// Named, reusable param definitions (referenced via `use:`).
+    #[serde(default)]
+    pub params: IndexMap<String, ParamDef>,
+    /// Named, reusable script fragments (referenced via `use:` in run lists).
+    #[serde(default)]
+    pub steps: IndexMap<String, StepDef>,
+    #[serde(default)]
+    pub commands: Vec<CommandDef>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncludeDef {
+    pub source: String,
+    #[serde(default)]
+    pub vars: IndexMap<String, String>,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VarDef {
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)] // surfaced by future `pult module info`
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandDef {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub params: IndexMap<String, ParamDef>,
+    pub run: RunSpec,
+}
+
+/// A param is a picker, free input, or a reference to a named param; exactly
+/// one of the three must be set (validated at load, so `kind()` is infallible).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParamDef {
+    #[serde(default)]
+    pub pick: Option<PickDef>,
+    #[serde(default)]
+    pub input: Option<InputDef>,
+    #[serde(default, rename = "use")]
+    pub use_: Option<String>,
+}
+
+pub enum ParamKind<'a> {
+    Pick(&'a PickDef),
+    Input(&'a InputDef),
+    Use(&'a str),
+}
+
+impl ParamDef {
+    pub fn kind(&self) -> ParamKind<'_> {
+        match (&self.pick, &self.input, &self.use_) {
+            (Some(pick), None, None) => ParamKind::Pick(pick),
+            (None, Some(input), None) => ParamKind::Input(input),
+            (None, None, Some(name)) => ParamKind::Use(name),
+            _ => unreachable!("validated at load: exactly one of pick/input/use"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickDef {
+    /// Static option list.
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
+    /// Shell command whose stdout lines become the options. May interpolate
+    /// `{param}` for params declared *earlier* in the same command.
+    #[serde(default)]
+    pub from: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputDef {
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+/// A step: a plain script string, or a script with a declared contract.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum StepDef {
+    Plain(String),
+    Full(FullStep),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FullStep {
+    pub script: String,
+    /// Shell variable names this step promises to set.
+    #[serde(default)]
+    pub outputs: Vec<String>,
+}
+
+impl StepDef {
+    pub fn script(&self) -> &str {
+        match self {
+            StepDef::Plain(s) => s,
+            StepDef::Full(f) => &f.script,
+        }
+    }
+
+    pub fn outputs(&self) -> &[String] {
+        match self {
+            StepDef::Plain(_) => &[],
+            StepDef::Full(f) => &f.outputs,
+        }
+    }
+}
+
+/// `run:` is a single command line (executed via `sh -c`, exactly the original
+/// behavior) or a step list compiled into one bash script (see compile.rs).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RunSpec {
+    Script(String),
+    List(Vec<RunEntry>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RunEntry {
+    Inline(String),
+    Use(UseRef),
+    Pipe(PipeGroup),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UseRef {
+    #[serde(rename = "use")]
+    pub use_: String,
+    /// Rebind the step's `{placeholder}` names (values may reference this
+    /// command's params).
+    #[serde(default)]
+    pub with: IndexMap<String, String>,
+    /// Rename the step's declared outputs: `{ TASK: BACKEND_TASK }`.
+    #[serde(default)]
+    pub exports: IndexMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipeGroup {
+    pub pipe: Vec<PipeEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum PipeEntry {
+    Inline(String),
+    Use(PipeUseRef),
+}
+
+/// A step in a pipe contributes stdout only, so no `exports:` here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipeUseRef {
+    #[serde(rename = "use")]
+    pub use_: String,
+    #[serde(default)]
+    pub with: IndexMap<String, String>,
+}
+
+/// Probe just the version field so a future-versioned manifest fails with an
+/// "upgrade pult" message instead of a parse error about unknown fields.
+#[derive(Deserialize)]
+struct VersionProbe {
+    version: Option<u32>,
+}
+
+pub fn load(path: &Path) -> Result<Loaded> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let manifest = parse(&raw, path)?;
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", path.display()))?;
+    let dir = path
+        .parent()
+        .context("manifest has no parent directory")?
+        .to_path_buf();
+    Ok(Loaded {
+        manifest,
+        path,
+        dir,
+        raw,
+    })
+}
+
+/// Parse + intra-file validation. Used for both root manifests and modules;
+/// role-specific rules (includes only at root, vars only in modules, ordering
+/// of dependent pickers, run/step reference checks) live in the resolver.
+pub fn parse(raw: &str, origin: &Path) -> Result<Manifest> {
+    let probe: VersionProbe = serde_yaml::from_str(raw)
+        .with_context(|| format!("{} is not valid YAML", origin.display()))?;
+    match probe.version {
+        None => bail!(
+            "{} has no `version:` field — add `version: {SUPPORTED_VERSION}`",
+            origin.display()
+        ),
+        Some(v) if v > SUPPORTED_VERSION => bail!(
+            "{} uses manifest version {v}, but this pult binary supports up to {SUPPORTED_VERSION} — upgrade pult",
+            origin.display()
+        ),
+        Some(v) if v < 1 => bail!("{} has invalid manifest version {v}", origin.display()),
+        Some(_) => {}
+    }
+    let manifest: Manifest = serde_yaml::from_str(raw)
+        .with_context(|| format!("failed to parse {}", origin.display()))?;
+    validate_file(&manifest).with_context(|| format!("invalid manifest {}", origin.display()))?;
+    Ok(manifest)
+}
+
+/// A valid name for params, steps, vars, outputs, prefixes.
+pub fn is_valid_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+fn validate_file(manifest: &Manifest) -> Result<()> {
+    if manifest.registries.is_some() {
+        bail!(
+            "`registries:` (remote sources) is not built yet — only local `./path` includes are supported"
+        );
+    }
+    for (name, def) in &manifest.params {
+        validate_param(name, def).context("in top-level `params:`")?;
+    }
+    for (name, step) in &manifest.steps {
+        validate_step(name, step)?;
+    }
+    for (vname, vdef) in &manifest.vars {
+        if !is_valid_name(vname) {
+            bail!("invalid var name `{vname}`");
+        }
+        if vdef.required && vdef.default.is_some() {
+            bail!("var `{vname}`: `required: true` and a `default` are contradictory");
+        }
+        if !vdef.required && vdef.default.is_none() {
+            bail!("var `{vname}` must be `required: true` or have a `default`");
+        }
+    }
+    let mut ids = HashSet::new();
+    for cmd in &manifest.commands {
+        if cmd.id.is_empty() {
+            bail!("a command has an empty id");
+        }
+        if !ids.insert(cmd.id.as_str()) {
+            bail!("duplicate command id `{}`", cmd.id);
+        }
+        for (name, def) in &cmd.params {
+            validate_param(name, def).with_context(|| format!("in command `{}`", cmd.id))?;
+        }
+        match &cmd.run {
+            RunSpec::Script(s) if s.trim().is_empty() => {
+                bail!("command `{}` has an empty run", cmd.id)
+            }
+            RunSpec::List(entries) if entries.is_empty() => {
+                bail!("command `{}` has an empty run list", cmd.id)
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_param(name: &str, def: &ParamDef) -> Result<()> {
+    if !is_valid_name(name) {
+        bail!("invalid param name `{name}`");
+    }
+    let set = [def.pick.is_some(), def.input.is_some(), def.use_.is_some()];
+    if set.iter().filter(|b| **b).count() != 1 {
+        bail!("param `{name}`: needs exactly one of `pick`, `input`, or `use`");
+    }
+    if let Some(pick) = &def.pick {
+        match (&pick.options, &pick.from) {
+            (Some(_), Some(_)) => bail!(
+                "param `{name}`: `pick` must have exactly one of `options` or `from`, not both"
+            ),
+            (None, None) => bail!("param `{name}`: `pick` needs either `options` or `from`"),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_step(name: &str, step: &StepDef) -> Result<()> {
+    if !is_valid_name(name) {
+        bail!("invalid step name `{name}`");
+    }
+    if step.script().trim().is_empty() {
+        bail!("step `{name}` has an empty script");
+    }
+    for out in step.outputs() {
+        let shell_ok = !out.is_empty()
+            && !out.starts_with(|c: char| c.is_ascii_digit())
+            && out.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !shell_ok {
+            bail!("step `{name}`: output `{out}` is not a valid shell variable name");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_manifest(content: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pult.yaml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        (dir, path)
+    }
+
+    const GOOD: &str = r#"
+version: 1
+name: demo
+commands:
+  - id: shell
+    title: Open a shell
+    params:
+      env: { pick: { options: [dev, uat, pre] } }
+      customer: { pick: { from: "./bin/impl list --env {env}" } }
+      note: { input: { default: hi } }
+    run: "./bin/impl shell {customer} {env}"
+"#;
+
+    #[test]
+    fn parses_and_preserves_param_order() {
+        let (_d, path) = write_manifest(GOOD);
+        let loaded = load(&path).unwrap();
+        let cmd = &loaded.manifest.commands[0];
+        let names: Vec<_> = cmd.params.keys().cloned().collect();
+        assert_eq!(names, ["env", "customer", "note"]);
+        assert_eq!(loaded.manifest.name.as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn parses_blocks_and_run_lists() {
+        let (_d, path) = write_manifest(
+            r#"
+version: 1
+params:
+  env: { pick: { options: [dev, uat] } }
+steps:
+  plain: "echo hi"
+  contract:
+    outputs: [OUT]
+    script: "OUT=42"
+commands:
+  - id: x
+    title: X
+    params:
+      env: { use: env }
+    run:
+      - use: contract
+        exports: { OUT: RESULT }
+      - pipe:
+          - use: plain
+          - "tr a-z A-Z"
+      - "echo $RESULT"
+"#,
+        );
+        let loaded = load(&path).unwrap();
+        let m = &loaded.manifest;
+        assert_eq!(m.steps["contract"].outputs(), ["OUT"]);
+        let RunSpec::List(entries) = &m.commands[0].run else {
+            panic!("expected run list");
+        };
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(&entries[0], RunEntry::Use(u) if u.exports["OUT"] == "RESULT"));
+        assert!(matches!(&entries[1], RunEntry::Pipe(p) if p.pipe.len() == 2));
+    }
+
+    #[test]
+    fn newer_version_asks_for_upgrade() {
+        let (_d, path) = write_manifest("version: 99\nfuture_field: x\ncommands: []\n");
+        let err = load(&path).unwrap_err().to_string();
+        assert!(err.contains("upgrade pult"), "got: {err}");
+    }
+
+    #[test]
+    fn missing_version_is_rejected() {
+        let (_d, path) = write_manifest("commands: []\n");
+        let err = load(&path).unwrap_err().to_string();
+        assert!(err.contains("version"), "got: {err}");
+    }
+
+    #[test]
+    fn pick_needs_exactly_one_source() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      a: { pick: { options: [1], from: \"ls\" } }\n    run: \"echo {a}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("not both"), "got: {err}");
+    }
+
+    #[test]
+    fn var_must_be_required_or_defaulted() {
+        let (_d, path) = write_manifest(
+            "version: 1\nvars:\n  x: { description: hm }\ncommands:\n  - { id: a, title: A, run: \"true\" }\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("required: true"), "got: {err}");
+    }
+
+    #[test]
+    fn registries_are_rejected_clearly() {
+        let (_d, path) = write_manifest(
+            "version: 1\nregistries: { acme: s3://x }\ncommands:\n  - { id: a, title: A, run: \"true\" }\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("not built yet"), "got: {err}");
+    }
+}

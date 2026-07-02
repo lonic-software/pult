@@ -1,0 +1,35 @@
+# A local module: building blocks + a shipped executable (bin/words).
+# Included from ../pult.yaml with `prefix: t`, so everything here is
+# t:fruit, t:stamp, t:shout … to the consumer.
+version: 1
+name: tools
+description: Demo building blocks
+
+vars:
+  marker:
+    default: ">>"
+    description: Prefix glyph for shouted lines
+
+params:
+  fruit:
+    # dynamic picker fed by the module's own executable, any language
+    pick: { from: "${module.dir}/bin/words" }
+
+steps:
+  stamp:
+    outputs: [NOW]
+    script: |
+      NOW=$(date -u +%H:%M:%S)
+  shout: |
+    while IFS= read -r line; do echo "${marker} $(echo "$line" | tr '[:lower:]' '[:upper:]')"; done
+
+commands:
+  - id: fortune
+    title: Shout a random word (module-owned command)
+    run:
+      - use: stamp
+      - pipe:
+          - "${module.dir}/bin/words"
+          - "sort -R | head -1"
+          - use: shout
+      - "echo \"(at $NOW)\""

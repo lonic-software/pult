@@ -1,0 +1,21 @@
+[package]
+name = "pult"
+version = "0.1.0"
+edition = "2024"
+description = "pult — manifest-driven launcher for your repo's operational commands"
+license = "MIT"
+repository = "https://github.com/lonic-software/pult"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["string"] }
+dirs = "6"
+indexmap = { version = "2", features = ["serde"] }
+inquire = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
