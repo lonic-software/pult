@@ -45,18 +45,24 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
             .context("nothing to add to — pass --user to target your user manifest")?;
         loaded.path
     };
-    add_include(&target, source, prefix, None)?;
+    // Interactivity is decided HERE, once, and passed down — the core must
+    // never sniff the terminal itself (under `cargo test` from a terminal,
+    // stdin IS a TTY, and a library function that prompts on its own turns
+    // the test suite interactive).
+    let interactive = std::io::stdin().is_terminal();
+    add_include(&target, source, prefix, None, interactive)?;
     Ok(0)
 }
 
-/// The whole flow: pin → fetch → summarize → (prompt for required vars,
-/// confirm on a TTY) → write → verify the manifest still resolves, rolling
-/// back if it doesn't. `cache_root: None` = the default module cache.
+/// The whole flow: pin → fetch → summarize → (when `interactive`: prompt for
+/// required vars and confirm) → write → verify the manifest still resolves,
+/// rolling back if it doesn't. `cache_root: None` = the default module cache.
 pub fn add_include(
     target: &Path,
     source: &str,
     prefix: Option<&str>,
     cache_root: Option<&Path>,
+    interactive: bool,
 ) -> Result<()> {
     let target_dir = target
         .parent()
@@ -162,7 +168,7 @@ pub fn add_include(
         if !def.required {
             continue;
         }
-        if !std::io::stdin().is_terminal() {
+        if !interactive {
             bail!(
                 "module requires var `{name}` — run interactively, or add the include by hand \
                  with a `vars:` binding"
@@ -176,9 +182,7 @@ pub fn add_include(
     }
 
     println!("{}", render_entry("  ", &pinned_source, prefix, &vars));
-    if std::io::stdin().is_terminal()
-        && !prompt::confirm(&format!("Add this include to {}?", target.display()))?
-    {
+    if interactive && !prompt::confirm(&format!("Add this include to {}?", target.display()))? {
         bail!("nothing was written");
     }
 
@@ -412,7 +416,9 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let source = format!("git::{}", remote.path().display());
 
-        add_include(&target, &source, Some("m"), Some(cache.path())).unwrap();
+        // interactive: false — tests must never prompt, even when cargo test
+        // runs from a real terminal (e.g. under `pult check`/`pult release`)
+        add_include(&target, &source, Some("m"), Some(cache.path()), false).unwrap();
         let text = std::fs::read_to_string(&target).unwrap();
         assert!(
             text.contains(&format!("- source: {source}@v0.2.0")),
@@ -426,6 +432,7 @@ mod tests {
             &format!("{source}@v0.1.0"),
             None,
             Some(cache.path()),
+            false,
         )
         .unwrap_err();
         assert!(err.to_string().contains("already included"), "got: {err}");
@@ -445,7 +452,7 @@ mod tests {
         let before = "version: 1\ncommands:\n  - { id: local, title: L, run: \"true\" }\n";
         std::fs::write(&target, before).unwrap();
 
-        let err = add_include(&target, "./mod", None, None).unwrap_err();
+        let err = add_include(&target, "./mod", None, None, false).unwrap_err();
         assert!(format!("{err:#}").contains("rolled back"), "got: {err:#}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
     }
