@@ -40,8 +40,8 @@ future phase and rejected with an explanatory error.
 ### `<command>`
 
 ```yaml
-- id: shell               # unique after merging; ids `includes`, `registry`, `update`,
-  title: Open a shell     #   and `module` are reserved
+- id: shell               # unique after merging; reserved ids: `includes`, `registry`,
+  title: Open a shell     #   `module`, `update`, `self`, `init`, `trust`, `cache`
   params:                 # ordered map — prompted in this order
     <name>: <param>
   run: <run>

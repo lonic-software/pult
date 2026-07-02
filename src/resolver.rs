@@ -11,8 +11,14 @@ use crate::manifest::{
     self, IncludeDef, Loaded, Manifest, ParamDef, ParamKind, PipeEntry, RunEntry, RunSpec, StepDef,
 };
 
-/// Command ids the engine claims for its own subcommands.
-const RESERVED_IDS: [&str; 4] = ["includes", "registry", "module", "update"];
+/// Command ids the engine claims for its own subcommands — current and
+/// future. Seeded generously while pult has no users: adding a word later
+/// breaks any manifest already using it, so anything the engine might
+/// plausibly want is parked now (`self` is the umbrella for everything
+/// unforeseen). Everything NOT on this list is promised to manifests forever.
+const RESERVED_IDS: [&str; 8] = [
+    "includes", "registry", "module", "update", "self", "init", "trust", "cache",
+];
 
 /// A root manifest with all includes resolved, vars substituted, `use:`
 /// references inlined, and cross-file contracts validated. Everything

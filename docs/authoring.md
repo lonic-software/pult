@@ -219,7 +219,9 @@ Rules that keep resolution deterministic and safe:
 - **Merging is explicit**: includes merge in order, local declarations last;
   any duplicate name (command, param, or step) in the merged whole is a load
   error — use `prefix:` to disambiguate. Nothing ever silently shadows.
-- The command ids `includes`, `registry`, and `module` are reserved.
+- The command ids `includes`, `registry`, `module`, `update`, `self`, `init`,
+  `trust`, and `cache` are reserved for pult's own (current and future)
+  subcommands; every other id is promised to manifests forever.
 
 ## 5 · Publishing a module
 
