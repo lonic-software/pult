@@ -19,7 +19,7 @@ pub struct GitSource {
     pub display: String,
     /// Clone URL.
     pub url: String,
-    /// Path within the repo: a directory (containing module.yaml) or a yaml file.
+    /// Path within the repo: a directory (containing the module file) or a yaml file.
     pub subpath: Option<String>,
     /// The pin: a tag or a full 40-char commit sha. Mandatory.
     pub rev: String,
@@ -115,6 +115,32 @@ fn parse_git(
         subpath,
         rev,
     })
+}
+
+/// The manifest a module directory publishes. Deliberately distinct from a
+/// repo's own `pult.yaml`: a module is the command set a repo *exposes* to
+/// consumers (`pult x`, `includes`), whereas `pult.yaml` is the repo's own
+/// commands, resolved by local discovery and never reachable remotely — so
+/// internal commands can't leak into what strangers can run.
+pub const MODULE_FILE: &str = "pult.module.yaml";
+
+/// The pre-0.3 module filename, still resolved as a fallback so existing modules
+/// keep working. `pult.module.yaml` wins when both are present.
+pub const MODULE_FILE_LEGACY: &str = "module.yaml";
+
+/// The module manifest inside a module directory: `pult.module.yaml`, or the
+/// legacy `module.yaml` when only that exists. When neither exists, returns the
+/// canonical path so callers' "failed to read …" errors name the current file.
+pub fn module_file_in(dir: &Path) -> PathBuf {
+    let canonical = dir.join(MODULE_FILE);
+    if canonical.is_file() {
+        return canonical;
+    }
+    let legacy = dir.join(MODULE_FILE_LEGACY);
+    if legacy.is_file() {
+        return legacy;
+    }
+    canonical
 }
 
 /// `~/.cache/pult/modules`, overridable via PULT_CACHE_DIR (tests pass an

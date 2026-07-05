@@ -131,7 +131,7 @@ into commands, and include modules — local paths or **pinned git repos**
 
 ```yaml
 includes:
-  - source: ./tools            # dir with module.yaml, or a yaml file
+  - source: ./tools            # dir with pult.module.yaml, or a yaml file
     vars: { marker: "»" }      # binds the module's declared vars
     prefix: t                  # everything becomes t:<name>
 
@@ -188,6 +188,43 @@ every include still resolves and that no pinned tag has moved on the remote
 Try it: `cd examples && pult --list`, then `pult announce`, and
 `pult announce apple hi --print` to see the generated script.
 
+## Ephemeral execution — `pult x`
+
+Not every command set is worth committing an include for. **`pult x <source>
+[command]`** runs a module's command straight from its source — a local path or
+a pinned git repo — without touching any `pult.yaml`:
+
+```sh
+pult x github.com/lonic/forklift install      # run forklift's installer, here, now
+pult x ./toolbox                              # no command → a menu of what it offers
+pult x github.com/lonic/forklift@v2 doctor    # pin explicitly; a bare source takes the latest tag
+```
+
+This is the `npx` of pult: it turns a repo into something a stranger can *run* —
+an installer, a one-shot bootstrapper, a workshop demo — in a single line, with
+nothing to configure first. What it does **not** drop is anything that makes
+that safe. The source is pinned (a bare git source resolves to its latest
+version tag, exactly like `includes add`), fetched into the same immutable
+cache, and gated by the same trust-on-first-use prompt. That prompt shows **the
+exact command it's about to run**, so a single `y` both approves the source and
+runs it — you read the actual script as you approve it, and a moved pin
+re-prompts. Commands run in your current directory (they act on where you are),
+modules that ship executables under `${module.dir}` work unchanged, and
+`--var NAME=VALUE` binds a module's `vars:`. "No config" never means "unseen
+code."
+
+Prefer to look before you commit to running anything? **`pult x <source>
+<command> --print`** prints that same composed script with no prompt and no
+trust recorded — a side-effect-free dry run (it never runs a module's option
+sources either), with unsupplied params shown as `<name>`.
+
+The trust identity is the source itself — a pinned git source (globally unique)
+or a local module's canonical path — so re-running one you've trusted doesn't
+re-prompt, while a new version, or an edited local tree, does. Ephemeral is the
+*try*; **`pult includes add <source>`** is the *keep* — once a command set earns
+a place in the repo, pin it into the manifest so everyone who pulls gets exactly
+the same thing.
+
 ## Trust model
 
 A discovered manifest is a list of things to *execute*, so `pult`
@@ -223,8 +260,20 @@ untrusted manifests; pass `--trust` to accept explicitly (e.g. CI).
 
 ## Roadmap
 
-- **Registry sources** — https static hosts and S3 as module backends, with
-  token-helper / cloud-credential auth (decentralized, like Homebrew taps).
+Ephemeral execution (`pult x`, above) is the first half of turning pult into a
+*distribution* channel, not just a per-repo launcher. The rest stays
+deliberately **decentralized** — a source is a git repo you already control, and
+trust is something you grant, never something a central index grants for you:
+
+- **Named sources (`pult tap`)** — `pult x` and `includes add` already take a
+  full `host/org/repo` source; the missing nicety is a short name for one.
+  `pult tap lonic/forklift` records an alias in your user config, and then
+  `pult x forklift install` resolves through it — Homebrew-tap style, opt-in,
+  no central pult.io registry to typosquat or trust by default. A name is only
+  ever an alias *you* added; the pin and the trust prompt still gate every run.
+- **Registry transports** — https static hosts and S3 as module backends (today
+  a source is a git repo), with token-helper / cloud-credential auth, so an org
+  can host its command sets wherever it already hosts artifacts.
 
 Then a richer interactive surface, in three independently useful steps —
 each **optional for command authors**, and none may weaken the properties

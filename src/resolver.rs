@@ -16,8 +16,22 @@ use crate::manifest::{
 /// breaks any manifest already using it, so anything the engine might
 /// plausibly want is parked now (`self` is the umbrella for everything
 /// unforeseen). Everything NOT on this list is promised to manifests forever.
-const RESERVED_IDS: [&str; 10] = [
-    "includes", "registry", "module", "update", "self", "init", "trust", "cache", "ui", "events",
+const RESERVED_IDS: [&str; 13] = [
+    "includes",
+    "registry",
+    "module",
+    "update",
+    "self",
+    "init",
+    "trust",
+    "cache",
+    "ui",
+    "events",
+    // ephemeral execution (`pult x`), and reserved for the decentralized
+    // registry surface it feeds into (`pult tap`, `pult registry`).
+    "x",
+    "tap",
+    "registries",
 ];
 
 /// A root manifest with all includes resolved, vars substituted, `use:`
@@ -41,6 +55,12 @@ pub struct Resolved {
     /// What each include is pinned to — the input to `pult includes verify`.
     pub pins: Vec<PinInfo>,
     pub commands: Vec<ResolvedCommand>,
+    /// Set only by `pult x`: this is a single ephemeral source, not a durable
+    /// manifest. Its one effect today is that the trust prompt shows the command
+    /// about to run — honest here because the trust unit *is* that invocation;
+    /// for a real manifest, trust covers every command, so showing one would
+    /// misrepresent the scope.
+    pub ephemeral: bool,
 }
 
 #[derive(Debug)]
@@ -201,6 +221,7 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
         include_summary,
         pins,
         commands,
+        ephemeral: false,
     })
 }
 
@@ -223,7 +244,7 @@ fn load_module(
         Source::Local => {
             let target = root_dir.join(&inc.source);
             let (file, tree) = if target.is_dir() {
-                (target.join("module.yaml"), Some(target))
+                (fetch::module_file_in(&target), Some(target))
             } else {
                 (target, None)
             };
@@ -240,8 +261,8 @@ fn load_module(
             let (checkout, meta) = fetch::ensure_fetched(&git_src, cache_root)?;
             let file = match &git_src.subpath {
                 Some(p) if p.ends_with(".yaml") || p.ends_with(".yml") => checkout.join(p),
-                Some(p) => checkout.join(p).join("module.yaml"),
-                None => checkout.join("module.yaml"),
+                Some(p) => fetch::module_file_in(&checkout.join(p)),
+                None => fetch::module_file_in(&checkout),
             };
             let short = &meta.resolved_sha[..10.min(meta.resolved_sha.len())];
             (
@@ -336,10 +357,17 @@ fn load_module(
     })
 }
 
+/// Directory names skipped when tree-hashing a local module: version control,
+/// and build/dependency output. None of them is a module's own executable
+/// logic, and all can be enormous — skipping them keeps trust hashing fast when
+/// a local source points at a real working tree (`pult x ./repo`) without
+/// weakening it: what actually runs is still covered.
+const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
+
 /// Deterministic digest of a local module directory: relative paths, contents,
 /// and (on unix) the executable bit — so editing a shipped script, adding a
 /// file, or flipping a mode re-triggers trust the same way editing the yaml
-/// does. `.git` is skipped in case the include points at a checkout.
+/// does. Build and VCS directories ([`SKIP_DIRS`]) are excluded.
 fn hash_dir_tree(root: &std::path::Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hash_dir_into(root, root, &mut hasher)?;
@@ -353,7 +381,11 @@ fn hash_dir_into(root: &std::path::Path, dir: &std::path::Path, hasher: &mut Sha
         .with_context(|| format!("failed to read {}", dir.display()))?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
-        if entry.file_name() == ".git" {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| SKIP_DIRS.contains(&n))
+        {
             continue;
         }
         let path = entry.path();
@@ -1136,7 +1168,27 @@ commands:
             "{:#}",
             resolve_root(&root_including(remote.path(), "@v1"), cache.path()).unwrap_err()
         );
-        assert!(err.contains("module.yaml"), "got: {err}");
+        // The error names the current filename, not the legacy one.
+        assert!(err.contains("pult.module.yaml"), "got: {err}");
+    }
+
+    #[test]
+    fn new_module_filename_resolves_and_wins_over_legacy() {
+        // A checkout carrying both the new and legacy names: the new one is used.
+        let new_mod = "version: 1\ncommands:\n  - { id: fresh, title: Fresh, run: \"true\" }\n";
+        let legacy = "version: 1\ncommands:\n  - { id: stale, title: Stale, run: \"true\" }\n";
+        let remote = make_remote(&[
+            (fetch::MODULE_FILE, new_mod),
+            (fetch::MODULE_FILE_LEGACY, legacy),
+        ]);
+        let cache = tempfile::tempdir().unwrap();
+        let r = resolve_root(&root_including(remote.path(), "@v1"), cache.path()).unwrap();
+        // Commands are brought in under the include's `g:` prefix.
+        assert!(r.commands.iter().any(|c| c.id == "g:fresh"), "new wins");
+        assert!(
+            !r.commands.iter().any(|c| c.id == "g:stale"),
+            "legacy ignored"
+        );
     }
 
     #[test]
@@ -1349,6 +1401,29 @@ commands:
             r1.unwrap().trust_hash,
             r2.unwrap().trust_hash,
             "changing a shipped executable must change the trust hash"
+        );
+    }
+
+    #[test]
+    fn local_module_hash_ignores_build_dirs() {
+        let root = "version: 1\nincludes:\n  - source: ./mod\ncommands:\n  - { id: c, title: C, run: \"true\" }\n";
+        let files: &[(&str, &str)] = &[("mod/module.yaml", "version: 1\ncommands: []\n")];
+        let (dir, before) = setup(root, files);
+        let before = before.unwrap().trust_hash;
+        // Dropping large files into build/dependency dirs must not be walked or
+        // hashed — the trust hash stays put (they're never a module's logic).
+        for (sub, name) in [
+            ("mod/target/debug", "artifact"),
+            ("mod/node_modules", "big"),
+        ] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+            std::fs::write(dir.path().join(sub).join(name), "x".repeat(4096)).unwrap();
+        }
+        let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
+        let after = resolve(loaded).unwrap().trust_hash;
+        assert_eq!(
+            before, after,
+            "build/dependency dirs must not affect the trust hash"
         );
     }
 

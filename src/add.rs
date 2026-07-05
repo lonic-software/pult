@@ -72,7 +72,11 @@ pub fn add_include(
     let (pinned_source, module_file) = match fetch::parse_source_lenient(source)? {
         Source::Local => {
             let t = target_dir.join(source);
-            let file = if t.is_dir() { t.join("module.yaml") } else { t };
+            let file = if t.is_dir() {
+                fetch::module_file_in(&t)
+            } else {
+                t
+            };
             if !file.is_file() {
                 bail!(
                     "no module at `{source}` (relative to {}) — expected {}",
@@ -105,8 +109,8 @@ pub fn add_include(
             let (checkout, _meta) = fetch::ensure_fetched(&git_src, root)?;
             let file = match &git_src.subpath {
                 Some(p) if p.ends_with(".yaml") || p.ends_with(".yml") => checkout.join(p),
-                Some(p) => checkout.join(p).join("module.yaml"),
-                None => checkout.join("module.yaml"),
+                Some(p) => fetch::module_file_in(&checkout.join(p)),
+                None => fetch::module_file_in(&checkout),
             };
             (git_src.display.clone(), file)
         }
@@ -387,7 +391,7 @@ mod tests {
     fn add_pins_latest_tag_and_verifies() {
         let remote = tempfile::tempdir().unwrap();
         std::fs::write(
-            remote.path().join("module.yaml"),
+            remote.path().join("pult.module.yaml"),
             "version: 1\nname: mod\ncommands:\n  - { id: hi, title: Hi, run: \"echo hi\" }\n",
         )
         .unwrap();
@@ -444,7 +448,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("mod")).unwrap();
         std::fs::write(
-            dir.path().join("mod/module.yaml"),
+            dir.path().join("mod/pult.module.yaml"),
             "version: 1\ncommands:\n  - { id: local, title: Clash, run: \"true\" }\n",
         )
         .unwrap();

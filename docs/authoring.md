@@ -128,12 +128,21 @@ literal and surfaces at run time (or in `--print`), not at load.
 
 ## 3 · Writing a module
 
-A module is a yaml file — or a directory with `module.yaml` plus anything
-else (scripts, binaries) — that exports params, steps, and commands for other
-repos:
+A module is the command set a repo **exposes** to others — a yaml file, or a
+directory with `pult.module.yaml` plus anything else (scripts, binaries), that
+exports params, steps, and commands.
+
+It is deliberately a *different file* from a repo's own `pult.yaml`. `pult.yaml`
+holds **your** commands — found by local discovery when you run `pult` inside the
+repo. `pult.module.yaml` holds what **consumers** get through `pult x` and
+`includes`. Local discovery never resolves a module file, and `pult x` /
+`includes` never resolve `pult.yaml`, so a repo's internal commands (a `deploy`,
+a `release`) can't leak into what strangers can run — the boundary is the
+filename, not a flag you might forget. (The pre-0.3 name `module.yaml` is still
+resolved as a fallback; `pult.module.yaml` wins when both exist.)
 
 ```yaml
-# module.yaml
+# pult.module.yaml
 version: 1
 name: aws-common
 description: Shared AWS session & ECS blocks
@@ -212,7 +221,7 @@ Source forms:
 
 | Form | Meaning |
 |---|---|
-| `./tools` | local dir (with `module.yaml`) or yaml file, relative to this manifest |
+| `./tools` | local dir (with `pult.module.yaml`) or yaml file, relative to this manifest |
 | `github.com/org/repo@v1.2.3` | git over https |
 | `github.com/org/repo//sub/dir@<sha>` | module in a subdirectory of a repo |
 | `git::ssh://git@host/repo.git//sub@v2` | any git transport |
@@ -252,9 +261,9 @@ A module does **not** need its own repo. The `//subdir` source form means one
 
 ```
 ops-modules/
-  aws/module.yaml       # + aws/bin/…
-  github/module.yaml
-  oncall/module.yaml
+  aws/pult.module.yaml       # + aws/bin/…
+  github/pult.module.yaml
+  oncall/pult.module.yaml
 ```
 
 ```yaml
@@ -275,6 +284,30 @@ tags inside one repo aren't supported — a pin cannot contain `/`.)
 And below git modules there's an even lighter tier: modules that only one
 repo uses should just be local includes (`./tools`) in that repo — publishing
 is only for sharing across repos.
+
+### Exposing a command that you also use locally
+
+Because the two files are separate, an exposed command isn't visible to a
+maintainer running `pult` in the repo — which is usually what you want. When you
+*do* want one in both places (e.g. an `install` you publish and also run
+yourself), keep it in `pult.module.yaml` as the single source of truth and pull
+it into your own manifest with a local include:
+
+```yaml
+# pult.yaml — your repo's own commands
+includes:
+  - source: ./pult.module.yaml   # surface the exposed commands here too
+commands:
+  - id: release                  # internal — consumers never see it
+    title: Cut a release
+    run: "./bin/release"
+```
+
+Now `pult install` works for you locally and `pult x <repo> install` works for
+consumers, from one definition. (A module that ships executables should be a
+*directory* module so the whole tree is trust-covered; a single-file include
+like `./pult.module.yaml` covers only that file — fine for a git consumer, whose
+trust is the whole pinned commit, but worth knowing for the local-include case.)
 
 Module design tips:
 

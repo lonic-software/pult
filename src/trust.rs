@@ -15,6 +15,7 @@ pub fn ensure_trusted(
     resolved_hash: &str,
     includes: &[String],
     assume_yes: bool,
+    about_to_run: Option<&str>,
 ) -> Result<()> {
     let store_path = store_path()?;
     let mut store = load_store(&store_path)?;
@@ -35,7 +36,27 @@ pub fn ensure_trusted(
         );
     }
 
-    let mut question = if previous.is_some() {
+    let question = build_question(path, previous.is_some(), includes, about_to_run);
+    let yes = prompt::confirm(&question)?;
+    if !yes {
+        bail!("manifest not trusted — nothing was run");
+    }
+    store.insert(key, resolved_hash.to_string());
+    save_store(&store_path, &store)
+}
+
+/// The trust question shown before anything runs. It always names what changed
+/// (or that this is first contact) and every include; when a command is about
+/// to run, it also shows the **composed script** so trust is granted while
+/// looking at the actual command, not just a source name. Pure so the exact
+/// wording is testable without a TTY.
+fn build_question(
+    path: &Path,
+    changed: bool,
+    includes: &[String],
+    about_to_run: Option<&str>,
+) -> String {
+    let mut question = if changed {
         format!(
             "The manifest {} (or something it includes) has CHANGED since you trusted it.",
             path.display()
@@ -48,15 +69,15 @@ pub fn ensure_trusted(
         for source in includes {
             question.push_str(&format!("\n    · {source}"));
         }
-        question.push('\n');
     }
-    question.push_str(" Commands in these files will be executed. Trust?");
-    let yes = prompt::confirm(&question)?;
-    if !yes {
-        bail!("manifest not trusted — nothing was run");
+    if let Some(script) = about_to_run {
+        question.push_str("\n  About to run:");
+        for line in script.lines() {
+            question.push_str(&format!("\n    {line}"));
+        }
     }
-    store.insert(key, resolved_hash.to_string());
-    save_store(&store_path, &store)
+    question.push_str("\n Commands in these files will be executed. Trust?");
+    question
 }
 
 /// Read-only query: is this manifest currently trusted at exactly this hash?
@@ -114,5 +135,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let loaded = load_store(&dir.path().join("absent.json")).unwrap();
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn question_shows_the_command_about_to_run() {
+        let q = build_question(
+            Path::new("github.com/lonic/forklift@v1.2.0"),
+            false,
+            &[],
+            Some("./bin/install '<flavor>'"),
+        );
+        assert!(q.contains("Trust the manifest github.com/lonic/forklift@v1.2.0?"));
+        assert!(q.contains("About to run:"), "got: {q}");
+        assert!(q.contains("./bin/install '<flavor>'"), "got: {q}");
+        assert!(q.contains("Trust?"));
+    }
+
+    #[test]
+    fn question_lists_includes_and_flags_a_change() {
+        let q = build_question(
+            Path::new("/repo/pult.yaml"),
+            true,
+            &["github.com/opskit/aws-common@v1.4.2 (commit 8a6e6fd4a4)".to_string()],
+            None,
+        );
+        assert!(q.contains("has CHANGED"), "got: {q}");
+        assert!(q.contains("It includes:"), "got: {q}");
+        assert!(q.contains("aws-common@v1.4.2"), "got: {q}");
+        assert!(!q.contains("About to run:"), "no command → no preview: {q}");
     }
 }

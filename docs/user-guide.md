@@ -87,6 +87,37 @@ pins the module's latest version tag, shows what commands it brings, and
 writes the include (creating the user manifest if this is your first). The
 same command without `--user` adds to the current repo's manifest instead.
 
+## Run something without installing it — `pult x`
+
+Sometimes you just want to *run* a command set once — an installer, a
+bootstrapper someone handed you — without adding it to any manifest. That's
+`pult x`:
+
+```sh
+pult x github.com/some-org/forklift install    # run its installer, in this directory
+pult x ./toolbox                               # no command → menu of what it offers
+pult x github.com/some-org/forklift@v2 doctor  # pin explicitly (a bare source takes the latest tag)
+```
+
+It fetches and pins the source exactly like an include, runs in your current
+directory, and — because you're trusting a single ad-hoc source to run one
+command — the trust prompt shows you **the exact command it's about to run**:
+
+```
+Trust the manifest github.com/some-org/forklift@v1.2.0?
+  About to run:
+    …/forklift/bin/install full
+ Commands in these files will be executed. Trust? [y/N]
+```
+
+So one `y` both approves the source and runs it — you're reading the actual
+script as you approve it, never a blind `curl | sh`. (Values you haven't
+supplied show as `<name>`; they're prompted for after you trust. To read it
+with no prompt at all, `pult x <source> <command> --print` composes the same
+script and runs nothing.) If you find yourself reaching for the same `pult x`
+often, `pult includes add <source>` promotes it into a manifest so it's pinned
+and shared with everyone who pulls the repo.
+
 ## The trust prompt
 
 A `pult.yaml` is a list of things to *execute*, so the first time you run
@@ -101,7 +132,12 @@ Trust the manifest /repo/pult.yaml?
  Commands in these files will be executed. Trust? [y/N]
 ```
 
-Answers are remembered per file per user (nothing is stored in the repo). In
+Trust covers the whole manifest — every command it declares, not just the one
+you happened to run first — which is why the prompt summarizes the files rather
+than any single command. (`pult x`, which trusts a single ad-hoc source, is the
+exception: there the prompt also shows the exact command about to run — see
+below.) Answers are remembered per file per user (nothing is stored in the
+repo). In
 non-interactive contexts (CI), an untrusted manifest is refused; pass
 `--trust` to accept explicitly — it records trust even on a non-executing
 invocation like `pult --trust --list`.

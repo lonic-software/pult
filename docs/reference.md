@@ -139,13 +139,19 @@ Sources:
 
 | Form | Kind |
 |---|---|
-| `./path`, `../path` | local file, or directory containing `module.yaml` |
+| `./path`, `../path` | local file, or directory containing `pult.module.yaml` |
 | `host.tld/org/repo[//sub]@<tag\|sha>` | git over https |
 | `git::<url>[//sub]@<tag\|sha>` | git, any transport (ssh, file, …) |
 
-`//sub` may be a directory (containing `module.yaml`) or a direct path to a
+`//sub` may be a directory (containing `pult.module.yaml`) or a direct path to a
 yaml file. Pins are mandatory for git sources: a tag, or a full 40-char commit
 sha. Branch names are rejected. `sha256:` mismatches are hard errors.
+
+A **module** file (`pult.module.yaml`) is what a repo *exposes* to consumers via
+`pult x` and `includes`; it is distinct from the repo's own `pult.yaml`, which
+local discovery resolves and which `pult x` / `includes` never touch — so
+internal commands are unreachable remotely. The pre-0.3 name `module.yaml` is
+still resolved as a fallback (`pult.module.yaml` wins when both exist).
 
 Merge order: includes in declared order, then local. Duplicate command/param/
 step names across the merged whole are errors (disambiguate with `prefix:`).
@@ -164,6 +170,29 @@ is never left behind. A source already included (same base, any pin) is
 refused. Default target is the nearest manifest; `--user` targets the user
 manifest and creates it if missing.
 
+### `pult x` — ephemeral execution
+
+`pult x <SOURCE> [COMMAND] [values…]` runs a command straight from a module
+source without adding it to any manifest — the same source syntax, pinning, and
+immutable cache as an include (a bare git source resolves to its latest version
+tag; pin explicitly with `@<tag|sha>` to run offline from a warm cache). With no
+`COMMAND` it opens the guided menu, or — non-interactively — lists what the
+module offers and exits `2`. Commands run in the **invocation directory** (they
+act on where you are, like user-scope commands); `${module.dir}` executables and
+module `vars:` (bind them with `--var NAME=VALUE`, repeatable) work as they do in
+an include. The same trust prompt gates the run: the trust identity is the
+source itself — a pinned git source (globally unique) or a local module's
+canonical path — so re-running a trusted source doesn't re-prompt, while a moved
+tag or an edited local tree does. Because you're trusting one ad-hoc source to
+run one command, the trust prompt shows the **composed command about to run**
+(unsupplied params as `<name>`), so a single `y` approves the source and runs it
+while you read the actual script; the preview never executes module code
+(dynamic option sources stay unresolved), so it's safe before trust. `--print`
+is the same preview with no prompt and nothing recorded — a trust-free dry run;
+`--trust` records trust up front for CI. Use it to *try* a command set;
+`pult includes add` to *keep* one. Intercepted before manifest discovery, so it
+works where no `pult.yaml` exists.
+
 ## Trust model
 
 Trust-on-first-use over the **resolved whole**: the stored hash covers the
@@ -174,7 +203,11 @@ executable bit; `.git` skipped). Editing a shipped executable re-prompts the
 same way editing the yaml does. Git modules need no separate tree digest: the
 resolved commit sha identifies the tree, and the cache is immutable.
 Single-file local includes (`./steps.yaml`) cover only that file — a module
-that ships executables should be a directory module. Any change → re-prompt. Stored per user in
+that ships executables should be a directory module. Any change → re-prompt. The
+prompt summarizes the manifest and its includes, because trust covers **every**
+command the manifest declares, not the single one you invoked. (The exception is
+`pult x`, which trusts one ad-hoc source to run one command; there the prompt
+also shows the composed command about to run — see below.) Stored per user in
 `<config>/pult/trust.json` (macOS: `~/Library/Application Support/pult/`,
 Linux: `~/.config/pult/`, Windows: `%APPDATA%\pult\`); override with
 `PULT_TRUST_STORE`. Non-TTY + untrusted = refusal; `--trust` accepts
@@ -200,6 +233,8 @@ pult --list                   commands, params, and origins
 pult --list --json            the same, machine-readable (schema below)
 pult <command> --print        print the composed script instead of running
 pult --trust …                trust this manifest without prompting (records immediately)
+pult x <SOURCE> [COMMAND]     run a command from a module source, no manifest (npx-style)
+     [values…] [--var N=V]      --trust / --print as elsewhere; a bare source takes the latest tag
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
@@ -264,8 +299,11 @@ Field notes:
   against it), `pick` with `source` (a shell-out; its stdout lines become
   options; `depends_on` lists params the source interpolates — supply those
   first), and `input` (free text, `default` may be `null`).
-- `pult <id> <values…> --print` prints the exact composed script without
-  running it — the natural dry-run step before an agent executes anything.
+- `pult <id> <values…> --print` prints the composed script without running it —
+  the natural dry-run step before an agent executes anything. It is fully
+  side-effect-free: it does **not** prompt, run dynamic option sources, or
+  require trust, so you can preview an untrusted command safely. Params you
+  don't supply appear as `<name>` metavars rather than being prompted for.
 
 ## Exit codes
 

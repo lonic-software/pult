@@ -14,6 +14,7 @@ mod runner;
 mod selfupdate;
 mod trust;
 mod verify;
+mod x;
 
 use std::collections::HashMap;
 
@@ -69,6 +70,12 @@ fn run() -> Result<i32> {
         && args.get(1).map(String::as_str) == Some("add")
     {
         return add::run_cli(&args[2..]);
+    }
+    // `pult x` — ephemeral execution from a module source. Intercepted here
+    // because its whole point is running where no local manifest exists (the id
+    // is reserved, so no manifest command can ever claim it).
+    if args.first().map(String::as_str) == Some("x") {
+        return x::run_cli(&args[1..]);
     }
     // As is `init` — its whole point is running where no manifest exists.
     if args.first().map(String::as_str) == Some("init") {
@@ -135,6 +142,7 @@ fn run() -> Result<i32> {
             &resolved.trust_hash,
             &resolved.include_summary,
             true,
+            None,
         )?;
     }
 
@@ -197,6 +205,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
             "pult itself:\n  \
                pult update [VERSION]        self-update to the latest (or given) release\n  \
                pult init [--user]           scaffold a starter manifest\n  \
+               pult x <SOURCE> [COMMAND]    run a command straight from a module source (no manifest)\n  \
                pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
                pult includes verify         check every pin still resolves and no tag moved\n  \
                pult self schema             print the manifest JSON Schema (editors/CI)\n  \
@@ -255,6 +264,14 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 .hide(true)
                 .about("Update pult itself to the latest release (or a given version)")
                 .arg(Arg::new("version").required(false).value_name("VERSION")),
+        )
+        // `x` is intercepted before clap runs (it must work with no manifest);
+        // registered so it's not mistaken for a manifest command and stays
+        // hidden from the manifest's Commands list.
+        .subcommand(
+            clap::Command::new("x")
+                .hide(true)
+                .about("Run a command from a module source without adding it to a manifest"),
         );
 
     for cmd in &resolved.commands {
