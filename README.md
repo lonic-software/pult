@@ -4,7 +4,7 @@ A manifest-driven launcher for your repo's operational commands: one shared
 binary, one small `pult.yaml` committed per repo, and every declared command
 usable two ways from the same declaration —
 
-- **Direct CLI** — `pult shell demo-leeds dev`, with generated `--help`
+- **Direct CLI** — `pult build server prod`, with generated `--help`
 - **Guided flow** — bare `pult` opens a menu, then one prompt per parameter
 
 The consumer footprint stays language-agnostic: a Java, Rust, or TypeScript
