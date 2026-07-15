@@ -9,6 +9,7 @@ repository = "https://github.com/lonic-software/pult"
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["string"] }
+crossterm = "=0.25.0"
 dirs = "6"
 indexmap = { version = "2", features = ["serde"] }
 inquire = "0.7"
