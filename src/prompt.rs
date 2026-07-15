@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 
 use anyhow::{Result, bail};
-use inquire::{Confirm, InquireError, Select, Text};
+use inquire::{Confirm, InquireError, Password, PasswordDisplayMode, Select, Text};
 
 /// Sentinel error for Esc / Ctrl-C during a prompt; main exits 130 quietly.
 #[derive(Debug)]
@@ -49,6 +49,19 @@ pub fn text(message: &str, default: Option<&str>) -> Result<String> {
         prompt = prompt.with_default(d);
     }
     map_inquire(prompt.prompt())
+}
+
+/// Prompt for a `secret: true` input: masked while typing, never echoed into
+/// scrollback. No confirmation round — these are pasted credentials, not new
+/// passwords being chosen.
+pub fn password(message: &str) -> Result<String> {
+    require_tty(&format!("`{message}` needs interactive input"))?;
+    map_inquire(
+        Password::new(message)
+            .with_display_mode(PasswordDisplayMode::Masked)
+            .without_confirmation()
+            .prompt(),
+    )
 }
 
 pub fn confirm(message: &str) -> Result<bool> {

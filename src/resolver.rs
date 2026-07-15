@@ -16,7 +16,7 @@ use crate::manifest::{
 /// breaks any manifest already using it, so anything the engine might
 /// plausibly want is parked now (`self` is the umbrella for everything
 /// unforeseen). Everything NOT on this list is promised to manifests forever.
-const RESERVED_IDS: [&str; 13] = [
+const RESERVED_IDS: [&str; 15] = [
     "includes",
     "registry",
     "module",
@@ -32,6 +32,10 @@ const RESERVED_IDS: [&str; 13] = [
     "x",
     "tap",
     "registries",
+    // the interactive-surface roadmap beyond `ui`: the local web surface
+    // (`pult serve`) and the `check:` readiness listing (`pult doctor`).
+    "serve",
+    "doctor",
 ];
 
 /// A root manifest with all includes resolved, vars substituted, `use:`
@@ -87,6 +91,11 @@ pub struct ResolvedCommand {
     pub run: ResolvedRun,
     /// Include source this command came from; None = declared locally.
     pub origin: Option<String>,
+    /// Readiness probe (vars substituted; no `{param}` placeholders) —
+    /// run by `pult doctor`, never implicitly before `run:`.
+    pub check: Option<String>,
+    /// Author-declared "requires a controlling terminal at runtime".
+    pub interactive: bool,
 }
 
 #[derive(Debug)]
@@ -466,6 +475,9 @@ fn visit_templates(m: &mut Manifest, f: &dyn Fn(&mut String)) {
     }
     for cmd in &mut m.commands {
         f(&mut cmd.title);
+        if let Some(check) = &mut cmd.check {
+            f(check);
+        }
         for def in cmd.params.values_mut() {
             visit_param(def, f);
         }
@@ -611,6 +623,17 @@ fn resolve_command(
         seen.insert(name.as_str());
     }
 
+    // A check runs before any param exists, so placeholders can't mean anything.
+    if let Some(check) = &cmd.check {
+        let phs = interp::placeholders(check)?;
+        if let Some(ph) = phs.first() {
+            bail!(
+                "{}: check references `{{{ph}}}` — a readiness check runs before params are filled, so it can't use them",
+                ctx()
+            );
+        }
+    }
+
     let run = match &cmd.run {
         RunSpec::Script(s) => {
             // Strict single-line template: placeholders must be declared params.
@@ -640,6 +663,8 @@ fn resolve_command(
         params,
         run,
         origin,
+        check: cmd.check,
+        interactive: cmd.interactive,
     })
 }
 
@@ -1232,6 +1257,37 @@ commands:
         assert_ne!(remote_after, *resolved_sha, "tag moved");
         // the CI guard exits non-zero
         assert_eq!(crate::verify::run(&r).unwrap(), 1);
+    }
+
+    #[test]
+    fn check_may_not_reference_params() {
+        let (_d, resolved) = setup(
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    params:\n      \
+             env: { pick: { options: [dev] } }\n    check: \"probe {env}\"\n    run: \"go {env}\"\n",
+            &[],
+        );
+        let err = format!("{:#}", resolved.unwrap_err());
+        assert!(err.contains("before params are filled"), "got: {err}");
+    }
+
+    #[test]
+    fn check_and_interactive_are_carried_and_vars_substituted() {
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/db\n    vars: { engine: psql }\ncommands:\n  \
+             - { id: local, title: L, run: \"true\", interactive: true }\n",
+            &[(
+                "mods/db/pult.module.yaml",
+                "version: 1\nvars:\n  engine: { required: true }\ncommands:\n  \
+                 - { id: import, title: I, run: \"true\", check: \"command -v ${engine}\" }\n",
+            )],
+        );
+        let resolved = resolved.unwrap();
+        let local = resolved.commands.iter().find(|c| c.id == "local").unwrap();
+        assert!(local.interactive);
+        assert_eq!(local.check, None);
+        let import = resolved.commands.iter().find(|c| c.id == "import").unwrap();
+        assert!(!import.interactive);
+        assert_eq!(import.check.as_deref(), Some("command -v psql"));
     }
 
     #[test]

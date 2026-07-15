@@ -1,6 +1,7 @@
 mod add;
 mod compile;
 mod discovery;
+mod doctor;
 mod exec;
 mod fetch;
 mod flow;
@@ -160,6 +161,7 @@ fn run() -> Result<i32> {
     }
 
     match matches.subcommand() {
+        Some(("doctor", _sub)) => doctor::run(&resolved, assume_trusted, false),
         Some(("includes", sub)) => match sub.subcommand() {
             Some(("verify", _)) => verify::run(&resolved),
             _ => {
@@ -208,6 +210,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                pult x <SOURCE> [COMMAND]    run a command straight from a module source (no manifest)\n  \
                pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
                pult includes verify         check every pin still resolves and no tag moved\n  \
+               pult doctor                  run every command's `check:` and report readiness\n  \
                pult self schema             print the manifest JSON Schema (editors/CI)\n  \
                pult --list [--json]         what this manifest declares (--json for tooling)\n\n\
              Run bare `pult` for the guided flow.  Authoring guide: {}",
@@ -272,6 +275,11 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
             clap::Command::new("x")
                 .hide(true)
                 .about("Run a command from a module source without adding it to a manifest"),
+        )
+        .subcommand(
+            clap::Command::new("doctor")
+                .hide(true)
+                .about("Run every command's `check:` readiness probe and report the results"),
         );
 
     for cmd in &resolved.commands {
@@ -286,6 +294,9 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                     Some(opts) => arg.help(format!("one of: {}", opts.join(", "))),
                     None => arg.help("picked from a dynamic option source if omitted"),
                 },
+                ParamKind::Input(input) if input.secret => {
+                    arg.help("secret; prompted without echo if omitted")
+                }
                 ParamKind::Input(_) => arg.help("free text; prompted if omitted"),
                 ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
             };
@@ -346,7 +357,14 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                         (None, None) => unreachable!("validated at load: options or from"),
                     },
                     ParamKind::Input(input) => {
-                        json!({ "name": name, "kind": "input", "default": input.default })
+                        json!({
+                            "name": name,
+                            "kind": "input",
+                            "default": input.default,
+                            // UIs render secret inputs as password fields and
+                            // must never echo or persist their values.
+                            "secret": input.secret,
+                        })
                     }
                     ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
                 })
@@ -356,6 +374,12 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                 "title": cmd.title,
                 "origin": cmd.origin,
                 "params": params,
+                // Readiness probe (run it via `pult doctor`; null = none
+                // declared) and the "needs a controlling terminal" contract —
+                // non-terminal surfaces treat interactive commands as
+                // terminal-only.
+                "check": cmd.check,
+                "interactive": cmd.interactive,
             })
         })
         .collect();
@@ -393,6 +417,9 @@ fn print_list(resolved: &Resolved) {
                 format!("  <{}>", params.join("> <"))
             }
         );
+        if cmd.interactive {
+            line.push_str("  (interactive)");
+        }
         if let Some(origin) = &cmd.origin {
             line.push_str(&format!("  ← {origin}"));
         }
@@ -420,6 +447,13 @@ commands:
       customer: { pick: { from: "./bin/impl list --env {env}" } }
       note: { input: { default: "" } }
     run: "./bin/impl shell {customer} {env}"
+    check: "command -v aws"
+    interactive: true
+  - id: import
+    title: Import data
+    params:
+      token: { input: { secret: true } }
+    run: "./bin/impl import {token}"
 "#,
         )
         .unwrap();
@@ -441,5 +475,14 @@ commands:
         assert_eq!(params[1]["depends_on"][0], "env");
         assert_eq!(params[2]["kind"], "input");
         assert_eq!(params[2]["default"], "");
+        assert_eq!(params[2]["secret"], false);
+        // The surfaces a non-terminal UI keys off: readiness probe, the
+        // needs-a-terminal contract, and password-field inputs.
+        assert_eq!(cmd["check"], "command -v aws");
+        assert_eq!(cmd["interactive"], true);
+        let import = &doc["commands"][1];
+        assert_eq!(import["check"], serde_json::Value::Null);
+        assert_eq!(import["interactive"], false);
+        assert_eq!(import["params"][0]["secret"], true);
     }
 }

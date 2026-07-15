@@ -91,6 +91,19 @@ pub struct CommandDef {
     #[serde(default)]
     pub params: IndexMap<String, ParamDef>,
     pub run: RunSpec,
+    /// Optional readiness probe: a shell command (no `{param}` placeholders —
+    /// it runs before params exist) whose exit 0 means "ready to run". Surfaced
+    /// by `pult doctor` and by UIs before the run button; never run implicitly
+    /// before `run:` — preflight steps in the playbook remain the mitigation.
+    #[serde(default)]
+    pub check: Option<String>,
+    /// Declares that `run:` requires a controlling terminal at runtime (REPLs,
+    /// TUIs, shells into containers). The contract: an *undeclared* command
+    /// must be fully non-interactive once its params are filled — declare a
+    /// param, don't `read` — which is what makes non-terminal surfaces safe.
+    /// The plain CLI ignores it (stdio is inherited either way).
+    #[serde(default)]
+    pub interactive: bool,
 }
 
 /// A param is a picker, free input, or a reference to a named param; exactly
@@ -143,6 +156,12 @@ pub struct PickDef {
 pub struct InputDef {
     #[serde(default)]
     pub default: Option<String>,
+    /// Secret values are prompted without echo and masked wherever an
+    /// interpolated command line is displayed (`running:` banner, `--print`,
+    /// the ephemeral trust prompt). A `default:` is rejected for secrets — a
+    /// default would be a credential committed to the manifest.
+    #[serde(default)]
+    pub secret: bool,
 }
 
 /// A step: a plain script string, or a script with a declared contract.
@@ -340,6 +359,11 @@ fn validate_file(manifest: &Manifest) -> Result<()> {
             }
             _ => {}
         }
+        if let Some(check) = &cmd.check
+            && check.trim().is_empty()
+        {
+            bail!("command `{}` has an empty check", cmd.id);
+        }
     }
     Ok(())
 }
@@ -360,6 +384,14 @@ fn validate_param(name: &str, def: &ParamDef) -> Result<()> {
             (None, None) => bail!("param `{name}`: `pick` needs either `options` or `from`"),
             _ => {}
         }
+    }
+    if let Some(input) = &def.input
+        && input.secret
+        && input.default.is_some()
+    {
+        bail!(
+            "param `{name}`: a secret input can't have a `default` — that would commit a credential to the manifest"
+        );
     }
     Ok(())
 }
@@ -520,6 +552,25 @@ commands:
         );
         let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("required: true"), "got: {err}");
+    }
+
+    #[test]
+    fn secret_input_rejects_a_default() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      \
+             token: { input: { secret: true, default: oops } }\n    run: \"echo {token}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("credential"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_check_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: x, title: X, run: \"true\", check: \"  \" }\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty check"), "got: {err}");
     }
 
     #[test]

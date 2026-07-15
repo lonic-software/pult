@@ -41,11 +41,26 @@ future phase and rejected with an explanatory error.
 
 ```yaml
 - id: shell               # unique after merging; reserved ids: `includes`, `registry`,
-  title: Open a shell     #   `module`, `update`, `self`, `init`, `trust`, `cache`, `ui`, `events`
+  title: Open a shell     #   `module`, `update`, `self`, `init`, `trust`, `cache`, `ui`,
+                          #   `events`, `x`, `tap`, `registries`, `serve`, `doctor`
   params:                 # ordered map — prompted in this order
     <name>: <param>
   run: <run>
+  check: "command -v aws" # optional readiness probe — see below
+  interactive: true       # optional: `run:` needs a controlling terminal
 ```
+
+- `check:` — a shell command whose exit 0 means "ready to run". It may not
+  reference `{param}`s (it runs before any param exists); `${var}`s are
+  substituted as usual. Run via `pult doctor` (all checks, trust-gated, exit 1
+  if any fail) and surfaced to UIs via `--list --json`; never run implicitly
+  before `run:` — put real preflight/setup in the playbook itself.
+- `interactive:` — declares that `run:` requires a controlling terminal at
+  runtime (a REPL, a TUI, a shell into a container). The contract: a command
+  *without* this flag must be fully non-interactive once its params are filled
+  — declare a param instead of `read`-ing — which is what makes non-terminal
+  surfaces (the future pane runner and desktop app) safe. The plain CLI
+  ignores the flag; stdio is inherited either way.
 
 ### `<param>` — exactly one of `pick`, `input`, `use`
 
@@ -53,6 +68,7 @@ future phase and rejected with an explanatory error.
 env:      { pick: { options: [dev, uat, pre] } }   # static list
 customer: { pick: { from: "cmd --env {env}" } }    # dynamic source
 note:     { input: { default: "hi" } }             # free text
+token:    { input: { secret: true } }              # prompted without echo
 region:   { use: aws:region }                      # copy of a named param
 ```
 
@@ -63,6 +79,13 @@ region:   { use: aws:region }                      # copy of a named param
   CLI-provided values are **not** validated against dynamic sources.
 - `use` — must reference an existing named param, which must itself be
   concrete (a named param cannot be another `use:`).
+- `input.secret` — prompted masked (no echo into scrollback) and redacted
+  wherever the composed command line is *displayed*: the `running:` banner,
+  `--print`, and the ephemeral trust prompt show `••••••` / `<name>` instead
+  of the value. A `default:` is rejected for secrets — that would commit a
+  credential to the manifest. The value still reaches the child process argv
+  as usual; a value passed as a CLI argument also lands in your shell history
+  — prefer the prompt for anything truly sensitive.
 
 ### `<step>`
 
@@ -275,8 +298,10 @@ keep their meaning), breaking changes bump `schema`.
         { "name": "env", "kind": "pick", "options": ["dev", "uat", "pre"] },
         { "name": "customer", "kind": "pick",
           "source": "./bin/impl list --env {env}", "depends_on": ["env"] },
-        { "name": "note", "kind": "input", "default": "" }
-      ]
+        { "name": "note", "kind": "input", "default": "", "secret": false }
+      ],
+      "check": "command -v aws",
+      "interactive": true
     }
   ]
 }
@@ -298,7 +323,13 @@ Field notes:
 - Param kinds: `pick` with `options` (static; CLI values are validated
   against it), `pick` with `source` (a shell-out; its stdout lines become
   options; `depends_on` lists params the source interpolates — supply those
-  first), and `input` (free text, `default` may be `null`).
+  first), and `input` (free text, `default` may be `null`). An input with
+  `"secret": true` must be rendered as a password field and never echoed,
+  logged, or persisted by tooling.
+- `check` — the readiness probe (`null` = none declared); run it yourself,
+  don't assume pult ran it. `interactive` — the command needs a controlling
+  terminal; non-terminal surfaces should treat it as terminal-only rather
+  than capturing its output.
 - `pult <id> <values…> --print` prints the composed script without running it —
   the natural dry-run step before an agent executes anything. It is fully
   side-effect-free: it does **not** prompt, run dynamic option sources, or

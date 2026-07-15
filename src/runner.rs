@@ -6,11 +6,14 @@ use anyhow::{Context, Result};
 /// Run a plain command line via `sh -c` with inherited stdio, so interactive
 /// sessions (e.g. `aws ecs execute-command`) get a working PTY — the reason
 /// the guided flow avoids a full-screen render loop (spec §9).
-pub fn run_sh(cmdline: &str, dir: &Path) -> Result<i32> {
-    eprintln!("└  running: {cmdline}");
+///
+/// `display` is the line shown in the banner and any error — the caller passes
+/// a secret-redacted rendering, so `cmdline` itself is never written anywhere.
+pub fn run_sh(cmdline: &str, display: &str, dir: &Path) -> Result<i32> {
+    eprintln!("└  running: {display}");
     execute(
         Command::new("sh").arg("-c").arg(cmdline).current_dir(dir),
-        cmdline,
+        display,
     )
 }
 

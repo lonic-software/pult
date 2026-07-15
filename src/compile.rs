@@ -130,6 +130,8 @@ mod tests {
             params: IndexMap::new(),
             run: ResolvedRun::Steps(entries),
             origin: None,
+            check: None,
+            interactive: false,
         }
     }
 

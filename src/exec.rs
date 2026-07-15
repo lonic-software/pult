@@ -55,12 +55,34 @@ pub fn execute(
     let values = fill(cmd, provided, Some(&resolved.run_dir))?;
     match &cmd.run {
         ResolvedRun::Script(template) => {
-            runner::run_sh(&interp::interpolate(template, &values)?, &resolved.run_dir)
+            // The `running:` banner (and any error message) shows a line with
+            // secret values masked — the real one exists only in the child's argv.
+            let display = interp::interpolate(template, &redact(cmd, &values))?;
+            runner::run_sh(
+                &interp::interpolate(template, &values)?,
+                &display,
+                &resolved.run_dir,
+            )
         }
         ResolvedRun::Steps(_) => {
             runner::run_bash(&compile::compile(cmd, &values)?, &cmd.id, &resolved.run_dir)
         }
     }
+}
+
+/// `values` with every `secret: true` param replaced by a fixed mask (fixed so
+/// the mask doesn't leak the value's length).
+fn redact(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> IndexMap<String, String> {
+    let mut out = values.clone();
+    for (name, def) in &cmd.params {
+        if let ParamKind::Input(input) = def.kind()
+            && input.secret
+            && let Some(v) = out.get_mut(name)
+        {
+            *v = "••••••".to_string();
+        }
+    }
+    out
 }
 
 /// Fill a command's params in declared order. `run_dir: None` = **preview**:
@@ -89,12 +111,21 @@ fn fill(
                 }
                 v.clone()
             }
+            // A provided secret is used for execution only — preview text
+            // (`--print`, the ephemeral trust prompt) shows the slot instead,
+            // so a secret passed on the command line is never printed back.
+            (Some(_), ParamKind::Input(input)) if input.secret && run_dir.is_none() => {
+                format!("<{name}>")
+            }
             (Some(v), ParamKind::Input(_)) => v.clone(),
             // Preview: show the slot instead of prompting or shelling out.
             (None, _) if run_dir.is_none() => format!("<{name}>"),
             (None, ParamKind::Pick(pick)) => {
                 let opts = options::resolve_pick(pick, &values, run_dir.unwrap())?;
                 prompt::select(&format!("{name}?"), opts)?
+            }
+            (None, ParamKind::Input(input)) if input.secret => {
+                prompt::password(&format!("{name}?"))?
             }
             (None, ParamKind::Input(input)) => {
                 prompt::text(&format!("{name}?"), input.default.as_deref())?
@@ -152,5 +183,60 @@ mod tests {
             !marker.exists(),
             "option source ran during a --print dry run"
         );
+    }
+
+    fn secret_cmd() -> (tempfile::TempDir, crate::resolver::Resolved) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            "version: 1\ncommands:\n  - id: login\n    title: Login\n    params:\n      \
+             token: { input: { secret: true } }\n      region: { input: { default: eu } }\n    \
+             run: \"aws login --token {token} --region {region}\"\n",
+        )
+        .unwrap();
+        let resolved =
+            resolver::resolve(manifest::load(&dir.path().join("pult.yaml")).unwrap()).unwrap();
+        (dir, resolved)
+    }
+
+    #[test]
+    fn provided_secret_never_appears_in_preview() {
+        let (_d, resolved) = secret_cmd();
+        let cmd = &resolved.commands[0];
+        let provided: HashMap<_, _> = [
+            ("token".to_string(), "hunter2".to_string()),
+            ("region".to_string(), "us".to_string()),
+        ]
+        .into();
+        // Preview fill (`--print`, ephemeral trust prompt): the secret becomes
+        // its slot even though a value was provided; plain inputs stay concrete.
+        let values = fill(cmd, &provided, None).unwrap();
+        let preview = compose(cmd, &values).unwrap();
+        assert!(!preview.contains("hunter2"), "leaked: {preview}");
+        assert!(preview.contains("<token>"), "got: {preview}");
+        assert!(preview.contains("--region us"), "got: {preview}");
+    }
+
+    #[test]
+    fn redact_masks_secret_values_only() {
+        let (_d, resolved) = secret_cmd();
+        let cmd = &resolved.commands[0];
+        let values: IndexMap<_, _> = [
+            ("token".to_string(), "hunter2".to_string()),
+            ("region".to_string(), "us".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let display = crate::interp::interpolate(
+            match &cmd.run {
+                ResolvedRun::Script(t) => t,
+                _ => unreachable!(),
+            },
+            &redact(cmd, &values),
+        )
+        .unwrap();
+        assert!(!display.contains("hunter2"), "leaked: {display}");
+        assert!(display.contains("••••••"), "got: {display}");
+        assert!(display.contains("--region us"), "got: {display}");
     }
 }
