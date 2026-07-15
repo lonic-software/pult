@@ -366,6 +366,12 @@ surfaces below.
    to start a server (`serve` and `doctor` stay reserved anyway — reserving
    is free). The environment burden stays in playbooks: preflight/setup
    steps, running the work in a container or remotely are things *authors*
-   write; pult never grows a `runs_on:` or executor abstraction. Packaging,
-   signing, and an update channel are a permanent tax — the app waits until
-   the palette and pane runner prove the demand.
+   write; pult never grows a `runs_on:` or executor abstraction. That gate
+   has been overridden: development starts now, in a separate
+   `pult-desktop` repository, kept out of this one so the core stays
+   dependency-light and the app can only consume the documented machine
+   surfaces above — the sidecar contract, pinned to released pult
+   versions. Packaging, signing, and an update channel are a permanent
+   tax, but it lands in that repo, not here; the demand call is that
+   handing executable playbooks to non-technical colleagues is itself
+   the signal, justifying starting ahead of the palette and pane runner.
