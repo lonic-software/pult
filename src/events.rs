@@ -58,9 +58,12 @@ fn parse_progress(rest: &str) -> Option<Event> {
     if pct_str == "?" {
         return Some(Event::Progress { pct: None, text });
     }
-    let pct: u8 = pct_str.parse().ok()?;
+    // Parsed as u32 (not u8): a percent above 255 (e.g. `300`) must still
+    // clamp to 100 rather than fail the parse and drop the event entirely —
+    // a stuck progress bar is worse than an over-clamped one.
+    let pct: u32 = pct_str.parse().ok()?;
     Some(Event::Progress {
-        pct: Some(pct.min(100)),
+        pct: Some(pct.min(100) as u8),
         text,
     })
 }
@@ -104,39 +107,51 @@ impl Renderer {
         Self::default()
     }
 
-    /// Feed one parsed event, writing OSC bytes to `out` as needed.
-    pub fn handle(&mut self, event: &Event, out: &mut impl Write) {
+    /// Feed one parsed event, writing OSC bytes to `out` as needed. Returns
+    /// whether this call actually wrote an OSC sequence — callers use this
+    /// to track whether a run ever rendered anything at all, since a run
+    /// that never does must never get a final OSC either (see
+    /// `render_final`).
+    pub fn handle(&mut self, event: &Event, out: &mut impl Write) -> bool {
         match event {
             Event::Progress { pct: Some(p), .. } => {
                 self.explicit_progress_seen = true;
                 write_osc(out, 1, *p);
+                true
             }
             Event::Progress { pct: None, .. } => {
                 self.explicit_progress_seen = true;
                 write_osc(out, 3, 0);
+                true
             }
             // Consumed, not rendered — `status` exists for richer surfaces.
-            Event::Status(_) => {}
+            Event::Status(_) => false,
             Event::Step { k, n, .. } => {
                 // Coarse progress from milestones — only until a real
                 // `progress` event takes over.
                 if !self.explicit_progress_seen {
                     let pct = ((*k - 1) as u64 * 100 / *n as u64) as u8;
                     write_osc(out, 1, pct);
+                    true
+                } else {
+                    false
                 }
             }
         }
     }
 }
 
-/// The run-ending OSC: clear (state 0) on a clean exit, error (state 2)
-/// otherwise. Emitted once, independent of the reader thread's state.
-pub fn render_final(exit_code: i32, out: &mut impl Write) {
-    if exit_code == 0 {
-        write_osc(out, 0, 0);
-    } else {
-        write_osc(out, 2, 0);
-    }
+/// The run-ending OSC: always clears (state 0), regardless of the command's
+/// exit code. There used to be a persistent "error" state (2) for non-zero
+/// exits, but a progress badge stuck red forever (nothing ever un-sets it
+/// outside another `pult` run) is worse than no badge at all — so this
+/// always clears.
+///
+/// Callers must only invoke this when at least one event was actually
+/// rendered during the run — a command that never emits anything must
+/// produce zero bytes of OSC, including no final clear.
+pub fn render_final(out: &mut impl Write) {
+    write_osc(out, 0, 0);
 }
 
 /// `ESC ] 9 ; 4 ; <state> ; <pct> ESC \` — state 0=clear, 1=set pct,
@@ -326,13 +341,51 @@ mod tests {
     }
 
     #[test]
-    fn final_osc_clears_on_success_and_errors_on_failure() {
+    fn final_osc_always_clears() {
+        // No persistent error state anymore (fix: a stuck red badge is
+        // worse than none) — `render_final` always emits the clear state,
+        // independent of how the run went.
         let mut buf = Vec::new();
-        render_final(0, &mut buf);
+        render_final(&mut buf);
         assert!(String::from_utf8_lossy(&buf).contains("9;4;0;0"));
+    }
 
-        buf.clear();
-        render_final(1, &mut buf);
-        assert!(String::from_utf8_lossy(&buf).contains("9;4;2;0"));
+    #[test]
+    fn clamps_percent_far_over_100() {
+        // `300` doesn't fit in a u8, so parsing it as one used to fail the
+        // event entirely (a frozen progress bar); parsed as u32 first, it
+        // clamps to 100 like any other over-range value.
+        assert_eq!(
+            parse("progress 300 uploading"),
+            Some(Event::Progress {
+                pct: Some(100),
+                text: Some("uploading".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn renderer_emits_nothing_before_first_event() {
+        let mut renderer = Renderer::new();
+        let mut buf = Vec::new();
+
+        // A status line is a valid event but never renders — the renderer
+        // (and, transitively, the reader thread's "did we ever render"
+        // flag) must reflect that nothing was actually written yet.
+        let wrote = renderer.handle(&Event::Status("working".to_string()), &mut buf);
+        assert!(!wrote);
+        assert!(buf.is_empty());
+
+        // The first event that actually produces OSC bytes reports it via
+        // the return value, which callers use to gate the final OSC.
+        let wrote = renderer.handle(
+            &Event::Progress {
+                pct: Some(10),
+                text: None,
+            },
+            &mut buf,
+        );
+        assert!(wrote);
+        assert!(!buf.is_empty());
     }
 }

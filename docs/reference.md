@@ -447,8 +447,16 @@ side:
 | `progress <n>` | state 1 (set), pct `n` |
 | `progress ?` | state 3 (indeterminate) |
 | `step <k>/<n>` (no `progress` seen yet) | state 1, pct derived as `(k-1)*100/n` |
-| run exits 0 | state 0 (clear) |
-| run exits non-zero | state 2 (error) |
+| a run that rendered at least one event finishes | state 0 (clear) |
+| a run that never emitted a single event finishes | nothing — no OSC at all |
+
+There's no persistent "error" OSC state: whatever the command's exit code, a
+run that emitted anything always finishes by clearing the badge. A progress
+indicator stuck red forever (nothing later un-sets it) is worse than none, so
+non-zero exits clear too. A command that never emits a single valid event —
+most scripts, since none of this is required — produces zero bytes of OSC
+for the whole run, including at the end: pult doesn't invent activity a
+command never reported.
 
 `status` carries no CLI rendering — it's consumed and dropped; it exists for
 richer surfaces (a pane runner, the desktop app) that can show a live text
@@ -473,6 +481,21 @@ and wants to render events its own way; pult only creates its own channel
 (and does the OSC translation above) when nothing upstream already claimed
 one **and** stderr is a terminal. Piped/non-interactive runs (CI) get neither
 — `PULT_EVENTS` stays unset, zero behavior change.
+
+An inherited `PULT_EVENTS` is only honored if it's a bare fd number (plain
+decimal digits, no sign, no surrounding whitespace) — bash's `>&word`
+redirects to a *file* named `word` when `word` isn't numeric, so a stray
+`PULT_EVENTS=events.log` in the environment would otherwise make every
+injected `step` guard silently truncate a file by that name. An invalid
+value is never forwarded to the child (pult strips it before running the
+command) and pult prints a one-line warning to stderr; the run proceeds as
+if `PULT_EVENTS` had never been set.
+
+**Fd 3 conflicts**: pult's own channel always uses fd 3. If pult itself was
+started with fd 3 already open (for example `pult import 3<seed.txt`), that
+means the invoker deliberately passed a descriptor — their use of fd 3 wins,
+so pult runs that command with no events channel at all rather than
+clobbering it.
 
 ## Exit codes
 
