@@ -275,24 +275,103 @@ trust is something you grant, never something a central index grants for you:
   a source is a git repo), with token-helper / cloud-credential auth, so an org
   can host its command sets wherever it already hosts artifacts.
 
-Then a richer interactive surface, in three independently useful steps —
+Then a richer interactive surface, in four independently useful steps —
 each **optional for command authors**, and none may weaken the properties
 that make pult work: inherited stdio for interactive commands, plain
 scriptable output, no runtime.
 
-1. **Events protocol** — scripts *may* write `progress` / `status` lines to
-   a `PULT_EVENTS` descriptor (stdout stays untouched; non-emitting scripts
-   lose nothing). Plain-CLI pult translates to OSC 9;4, so terminals that
+Two small schema affordances landed *before* any of it (**shipped**), because
+every later surface depends on them and both improve today's CLI:
+
+- **`secret:` inputs** — a param input declarable as secret: no prompt echo,
+  masked wherever an interpolated command line is displayed (`running:`
+  banner, `--print`, the trust prompt), redacted from future teed/audit
+  output, a password field in any form UI (`"secret"` in `--list --json`).
+  Credentials pasted as params (a DB password, cloud keys) are the use case;
+  it went first because retrofitting secrecy after values have leaked into
+  scrollback is far worse than adding the flag.
+- **`check:` readiness** — an optional per-command probe (exit 0 = ready) so
+  a surface can say "Docker isn't running" *before* the run button, not
+  after. The plain CLI gets `pult doctor` (trust-gated, exit 1 if any check
+  fails); UIs read `"check"` from `--list --json`. Preflight/setup steps
+  inside playbooks remain the real mitigation — `check:` only moves the
+  signal ahead of the click.
+
+The `interactive:` marker is also parsed, documented, and surfaced
+(`--list`, `--list --json`) today, so authors can start declaring the
+contract now; its runtime behavior (handoff / terminal-only) lands with the
+surfaces below.
+
+1. **Events protocol (shipped)** — scripts *may* write `progress` / `status`
+   / `step` lines to a `PULT_EVENTS` descriptor (stdout/stderr stay
+   untouched; non-emitting scripts lose nothing). Three verbs, on purpose —
+   events carry semantics, surfaces own presentation: pult decides *what*
+   happened, never *how* it's drawn. Unknown verbs and malformed lines are
+   silently ignored, in either direction, which is what makes the vocabulary
+   additive-forever rather than a versioned break waiting to happen — it
+   must never grow into a framework contract. Compiled step lists emit
+   `step k/n <name>` milestones automatically, one per top-level entry, with
+   zero manifest changes; the same names are exposed as `"steps"` in
+   `--list --json`, so a non-CLI surface can render them without parsing the
+   script. Plain-CLI pult translates events to OSC 9;4, so terminals that
    render progress natively (Windows Terminal, WezTerm, Ghostty) show it
-   with zero drawing on our side. Tiny, versioned vocabulary — this must
-   never grow into a framework contract.
+   with zero drawing on our side. If `PULT_EVENTS` is already set when pult
+   runs a command, pult does nothing — the var and its fd pass straight
+   through to the child — so a parent process (the future desktop app) can
+   own the channel and render events its own way instead.
 2. **Launcher palette** — evolve the bare-`pult` flow into a scope-aware,
    searchable palette (repo + user side by side; menus don't have the CLI's
-   namespace-collision problem). The palette always *exits before the
-   command runs* — commands keep the real terminal.
+   namespace-collision problem), organized into tabs/sections by command
+   group with arrow-key navigation rather than one long list. The grouping
+   data model is **shipped** ahead of the palette itself: a `category:` field
+   on commands, falling back to include origin when unset, feeds a single
+   grouping rule shared by every surface — today that's the two-stage
+   guided flow and grouped `--list` output; the palette just renders the
+   same groups as tabs. The palette always *exits before the command runs* —
+   commands keep the real terminal.
 3. **Pane runner** (`pult ui`, id reserved) — long-running non-interactive
    commands run in a pane with live output and event-driven progress
    (portable-pty + a vt100 grid); commands marked `interactive:` get a
    full-terminal handoff, lazygit-style, preserving today's guarantee.
-   Output teed to a file becomes an audit artifact. The big one — only
-   after 1 and 2 prove the demand.
+   `interactive:` means exactly *"requires a controlling terminal at
+   runtime"* — an undeclared command must be fully non-interactive once its
+   declared params are filled (declare a param, don't `read`), which is the
+   contract that makes any non-terminal surface safe. For the stray prompt
+   an author didn't write (sudo, a host-key confirmation), the pty makes the
+   question visible and a one-line stdin box under the pane answers it — a
+   silent hang becomes an answerable prompt. Output teed to a file becomes
+   an audit artifact (secrets redacted). The big one — only after 1 and 2
+   prove the demand.
+4. **Desktop app** (Tauri) — the same core with a windowed shell, for
+   handing a repo's playbooks to people who won't open a terminal at all:
+   point it at a folder (or a `pult x` source), the trust prompt becomes a
+   native dialog, commands are listed per scope, params render as forms
+   (secrets masked), `check:` state shows up front, pty output streams into
+   a pane with the same one-line stdin box for stray prompts.
+   `interactive:` commands are shown but terminal-only. The app bundles the
+   pult binary itself as a Tauri sidecar and drives it over its existing
+   machine surfaces — `--list --json` for command, param, and readiness
+   metadata, `pult doctor --json` for readiness, `pult <command>` spawned
+   under a pty for execution and output — rather than linking a core crate:
+   the crate's runner inherits terminal stdio a windowed app doesn't have,
+   so the app needs its own pty spawning either way, and the reusable part
+   is already the stable JSON surface. The process boundary also keeps the
+   pult binary the single trust choke point (an app bug can't bypass trust
+   it never enforces itself) and makes the app dogfood the same
+   `--list --json` contract agents and tooling rely on. The workspace split
+   into a core crate isn't dead, just deferred until the app needs
+   something the process boundary can't give it. A `pult serve` local-web
+   mode was considered and rejected: anyone already in a terminal will just
+   use pult there, and anyone who won't open a terminal shouldn't need one
+   to start a server (`serve` and `doctor` stay reserved anyway — reserving
+   is free). The environment burden stays in playbooks: preflight/setup
+   steps, running the work in a container or remotely are things *authors*
+   write; pult never grows a `runs_on:` or executor abstraction. That gate
+   has been overridden: development starts now, in a separate
+   `pult-desktop` repository, kept out of this one so the core stays
+   dependency-light and the app can only consume the documented machine
+   surfaces above — the sidecar contract, pinned to released pult
+   versions. Packaging, signing, and an update channel are a permanent
+   tax, but it lands in that repo, not here; the demand call is that
+   handing executable playbooks to non-technical colleagues is itself
+   the signal, justifying starting ahead of the palette and pane runner.

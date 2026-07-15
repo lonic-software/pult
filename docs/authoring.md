@@ -44,6 +44,74 @@ must be a declared param, unknown placeholders are load errors, `{{`/`}}` are
 literal braces. Interpolated values are shell-quoted — a user typing
 `; rm -rf /` into an input becomes a harmless quoted string.
 
+### Secrets, readiness, and interactive commands
+
+Three optional declarations make a command a better citizen everywhere — the
+CLI today, and any future surface (pane runner, desktop app):
+
+```yaml
+- id: import
+  title: Import the data dump
+  check: "docker info >/dev/null 2>&1"        # exit 0 = ready to run
+  params:
+    token: { input: { secret: true } }        # prompted without echo
+    table: { input: { default: users } }
+  run: "./bin/import --token {token} --into {table}"
+
+- id: db-shell
+  title: Open a psql shell
+  interactive: true                           # needs a real terminal
+  run: "psql $DATABASE_URL"
+```
+
+- **`secret: true`** — the prompt is masked, and the value is redacted from
+  every place a composed command line is shown (`running:` banner, `--print`,
+  the trust prompt). Secrets can't have a `default:` — that would commit a
+  credential to the yaml.
+- **`check:`** — a cheap probe (`command -v`, `docker info`, an auth ping)
+  that answers "would this command even start?" before anyone runs it:
+  `pult doctor` runs all of them and reports. It may not use `{param}`s, and
+  pult never runs it implicitly — real preflight/setup belongs in the
+  playbook's own steps, where it can also *fix* what's missing.
+- **`interactive: true`** — declare it when `run:` needs a controlling
+  terminal (REPLs, TUIs, shells into containers). The flip side is a contract
+  worth honoring: a command *without* the flag should be fully non-interactive
+  once its params are filled. If your script `read`s from the user mid-run,
+  lift that question into a param — every surface can render a param, but a
+  mid-run prompt only works in a terminal.
+
+### Grouping commands with `category:`
+
+An include-heavy manifest reaches 30+ commands fast, and a flat list stops
+helping. Give related commands a `category:` and the guided flow, `--list`,
+and future surfaces (palette, desktop app) group them under it instead;
+`category: Deploy` on a local *and* a module command merges both into one
+"Deploy" group. Module authors: categorize your exported commands — consumers
+inherit organized groups for free. Small manifests can skip it; one group
+renders as today's flat list. If you don't categorize, give your module a
+`name:` — it becomes the group header consumers see instead of the raw
+include source string.
+
+Write **`description:`** for commands you hand to others: the title names the
+control, the description explains it, and UIs display it on the command card.
+
+### Progress events (optional)
+
+A command can report progress on the `PULT_EVENTS` fd, guarded so a script
+behaves identically whether or not anything is listening:
+
+```sh
+[ -n "${PULT_EVENTS:-}" ] && echo "progress 40 restoring" >&3
+```
+
+You don't have to write this yourself to get milestones: structure the
+command as a step list (below) and pult injects `step k/n <name>` emissions
+for you at compile time, one per step name. `progress` is for refining
+*within* a step, when you have a real percentage to report. Either way,
+events are entirely optional and a pult-less run (or one piped, non-tty) is
+completely unaffected — see [reference.md](reference.md#events-protocol--pult_events)
+for the full vocabulary and OSC 9;4 rendering.
+
 ## 2 · Composing commands from steps
 
 For anything beyond a one-liner, declare named building blocks and compose:
@@ -237,8 +305,9 @@ Rules that keep resolution deterministic and safe:
   any duplicate name (command, param, or step) in the merged whole is a load
   error — use `prefix:` to disambiguate. Nothing ever silently shadows.
 - The command ids `includes`, `registry`, `module`, `update`, `self`, `init`,
-  `trust`, `cache`, `ui`, and `events` are reserved for pult's own (current
-  and future) subcommands; every other id is promised to manifests forever.
+  `trust`, `cache`, `ui`, `events`, `x`, `tap`, `registries`, `serve`, and
+  `doctor` are reserved for pult's own (current and future) subcommands;
+  every other id is promised to manifests forever.
 
 ## 5 · Publishing a module
 

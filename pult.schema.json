@@ -77,8 +77,37 @@
         "title"
       ],
       "properties": {
+        "category": {
+          "description": "Display grouping for the guided flow, the palette, and `--list`: an author-assigned label (\"Deploy\", \"Tests\"). Commands sharing a category are grouped together regardless of which file declared them — a module tagging its exports \"Deploy\" joins the local \"Deploy\" group. When unset, grouping falls back to the include origin (see `ResolvedCommand::group_label`), so a manifest with no categories at all degrades to today's flat list/menu.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "check": {
+          "description": "Optional readiness probe: a shell command (no `{param}` placeholders — it runs before params exist) whose exit 0 means \"ready to run\". Surfaced by `pult doctor` and by UIs before the run button; never run implicitly before `run:` — preflight steps in the playbook remain the mitigation.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "One or two sentences explaining what the command does, shown by `--help`, `--list --json`, and UIs — the title names the control, the description explains it.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
+        },
+        "interactive": {
+          "description": "Declares that `run:` requires a controlling terminal at runtime (REPLs, TUIs, shells into containers). The contract: an *undeclared* command must be fully non-interactive once its params are filled — declare a param, don't `read` — which is what makes non-terminal surfaces safe. The plain CLI ignores it (stdio is inherited either way).",
+          "default": false,
+          "type": "boolean"
         },
         "params": {
           "type": "object",
@@ -157,6 +186,11 @@
             "string",
             "null"
           ]
+        },
+        "secret": {
+          "description": "Secret values are prompted without echo and masked wherever an interpolated command line is displayed (`running:` banner, `--print`, the ephemeral trust prompt). A `default:` is rejected for secrets — a default would be a credential committed to the manifest.",
+          "default": false,
+          "type": "boolean"
         }
       },
       "additionalProperties": false

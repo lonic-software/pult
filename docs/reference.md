@@ -41,11 +41,45 @@ future phase and rejected with an explanatory error.
 
 ```yaml
 - id: shell               # unique after merging; reserved ids: `includes`, `registry`,
-  title: Open a shell     #   `module`, `update`, `self`, `init`, `trust`, `cache`, `ui`, `events`
+  title: Open a shell     #   `module`, `update`, `self`, `init`, `trust`, `cache`, `ui`,
+                          #   `events`, `x`, `tap`, `registries`, `serve`, `doctor`
   params:                 # ordered map — prompted in this order
     <name>: <param>
   run: <run>
+  check: "command -v aws" # optional readiness probe — see below
+  interactive: true       # optional: `run:` needs a controlling terminal
+  category: Deploy        # optional: display grouping — see below
+  description: "Deploys the app to the given environment."  # optional — see below
 ```
+
+- `category:` — an author-assigned display group ("Deploy", "Tests") for the
+  guided flow, `--list --json`, and future surfaces (palette, desktop app);
+  the flat `--list` text stays ungrouped (see CLI section below) so the
+  scripts that parse it keep working. Grouping rule, implemented once and
+  shared by every grouped surface: a command's group is its
+  `category` if set, else the module's declared `name:` (see the manifest
+  `name:` field in [authoring.md](authoring.md)) for commands that came from an
+  include, else the include it came from (`origin`, the raw source string),
+  else the implicit `local` group; groups containing at least one
+  locally-declared command come first (in order of first appearance), then
+  the remaining groups in include order. Categories merge across sources — a
+  module tagging its exports `Deploy` joins the local `Deploy` group, not a
+  separate one.
+- `check:` — a shell command whose exit 0 means "ready to run". It may not
+  reference `{param}`s (it runs before any param exists); `${var}`s are
+  substituted as usual. Run via `pult doctor` (all checks, trust-gated, exit 1
+  if any fail) and surfaced to UIs via `--list --json`; never run implicitly
+  before `run:` — put real preflight/setup in the playbook itself.
+- `interactive:` — declares that `run:` requires a controlling terminal at
+  runtime (a REPL, a TUI, a shell into a container). The contract: a command
+  *without* this flag must be fully non-interactive once its params are filled
+  — declare a param instead of `read`-ing — which is what makes non-terminal
+  surfaces (the future pane runner and desktop app) safe. The plain CLI
+  ignores the flag; stdio is inherited either way.
+- `description:` — one or two sentences explaining what the command does.
+  The title names the control; the description explains it. Shown by
+  `pult <cmd> --help`, `--list --json`, and UIs (the command card); the flat
+  `--list` and guided-flow text stay unchanged.
 
 ### `<param>` — exactly one of `pick`, `input`, `use`
 
@@ -53,6 +87,7 @@ future phase and rejected with an explanatory error.
 env:      { pick: { options: [dev, uat, pre] } }   # static list
 customer: { pick: { from: "cmd --env {env}" } }    # dynamic source
 note:     { input: { default: "hi" } }             # free text
+token:    { input: { secret: true } }              # prompted without echo
 region:   { use: aws:region }                      # copy of a named param
 ```
 
@@ -63,6 +98,14 @@ region:   { use: aws:region }                      # copy of a named param
   CLI-provided values are **not** validated against dynamic sources.
 - `use` — must reference an existing named param, which must itself be
   concrete (a named param cannot be another `use:`).
+- `input.secret` — prompted masked (no echo into scrollback) and redacted
+  wherever the composed command line is *displayed*: the `running:` banner,
+  `--print`, and the ephemeral trust prompt show `••••••` / `<name>` instead
+  of the value. A `default:` is rejected for secrets — that would commit a
+  credential to the manifest. The value still reaches the child process argv
+  as usual; a value passed as a CLI argument also lands in your shell history
+  — prefer the prompt for anything truly sensitive, or `--params-json` (below)
+  when tooling needs to pass it non-interactively without putting it in argv.
 
 ### `<step>`
 
@@ -229,15 +272,21 @@ cache directory is always safe (next run re-fetches).
 pult                          guided flow
 pult <command> [values…]      direct invocation (missing values are prompted)
 pult <command> --help         generated per-command help
-pult --list                   commands, params, and origins
-pult --list --json            the same, machine-readable (schema below)
+pult --list                   commands, params, and origins (flat, one line each — scripts parse this)
+pult --list --json            the same, machine-readable, grouped by category (schema below)
 pult <command> --print        print the composed script instead of running
+pult <command> --params-json  read this command's param values from stdin as a JSON
+                                object (positional args still work; keeps them out of
+                                pult's argv and shell history — see caveat below)
 pult --trust …                trust this manifest without prompting (records immediately)
 pult x <SOURCE> [COMMAND]     run a command from a module source, no manifest (npx-style)
      [values…] [--var N=V]      --trust / --print as elsewhere; a bare source takes the latest tag
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
+pult doctor [--json]          run every command's check: and report readiness (exit 1 if
+                                any fail; trust-gated — checks are manifest code; --json for
+                                the machine-readable form)
 pult init [--user]            scaffold a starter manifest here (or your user manifest)
 pult self schema              print the manifest JSON Schema (draft-07) to stdout
 pult update [VERSION]         self-update to the latest (or given) release; needs no manifest
@@ -261,22 +310,28 @@ keep their meaning), breaking changes bump `schema`.
   "scope": "repo",
   "trusted": false,
   "includes": [
-    { "source": "./tools", "kind": "local" },
+    { "source": "./tools", "kind": "local", "name": null },
     { "source": "github.com/opskit/aws-common@v1.4.2", "kind": "git",
       "url": "https://github.com/opskit/aws-common",
-      "rev": "v1.4.2", "rev_kind": "tag", "resolved_sha": "8a6e6fd4…" }
+      "rev": "v1.4.2", "rev_kind": "tag", "resolved_sha": "8a6e6fd4…",
+      "name": "AWS Tooling" }
   ],
   "commands": [
     {
       "id": "shell",
       "title": "Open a shell",
       "origin": null,
+      "category": null,
+      "description": "Opens an interactive shell for the given customer and environment.",
       "params": [
         { "name": "env", "kind": "pick", "options": ["dev", "uat", "pre"] },
         { "name": "customer", "kind": "pick",
           "source": "./bin/impl list --env {env}", "depends_on": ["env"] },
-        { "name": "note", "kind": "input", "default": "" }
-      ]
+        { "name": "note", "kind": "input", "default": "", "secret": false }
+      ],
+      "check": "command -v aws",
+      "interactive": true,
+      "steps": null
     }
   ]
 }
@@ -293,17 +348,178 @@ Field notes:
   to a human rather than pass `--trust` itself.
 - `origin` — the include source a command came from; `null` = declared in the
   root manifest.
+- `includes[].name` — that include's declared `name:` (var-substituted), or
+  `null` if the module declared none.
+- `category` — the raw `category:` value the author declared; `null` = none.
+  This is *not* the computed display group — it's the grouping rule's input,
+  not its output (see `<command>` above); a surface applying the grouping rule
+  combines this with the matching include's `name` and `origin` itself.
+- `description` — the raw `description:` value the author declared; `null` =
+  none. One or two sentences explaining what the command does, for
+  `--help`, `--list --json`, and UIs.
 - Params appear in **declared order**, which is also positional-argument
   order: `pult <id> <first> <second> …`.
 - Param kinds: `pick` with `options` (static; CLI values are validated
   against it), `pick` with `source` (a shell-out; its stdout lines become
   options; `depends_on` lists params the source interpolates — supply those
-  first), and `input` (free text, `default` may be `null`).
+  first), and `input` (free text, `default` may be `null`). An input with
+  `"secret": true` must be rendered as a password field and never echoed,
+  logged, or persisted by tooling.
+- `check` — the readiness probe (`null` = none declared); run it yourself or
+  via `pult doctor` (`--json` for the machine-readable runner output — see
+  below), don't assume pult ran it. `interactive` — the command needs a
+  controlling terminal; non-terminal surfaces should treat it as
+  terminal-only rather than capturing its output.
+- `steps` — the labels a live run emits as `step k/n <name>` events (see
+  [Events protocol](#events-protocol--pult_events) below); `null` for a
+  string-form `run:`, which has no steps to name.
 - `pult <id> <values…> --print` prints the composed script without running it —
   the natural dry-run step before an agent executes anything. It is fully
   side-effect-free: it does **not** prompt, run dynamic option sources, or
   require trust, so you can preview an untrusted command safely. Params you
   don't supply appear as `<name>` metavars rather than being prompted for.
+
+## Machine-readable readiness — `pult doctor --json`
+
+Same trust gate and exit-code semantics as text-mode `pult doctor` (exit 1 if
+any declared check failed), but as a stable document for tooling instead of a
+printed table:
+
+```json
+{
+  "schema": 1,
+  "name": "demo",
+  "manifest": "/repo/pult.yaml",
+  "commands": [
+    { "id": "import", "title": "Import data", "check": "command -v aws", "ready": true, "exit_code": 0 },
+    { "id": "shell", "title": "Open a shell", "check": null, "ready": null, "exit_code": null }
+  ]
+}
+```
+
+`ready` and `exit_code` are `null` when the command declares no `check:` —
+there's nothing to run, not a failure.
+
+## `--params-json` — param values without argv
+
+`pult <command> [values…] --params-json` reads the rest of a command's param
+values from **stdin**, as a flat JSON object of string values, instead of (or
+alongside) positional arguments — the channel the desktop app and scripts use
+to avoid putting values on the command line:
+
+```sh
+echo '{"token":"hunter2"}' | pult import --params-json
+```
+
+Rules: stdin must be a JSON object whose values are all strings (anything
+else — invalid JSON, a non-object, a non-string value — is a load error);
+every key must be a param the invoked command declares (an unknown key names
+the valid ones, for typo safety); a param given both positionally and via
+`--params-json` is a conflict, not a silent override. Params in neither
+source are still prompted for as usual — and since stdin is now claimed by
+`--params-json`, an interactive terminal on stdin is rejected up front rather
+than hanging (pipe or redirect it: `echo '{...}' | pult …`, or a file).
+Only meaningful for a direct command invocation — `--list`, `doctor`,
+`includes`, and the bare guided flow reject it. Combine with `--print` to
+preview the composed command with concrete values (secrets still masked).
+
+**What this does and doesn't protect.** `--params-json` keeps values out of
+pult's own argv (so they never show up in `ps` for the `pult` process itself)
+and out of your shell history. It does **not** make the values disappear
+downstream: pult composes the final command line and runs it as
+`sh -c "<cmdline>"`, so while that `sh` (and whatever it execs) is running,
+the values are visible in *its* argv to anything that can read `ps` on the
+same machine — the same exposure positional values already have. Treat it as
+"don't put secrets in argv/history you control", not as a way to hide a
+secret from other processes on the host.
+
+## Events protocol — `PULT_EVENTS`
+
+A running command *may* write progress lines to the fd named by
+`$PULT_EVENTS` — stdout/stderr stay untouched either way, and a script that
+never emits anything loses nothing. Guard every emission so the same script
+behaves identically whether or not anything is listening:
+
+```sh
+[ -n "${PULT_EVENTS:-}" ] && echo "progress 40 restoring" >&3
+```
+
+(`3` here because that's the fd pult wires up today; always read the number
+from `$PULT_EVENTS` rather than hardcoding it.)
+
+Three verbs, v1:
+
+```
+progress <0-100|?> [text]    # determinate percent, or ? = indeterminate
+status <text>                # transient activity line
+step <k>/<n> <name>          # entering step k of n
+```
+
+**Unknown verbs and malformed lines are silently ignored** — never an error,
+in either direction. This is what makes the vocabulary additive-forever: a
+script targeting a newer pult, or an older script run under a newer one,
+never breaks.
+
+The plain CLI translates events to [OSC
+9;4](https://learn.microsoft.com/en-us/windows/terminal/tutorials/progress-bar-sequences),
+the ConEmu/Windows Terminal/WezTerm/Ghostty progress-bar protocol, so
+terminals that render progress natively show it with zero drawing on our
+side:
+
+| Event | OSC |
+|---|---|
+| `progress <n>` | state 1 (set), pct `n` |
+| `progress ?` | state 3 (indeterminate) |
+| `step <k>/<n>` (no `progress` seen yet) | state 1, pct derived as `(k-1)*100/n` |
+| a run that rendered at least one event finishes | state 0 (clear) |
+| a run that never emitted a single event finishes | nothing — no OSC at all |
+
+There's no persistent "error" OSC state: whatever the command's exit code, a
+run that emitted anything always finishes by clearing the badge. A progress
+indicator stuck red forever (nothing later un-sets it) is worse than none, so
+non-zero exits clear too. A command that never emits a single valid event —
+most scripts, since none of this is required — produces zero bytes of OSC
+for the whole run, including at the end: pult doesn't invent activity a
+command never reported.
+
+`status` carries no CLI rendering — it's consumed and dropped; it exists for
+richer surfaces (a pane runner, the desktop app) that can show a live text
+line. **Explicit beats derived**: once any `progress` event has arrived in a
+run, `step` milestones stop driving the percentage — they're a coarse
+fallback for scripts that never call `progress` at all.
+
+**Compiled step lists emit `step` events automatically.** A list-form `run:`
+(see [authoring.md](authoring.md#2--composing-commands-from-steps)) gets a
+guarded `step k/n <name>` emission injected before each top-level entry at
+compile time — structure a command as steps and you get milestones for
+free, no manifest changes required. `--print` shows the script without these
+guards (they'd clutter the dry-run output you're meant to read); a live run
+compiles them in. The same labels are exposed as `"steps"` in `--list --json`
+(below), so a surface can render milestones without parsing the script.
+
+**`PULT_EVENTS` passthrough**: if `PULT_EVENTS` is already set in pult's own
+environment when it runs a command, pult does nothing — no pipe, no
+translation. The var and its fd inherit through to the child as-is. This is
+for a parent process (the future desktop app) that owns the channel itself
+and wants to render events its own way; pult only creates its own channel
+(and does the OSC translation above) when nothing upstream already claimed
+one **and** stderr is a terminal. Piped/non-interactive runs (CI) get neither
+— `PULT_EVENTS` stays unset, zero behavior change.
+
+An inherited `PULT_EVENTS` is only honored if it's a bare fd number (plain
+decimal digits, no sign, no surrounding whitespace) — bash's `>&word`
+redirects to a *file* named `word` when `word` isn't numeric, so a stray
+`PULT_EVENTS=events.log` in the environment would otherwise make every
+injected `step` guard silently truncate a file by that name. An invalid
+value is never forwarded to the child (pult strips it before running the
+command) and pult prints a one-line warning to stderr; the run proceeds as
+if `PULT_EVENTS` had never been set.
+
+**Fd 3 conflicts**: pult's own channel always uses fd 3. If pult itself was
+started with fd 3 already open (for example `pult import 3<seed.txt`), that
+means the invoker deliberately passed a descriptor — their use of fd 3 wins,
+so pult runs that command with no events channel at all rather than
+clobbering it.
 
 ## Exit codes
 

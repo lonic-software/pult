@@ -16,7 +16,7 @@ use crate::manifest::{
 /// breaks any manifest already using it, so anything the engine might
 /// plausibly want is parked now (`self` is the umbrella for everything
 /// unforeseen). Everything NOT on this list is promised to manifests forever.
-const RESERVED_IDS: [&str; 13] = [
+const RESERVED_IDS: [&str; 15] = [
     "includes",
     "registry",
     "module",
@@ -32,6 +32,10 @@ const RESERVED_IDS: [&str; 13] = [
     "x",
     "tap",
     "registries",
+    // the interactive-surface roadmap beyond `ui`: the local web surface
+    // (`pult serve`) and the `check:` readiness listing (`pult doctor`).
+    "serve",
+    "doctor",
 ];
 
 /// A root manifest with all includes resolved, vars substituted, `use:`
@@ -54,6 +58,9 @@ pub struct Resolved {
     pub include_summary: Vec<String>,
     /// What each include is pinned to — the input to `pult includes verify`.
     pub pins: Vec<PinInfo>,
+    /// Each include's declared `name:` (var-substituted), aligned in order
+    /// with `pins`/`include_summary`; `None` when that module declared none.
+    pub include_names: Vec<Option<String>>,
     pub commands: Vec<ResolvedCommand>,
     /// Set only by `pult x`: this is a single ephemeral source, not a durable
     /// manifest. Its one effect today is that the trust prompt shows the command
@@ -87,6 +94,78 @@ pub struct ResolvedCommand {
     pub run: ResolvedRun,
     /// Include source this command came from; None = declared locally.
     pub origin: Option<String>,
+    /// The module's declared display name (`name:` in its manifest);
+    /// `None` when the module has no `name:` or the command is local.
+    pub origin_name: Option<String>,
+    /// Readiness probe (vars substituted; no `{param}` placeholders) —
+    /// run by `pult doctor`, never implicitly before `run:`.
+    pub check: Option<String>,
+    /// Author-declared "requires a controlling terminal at runtime".
+    pub interactive: bool,
+    /// Author-declared display group; `${var}`-substituted like `title`.
+    /// `None` means grouping falls back to `origin` (see [`group_label`]).
+    pub category: Option<String>,
+    /// One or two sentences explaining what the command does;
+    /// `${var}`-substituted like `title`. `None` when the author set none.
+    pub description: Option<String>,
+}
+
+/// Grouping fallback label for commands declared directly in the root
+/// manifest (no `category:`, no include `origin`) — kept separate from a
+/// user-typed category so it can never collide with one.
+const LOCAL_GROUP: &str = "local";
+
+impl ResolvedCommand {
+    /// This command's display group: `category` if the author set one, else
+    /// the include's declared `name:` (`origin_name`), else the include
+    /// `origin` (its source string), else `"local"` for a root-declared
+    /// command. Categories intentionally merge across sources — a module
+    /// tagging its commands "Deploy" joins the local "Deploy" group.
+    pub fn group_label(&self) -> &str {
+        self.category
+            .as_deref()
+            .or(self.origin_name.as_deref())
+            .or(self.origin.as_deref())
+            .unwrap_or(LOCAL_GROUP)
+    }
+}
+
+/// Group resolved commands for display (guided flow, palette, `--list`).
+///
+/// Group order: groups containing at least one locally-declared command
+/// (`origin: None`) come first, in order of first appearance; then the
+/// remaining groups in first-appearance order (which is include order, since
+/// includes are merged before local commands). Within a group, commands keep
+/// resolved order.
+pub fn group_commands(cmds: &[ResolvedCommand]) -> Vec<(String, Vec<&ResolvedCommand>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut has_local: HashSet<String> = HashSet::new();
+    let mut members: std::collections::HashMap<String, Vec<&ResolvedCommand>> =
+        std::collections::HashMap::new();
+
+    for cmd in cmds {
+        let label = cmd.group_label().to_string();
+        if !members.contains_key(&label) {
+            order.push(label.clone());
+        }
+        if cmd.origin.is_none() {
+            has_local.insert(label.clone());
+        }
+        members.entry(label).or_default().push(cmd);
+    }
+
+    let (mut local_first, mut rest): (Vec<String>, Vec<String>) = order
+        .into_iter()
+        .partition(|label| has_local.contains(label));
+    local_first.append(&mut rest);
+
+    local_first
+        .into_iter()
+        .map(|label| {
+            let cmds = members.remove(&label).unwrap_or_default();
+            (label, cmds)
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -157,17 +236,19 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
     let mut trust_input = raw;
     let mut include_summary = Vec::new();
     let mut pins = Vec::new();
+    let mut include_names = Vec::new();
     let mut ns = Namespaces {
         params: IndexMap::new(),
         steps: IndexMap::new(),
     };
-    let mut merged: Vec<(manifest::CommandDef, Option<String>)> = Vec::new();
+    let mut merged: Vec<(manifest::CommandDef, Option<String>, Option<String>)> = Vec::new();
 
     for inc in &root.includes {
         let loaded_module = load_module(inc, &dir, cache_root, &mut trust_input)
             .with_context(|| format!("include `{}`", inc.source))?;
         include_summary.push(loaded_module.summary);
         pins.push(loaded_module.pin);
+        include_names.push(loaded_module.manifest.name.clone());
         merge_module(loaded_module.manifest, &inc.source, &mut ns, &mut merged)
             .with_context(|| format!("include `{}`", inc.source))?;
     }
@@ -180,12 +261,12 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
         insert_unique(&mut ns.steps, name, (step, None), "step")?;
     }
     for cmd in root.commands {
-        merged.push((cmd, None));
+        merged.push((cmd, None, None));
     }
 
     let mut seen_ids = HashSet::new();
     let mut commands = Vec::new();
-    for (cmd, origin) in merged {
+    for (cmd, origin, origin_name) in merged {
         if RESERVED_IDS.contains(&cmd.id.as_str()) {
             bail!(
                 "command id `{}` is reserved for pult's own subcommands — pick another id",
@@ -198,7 +279,7 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
                 cmd.id
             );
         }
-        commands.push(resolve_command(cmd, origin, &ns)?);
+        commands.push(resolve_command(cmd, origin, origin_name, &ns)?);
     }
     if commands.is_empty() {
         bail!("{}: no commands after resolving includes", path.display());
@@ -220,6 +301,7 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
         trust_hash,
         include_summary,
         pins,
+        include_names,
         commands,
         ephemeral: false,
     })
@@ -426,9 +508,10 @@ fn merge_module(
     module: Manifest,
     source: &str,
     ns: &mut Namespaces,
-    merged: &mut Vec<(manifest::CommandDef, Option<String>)>,
+    merged: &mut Vec<(manifest::CommandDef, Option<String>, Option<String>)>,
 ) -> Result<()> {
     let origin = Some(source.to_string());
+    let origin_name = module.name;
     for (name, def) in module.params {
         insert_unique(&mut ns.params, name, (def, origin.clone()), "param")?;
     }
@@ -436,7 +519,7 @@ fn merge_module(
         insert_unique(&mut ns.steps, name, (step, origin.clone()), "step")?;
     }
     for cmd in module.commands {
-        merged.push((cmd, origin.clone()));
+        merged.push((cmd, origin.clone(), origin_name.clone()));
     }
     Ok(())
 }
@@ -458,6 +541,9 @@ fn insert_unique<T>(
 
 /// Apply `${var}`-style substitution to every template-bearing string field.
 fn visit_templates(m: &mut Manifest, f: &dyn Fn(&mut String)) {
+    if let Some(name) = &mut m.name {
+        f(name);
+    }
     for def in m.params.values_mut() {
         visit_param(def, f);
     }
@@ -466,6 +552,15 @@ fn visit_templates(m: &mut Manifest, f: &dyn Fn(&mut String)) {
     }
     for cmd in &mut m.commands {
         f(&mut cmd.title);
+        if let Some(check) = &mut cmd.check {
+            f(check);
+        }
+        if let Some(category) = &mut cmd.category {
+            f(category);
+        }
+        if let Some(description) = &mut cmd.description {
+            f(description);
+        }
         for def in cmd.params.values_mut() {
             visit_param(def, f);
         }
@@ -564,6 +659,7 @@ fn apply_prefix(m: &mut Manifest, prefix: &str) {
 fn resolve_command(
     cmd: manifest::CommandDef,
     origin: Option<String>,
+    origin_name: Option<String>,
     ns: &Namespaces,
 ) -> Result<ResolvedCommand> {
     let ctx = || format!("command `{}`", cmd.id);
@@ -611,6 +707,17 @@ fn resolve_command(
         seen.insert(name.as_str());
     }
 
+    // A check runs before any param exists, so placeholders can't mean anything.
+    if let Some(check) = &cmd.check {
+        let phs = interp::placeholders(check)?;
+        if let Some(ph) = phs.first() {
+            bail!(
+                "{}: check references `{{{ph}}}` — a readiness check runs before params are filled, so it can't use them",
+                ctx()
+            );
+        }
+    }
+
     let run = match &cmd.run {
         RunSpec::Script(s) => {
             // Strict single-line template: placeholders must be declared params.
@@ -640,6 +747,11 @@ fn resolve_command(
         params,
         run,
         origin,
+        origin_name,
+        check: cmd.check,
+        interactive: cmd.interactive,
+        category: cmd.category,
+        description: cmd.description,
     })
 }
 
@@ -835,7 +947,9 @@ commands:
         let ids: Vec<_> = r.commands.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["aws:shell", "deploy"], "includes first, then local");
         assert_eq!(r.commands[0].origin.as_deref(), Some("./mods/aws"));
+        assert_eq!(r.commands[0].origin_name.as_deref(), Some("awsmod"));
         assert_eq!(r.commands[1].origin, None);
+        assert_eq!(r.commands[1].origin_name, None);
 
         // use: param inlined to the module's concrete picker
         let deploy = &r.commands[1];
@@ -1235,6 +1349,37 @@ commands:
     }
 
     #[test]
+    fn check_may_not_reference_params() {
+        let (_d, resolved) = setup(
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    params:\n      \
+             env: { pick: { options: [dev] } }\n    check: \"probe {env}\"\n    run: \"go {env}\"\n",
+            &[],
+        );
+        let err = format!("{:#}", resolved.unwrap_err());
+        assert!(err.contains("before params are filled"), "got: {err}");
+    }
+
+    #[test]
+    fn check_and_interactive_are_carried_and_vars_substituted() {
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/db\n    vars: { engine: psql }\ncommands:\n  \
+             - { id: local, title: L, run: \"true\", interactive: true }\n",
+            &[(
+                "mods/db/pult.module.yaml",
+                "version: 1\nvars:\n  engine: { required: true }\ncommands:\n  \
+                 - { id: import, title: I, run: \"true\", check: \"command -v ${engine}\" }\n",
+            )],
+        );
+        let resolved = resolved.unwrap();
+        let local = resolved.commands.iter().find(|c| c.id == "local").unwrap();
+        assert!(local.interactive);
+        assert_eq!(local.check, None);
+        let import = resolved.commands.iter().find(|c| c.id == "import").unwrap();
+        assert!(!import.interactive);
+        assert_eq!(import.check.as_deref(), Some("command -v psql"));
+    }
+
+    #[test]
     fn reserved_command_ids_are_rejected() {
         let (_d, resolved) = setup(
             "version: 1\ncommands:\n  - { id: includes, title: X, run: \"true\" }\n",
@@ -1479,5 +1624,184 @@ commands:
         );
         let err = format!("{:#}", resolved.unwrap_err());
         assert!(err.contains("not declared before"), "got: {err}");
+    }
+
+    // ── category ──
+
+    #[test]
+    fn category_is_carried_and_vars_substituted() {
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/db\n    vars: { engine: psql }\ncommands:\n  \
+             - { id: local, title: L, run: \"true\", category: Deploy, description: \"Local cmd\" }\n",
+            &[(
+                "mods/db/pult.module.yaml",
+                "version: 1\nvars:\n  engine: { required: true }\ncommands:\n  \
+                 - { id: import, title: I, run: \"true\", category: \"${engine} tools\", description: \"Imports ${engine} data\" }\n",
+            )],
+        );
+        let resolved = resolved.unwrap();
+        let local = resolved.commands.iter().find(|c| c.id == "local").unwrap();
+        assert_eq!(local.category.as_deref(), Some("Deploy"));
+        assert_eq!(local.description.as_deref(), Some("Local cmd"));
+        let import = resolved.commands.iter().find(|c| c.id == "import").unwrap();
+        assert_eq!(import.category.as_deref(), Some("psql tools"));
+        assert_eq!(import.description.as_deref(), Some("Imports psql data"));
+    }
+
+    #[test]
+    fn module_category_merges_with_same_named_local_group() {
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/aws\n    vars: { cluster_prefix: x }\ncommands:\n  \
+             - { id: local, title: L, run: \"true\", category: Deploy }\n",
+            &[("mods/aws/module.yaml", MODULE)],
+        );
+        let mut resolved = resolved.unwrap();
+        // The module's `shell` command carries no category, so it groups by
+        // origin ("./mods/aws") on its own — set one that matches the local
+        // command's category to prove same-named groups merge across sources.
+        for c in &mut resolved.commands {
+            if c.id == "shell" {
+                c.category = Some("Deploy".to_string());
+            }
+        }
+        let groups = group_commands(&resolved.commands);
+        assert_eq!(groups.len(), 1, "both commands share the Deploy group");
+        assert_eq!(groups[0].0, "Deploy");
+        assert_eq!(groups[0].1.len(), 2);
+    }
+
+    // ── origin_name ──
+
+    #[test]
+    fn module_name_becomes_group_label_instead_of_source_string() {
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/aws\n    vars: { cluster_prefix: x }\ncommands:\n  \
+             - { id: local, title: L, run: \"true\" }\n",
+            &[(
+                "mods/aws/module.yaml",
+                "version: 1\nname: AWS Tooling\nvars:\n  cluster_prefix: { required: true }\ncommands:\n  \
+                 - { id: shell, title: Shell, run: \"true\" }\n",
+            )],
+        );
+        let resolved = resolved.unwrap();
+        let shell = resolved.commands.iter().find(|c| c.id == "shell").unwrap();
+        assert_eq!(shell.origin.as_deref(), Some("./mods/aws"));
+        assert_eq!(shell.origin_name.as_deref(), Some("AWS Tooling"));
+        assert_eq!(
+            shell.group_label(),
+            "AWS Tooling",
+            "declared name wins over the raw include source string"
+        );
+    }
+
+    #[test]
+    fn module_without_name_still_groups_by_source_string() {
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/aws\n    vars: { cluster_prefix: x }\ncommands:\n  \
+             - { id: local, title: L, run: \"true\" }\n",
+            &[(
+                "mods/aws/module.yaml",
+                "version: 1\nvars:\n  cluster_prefix: { required: true }\ncommands:\n  \
+                 - { id: shell, title: Shell, run: \"true\" }\n",
+            )],
+        );
+        let resolved = resolved.unwrap();
+        let shell = resolved.commands.iter().find(|c| c.id == "shell").unwrap();
+        assert_eq!(shell.origin_name, None);
+        assert_eq!(shell.group_label(), "./mods/aws");
+    }
+
+    #[test]
+    fn module_name_var_is_substituted_before_grouping() {
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/aws\n    vars: { engine: psql }\ncommands:\n  \
+             - { id: local, title: L, run: \"true\" }\n",
+            &[(
+                "mods/aws/module.yaml",
+                "version: 1\nname: \"${engine} Tooling\"\nvars:\n  engine: { required: true }\ncommands:\n  \
+                 - { id: shell, title: Shell, run: \"true\" }\n",
+            )],
+        );
+        let resolved = resolved.unwrap();
+        let shell = resolved.commands.iter().find(|c| c.id == "shell").unwrap();
+        assert_eq!(shell.origin_name.as_deref(), Some("psql Tooling"));
+        assert_eq!(shell.group_label(), "psql Tooling");
+    }
+
+    // ── group_commands (pure function) ──
+
+    fn stub_cmd(id: &str, origin: Option<&str>, category: Option<&str>) -> ResolvedCommand {
+        stub_cmd_named(id, origin, None, category)
+    }
+
+    fn stub_cmd_named(
+        id: &str,
+        origin: Option<&str>,
+        origin_name: Option<&str>,
+        category: Option<&str>,
+    ) -> ResolvedCommand {
+        ResolvedCommand {
+            id: id.to_string(),
+            title: id.to_string(),
+            params: IndexMap::new(),
+            run: ResolvedRun::Script("true".to_string()),
+            origin: origin.map(str::to_string),
+            origin_name: origin_name.map(str::to_string),
+            check: None,
+            interactive: false,
+            category: category.map(str::to_string),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn group_label_falls_back_category_then_origin_name_then_origin_then_local() {
+        assert_eq!(stub_cmd("a", None, None).group_label(), "local");
+        assert_eq!(
+            stub_cmd("a", Some("./mods/x"), None).group_label(),
+            "./mods/x"
+        );
+        assert_eq!(
+            stub_cmd_named("a", Some("./mods/x"), Some("AWS Tooling"), None).group_label(),
+            "AWS Tooling",
+            "origin_name (module's declared name) wins over the raw source string"
+        );
+        assert_eq!(
+            stub_cmd_named("a", Some("./mods/x"), Some("AWS Tooling"), Some("Deploy"))
+                .group_label(),
+            "Deploy",
+            "an explicit category still wins over origin_name"
+        );
+        assert_eq!(
+            stub_cmd("a", Some("./mods/x"), Some("Deploy")).group_label(),
+            "Deploy"
+        );
+    }
+
+    #[test]
+    fn group_commands_orders_local_containing_groups_first() {
+        let cmds = vec![
+            stub_cmd("a", None, None),                     // "local"
+            stub_cmd("b", Some("./modA"), None),           // "./modA" (no local member)
+            stub_cmd("c", None, Some("Deploy")),           // "Deploy" (local member)
+            stub_cmd("d", Some("./modB"), Some("Deploy")), // merges into "Deploy"
+        ];
+        let groups = group_commands(&cmds);
+        let labels: Vec<&str> = groups.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["local", "Deploy", "./modA"]);
+        let deploy = groups.iter().find(|(l, _)| l == "Deploy").unwrap();
+        assert_eq!(
+            deploy.1.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["c", "d"],
+            "commands keep resolved order within a group"
+        );
+    }
+
+    #[test]
+    fn group_commands_single_group_when_uncategorized_and_unincluded() {
+        let cmds = vec![stub_cmd("a", None, None), stub_cmd("b", None, None)];
+        let groups = group_commands(&cmds);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "local");
     }
 }

@@ -91,6 +91,33 @@ pub struct CommandDef {
     #[serde(default)]
     pub params: IndexMap<String, ParamDef>,
     pub run: RunSpec,
+    /// Optional readiness probe: a shell command (no `{param}` placeholders —
+    /// it runs before params exist) whose exit 0 means "ready to run". Surfaced
+    /// by `pult doctor` and by UIs before the run button; never run implicitly
+    /// before `run:` — preflight steps in the playbook remain the mitigation.
+    #[serde(default)]
+    pub check: Option<String>,
+    /// Declares that `run:` requires a controlling terminal at runtime (REPLs,
+    /// TUIs, shells into containers). The contract: an *undeclared* command
+    /// must be fully non-interactive once its params are filled — declare a
+    /// param, don't `read` — which is what makes non-terminal surfaces safe.
+    /// The plain CLI ignores it (stdio is inherited either way).
+    #[serde(default)]
+    pub interactive: bool,
+    /// Display grouping for the guided flow, the palette, and `--list`: an
+    /// author-assigned label ("Deploy", "Tests"). Commands sharing a category
+    /// are grouped together regardless of which file declared them — a module
+    /// tagging its exports "Deploy" joins the local "Deploy" group. When
+    /// unset, grouping falls back to the include origin (see
+    /// `ResolvedCommand::group_label`), so a manifest with no categories at
+    /// all degrades to today's flat list/menu.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// One or two sentences explaining what the command does, shown by
+    /// `--help`, `--list --json`, and UIs — the title names the control, the
+    /// description explains it.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// A param is a picker, free input, or a reference to a named param; exactly
@@ -143,6 +170,12 @@ pub struct PickDef {
 pub struct InputDef {
     #[serde(default)]
     pub default: Option<String>,
+    /// Secret values are prompted without echo and masked wherever an
+    /// interpolated command line is displayed (`running:` banner, `--print`,
+    /// the ephemeral trust prompt). A `default:` is rejected for secrets — a
+    /// default would be a credential committed to the manifest.
+    #[serde(default)]
+    pub secret: bool,
 }
 
 /// A step: a plain script string, or a script with a declared contract.
@@ -340,6 +373,21 @@ fn validate_file(manifest: &Manifest) -> Result<()> {
             }
             _ => {}
         }
+        if let Some(check) = &cmd.check
+            && check.trim().is_empty()
+        {
+            bail!("command `{}` has an empty check", cmd.id);
+        }
+        if let Some(category) = &cmd.category
+            && category.trim().is_empty()
+        {
+            bail!("command `{}` has an empty category", cmd.id);
+        }
+        if let Some(description) = &cmd.description
+            && description.trim().is_empty()
+        {
+            bail!("command `{}` has an empty description", cmd.id);
+        }
     }
     Ok(())
 }
@@ -360,6 +408,14 @@ fn validate_param(name: &str, def: &ParamDef) -> Result<()> {
             (None, None) => bail!("param `{name}`: `pick` needs either `options` or `from`"),
             _ => {}
         }
+    }
+    if let Some(input) = &def.input
+        && input.secret
+        && input.default.is_some()
+    {
+        bail!(
+            "param `{name}`: a secret input can't have a `default` — that would commit a credential to the manifest"
+        );
     }
     Ok(())
 }
@@ -520,6 +576,67 @@ commands:
         );
         let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("required: true"), "got: {err}");
+    }
+
+    #[test]
+    fn secret_input_rejects_a_default() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      \
+             token: { input: { secret: true, default: oops } }\n    run: \"echo {token}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("credential"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_check_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: x, title: X, run: \"true\", check: \"  \" }\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty check"), "got: {err}");
+    }
+
+    #[test]
+    fn category_parses() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: a, title: A, run: \"true\", category: Deploy }\n",
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded.manifest.commands[0].category.as_deref(),
+            Some("Deploy")
+        );
+    }
+
+    #[test]
+    fn blank_category_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: a, title: A, run: \"true\", category: \"  \" }\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty category"), "got: {err}");
+    }
+
+    #[test]
+    fn description_parses() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: a, title: A, run: \"true\", description: Deploys the app }\n",
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded.manifest.commands[0].description.as_deref(),
+            Some("Deploys the app")
+        );
+    }
+
+    #[test]
+    fn blank_description_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: a, title: A, run: \"true\", description: \"  \" }\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty description"), "got: {err}");
     }
 
     #[test]
