@@ -105,6 +105,9 @@ pub struct ResolvedCommand {
     /// Author-declared display group; `${var}`-substituted like `title`.
     /// `None` means grouping falls back to `origin` (see [`group_label`]).
     pub category: Option<String>,
+    /// One or two sentences explaining what the command does;
+    /// `${var}`-substituted like `title`. `None` when the author set none.
+    pub description: Option<String>,
 }
 
 /// Grouping fallback label for commands declared directly in the root
@@ -555,6 +558,9 @@ fn visit_templates(m: &mut Manifest, f: &dyn Fn(&mut String)) {
         if let Some(category) = &mut cmd.category {
             f(category);
         }
+        if let Some(description) = &mut cmd.description {
+            f(description);
+        }
         for def in cmd.params.values_mut() {
             visit_param(def, f);
         }
@@ -745,6 +751,7 @@ fn resolve_command(
         check: cmd.check,
         interactive: cmd.interactive,
         category: cmd.category,
+        description: cmd.description,
     })
 }
 
@@ -1625,18 +1632,20 @@ commands:
     fn category_is_carried_and_vars_substituted() {
         let (_d, resolved) = setup(
             "version: 1\nincludes:\n  - source: ./mods/db\n    vars: { engine: psql }\ncommands:\n  \
-             - { id: local, title: L, run: \"true\", category: Deploy }\n",
+             - { id: local, title: L, run: \"true\", category: Deploy, description: \"Local cmd\" }\n",
             &[(
                 "mods/db/pult.module.yaml",
                 "version: 1\nvars:\n  engine: { required: true }\ncommands:\n  \
-                 - { id: import, title: I, run: \"true\", category: \"${engine} tools\" }\n",
+                 - { id: import, title: I, run: \"true\", category: \"${engine} tools\", description: \"Imports ${engine} data\" }\n",
             )],
         );
         let resolved = resolved.unwrap();
         let local = resolved.commands.iter().find(|c| c.id == "local").unwrap();
         assert_eq!(local.category.as_deref(), Some("Deploy"));
+        assert_eq!(local.description.as_deref(), Some("Local cmd"));
         let import = resolved.commands.iter().find(|c| c.id == "import").unwrap();
         assert_eq!(import.category.as_deref(), Some("psql tools"));
+        assert_eq!(import.description.as_deref(), Some("Imports psql data"));
     }
 
     #[test]
@@ -1741,6 +1750,7 @@ commands:
             check: None,
             interactive: false,
             category: category.map(str::to_string),
+            description: None,
         }
     }
 

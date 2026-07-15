@@ -113,6 +113,11 @@ pub struct CommandDef {
     /// all degrades to today's flat list/menu.
     #[serde(default)]
     pub category: Option<String>,
+    /// One or two sentences explaining what the command does, shown by
+    /// `--help`, `--list --json`, and UIs — the title names the control, the
+    /// description explains it.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// A param is a picker, free input, or a reference to a named param; exactly
@@ -378,6 +383,11 @@ fn validate_file(manifest: &Manifest) -> Result<()> {
         {
             bail!("command `{}` has an empty category", cmd.id);
         }
+        if let Some(description) = &cmd.description
+            && description.trim().is_empty()
+        {
+            bail!("command `{}` has an empty description", cmd.id);
+        }
     }
     Ok(())
 }
@@ -606,6 +616,27 @@ commands:
         );
         let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("empty category"), "got: {err}");
+    }
+
+    #[test]
+    fn description_parses() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: a, title: A, run: \"true\", description: Deploys the app }\n",
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded.manifest.commands[0].description.as_deref(),
+            Some("Deploys the app")
+        );
+    }
+
+    #[test]
+    fn blank_description_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: a, title: A, run: \"true\", description: \"  \" }\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty description"), "got: {err}");
     }
 
     #[test]

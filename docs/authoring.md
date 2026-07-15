@@ -92,6 +92,9 @@ renders as today's flat list. If you don't categorize, give your module a
 `name:` — it becomes the group header consumers see instead of the raw
 include source string.
 
+Write **`description:`** for commands you hand to others: the title names the
+control, the description explains it, and UIs display it on the command card.
+
 ### Progress events (optional)
 
 A command can report progress on the `PULT_EVENTS` fd, guarded so a script

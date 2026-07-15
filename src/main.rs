@@ -394,6 +394,9 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
 
     for cmd in &resolved.commands {
         let mut sub = clap::Command::new(cmd.id.clone()).about(cmd.title.clone());
+        if let Some(description) = &cmd.description {
+            sub = sub.long_about(format!("{}\n\n{description}", cmd.title));
+        }
         for (index, (name, def)) in cmd.params.iter().enumerate() {
             let mut arg = Arg::new(name.clone())
                 .index(index + 1)
@@ -501,6 +504,10 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                 // `ResolvedCommand::group_label` / `--list` grouping); `null`
                 // when the author set none.
                 "category": cmd.category,
+                // One or two sentences explaining what the command does
+                // (shown by `--help` and UIs); `null` when the author set
+                // none.
+                "description": cmd.description,
                 "params": params,
                 // Readiness probe (run it via `pult doctor`; null = none
                 // declared) and the "needs a controlling terminal" contract —
@@ -594,6 +601,7 @@ commands:
     check: "command -v aws"
     interactive: true
     category: Ops
+    description: Opens an interactive shell for the given customer and environment.
   - id: import
     title: Import data
     params:
@@ -621,6 +629,10 @@ commands:
         assert_eq!(cmd["id"], "shell");
         assert_eq!(cmd["origin"], serde_json::Value::Null);
         assert_eq!(cmd["category"], "Ops");
+        assert_eq!(
+            cmd["description"],
+            "Opens an interactive shell for the given customer and environment."
+        );
         let params = cmd["params"].as_array().unwrap();
         assert_eq!(params[0]["kind"], "pick");
         assert_eq!(params[0]["options"][0], "dev");
@@ -637,6 +649,7 @@ commands:
         let import = &doc["commands"][1];
         assert_eq!(import["check"], serde_json::Value::Null);
         assert_eq!(import["category"], serde_json::Value::Null);
+        assert_eq!(import["description"], serde_json::Value::Null);
         assert_eq!(import["interactive"], false);
         assert_eq!(import["params"][0]["secret"], true);
         assert_eq!(import["steps"], serde_json::Value::Null);

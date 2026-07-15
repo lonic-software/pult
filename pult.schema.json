@@ -93,6 +93,14 @@
             "null"
           ]
         },
+        "description": {
+          "description": "One or two sentences explaining what the command does, shown by `--help`, `--list --json`, and UIs — the title names the control, the description explains it.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
         },

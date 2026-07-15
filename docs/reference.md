@@ -49,6 +49,7 @@ future phase and rejected with an explanatory error.
   check: "command -v aws" # optional readiness probe — see below
   interactive: true       # optional: `run:` needs a controlling terminal
   category: Deploy        # optional: display grouping — see below
+  description: "Deploys the app to the given environment."  # optional — see below
 ```
 
 - `category:` — an author-assigned display group ("Deploy", "Tests") for the
@@ -75,6 +76,10 @@ future phase and rejected with an explanatory error.
   — declare a param instead of `read`-ing — which is what makes non-terminal
   surfaces (the future pane runner and desktop app) safe. The plain CLI
   ignores the flag; stdio is inherited either way.
+- `description:` — one or two sentences explaining what the command does.
+  The title names the control; the description explains it. Shown by
+  `pult <cmd> --help`, `--list --json`, and UIs (the command card); the flat
+  `--list` and guided-flow text stay unchanged.
 
 ### `<param>` — exactly one of `pick`, `input`, `use`
 
@@ -317,6 +322,7 @@ keep their meaning), breaking changes bump `schema`.
       "title": "Open a shell",
       "origin": null,
       "category": null,
+      "description": "Opens an interactive shell for the given customer and environment.",
       "params": [
         { "name": "env", "kind": "pick", "options": ["dev", "uat", "pre"] },
         { "name": "customer", "kind": "pick",
@@ -348,6 +354,9 @@ Field notes:
   This is *not* the computed display group — it's the grouping rule's input,
   not its output (see `<command>` above); a surface applying the grouping rule
   combines this with the matching include's `name` and `origin` itself.
+- `description` — the raw `description:` value the author declared; `null` =
+  none. One or two sentences explaining what the command does, for
+  `--help`, `--list --json`, and UIs.
 - Params appear in **declared order**, which is also positional-argument
   order: `pult <id> <first> <second> …`.
 - Param kinds: `pick` with `options` (static; CLI values are validated

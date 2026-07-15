@@ -191,6 +191,7 @@ mod tests {
             check: None,
             interactive: false,
             category: None,
+            description: None,
         }
     }
 
