@@ -85,7 +85,8 @@ region:   { use: aws:region }                      # copy of a named param
   of the value. A `default:` is rejected for secrets — that would commit a
   credential to the manifest. The value still reaches the child process argv
   as usual; a value passed as a CLI argument also lands in your shell history
-  — prefer the prompt for anything truly sensitive.
+  — prefer the prompt for anything truly sensitive, or `--params-json` (below)
+  when tooling needs to pass it non-interactively without putting it in argv.
 
 ### `<step>`
 
@@ -255,12 +256,17 @@ pult <command> --help         generated per-command help
 pult --list                   commands, params, and origins
 pult --list --json            the same, machine-readable (schema below)
 pult <command> --print        print the composed script instead of running
+pult <command> --params-json  read this command's param values from stdin as a JSON
+                                object (positional args still work; keeps secrets out of argv)
 pult --trust …                trust this manifest without prompting (records immediately)
 pult x <SOURCE> [COMMAND]     run a command from a module source, no manifest (npx-style)
      [values…] [--var N=V]      --trust / --print as elsewhere; a bare source takes the latest tag
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
+pult doctor [--json]          run every command's check: and report readiness (exit 1 if
+                                any fail; trust-gated — checks are manifest code; --json for
+                                the machine-readable form)
 pult init [--user]            scaffold a starter manifest here (or your user manifest)
 pult self schema              print the manifest JSON Schema (draft-07) to stdout
 pult update [VERSION]         self-update to the latest (or given) release; needs no manifest
@@ -326,15 +332,58 @@ Field notes:
   first), and `input` (free text, `default` may be `null`). An input with
   `"secret": true` must be rendered as a password field and never echoed,
   logged, or persisted by tooling.
-- `check` — the readiness probe (`null` = none declared); run it yourself,
-  don't assume pult ran it. `interactive` — the command needs a controlling
-  terminal; non-terminal surfaces should treat it as terminal-only rather
-  than capturing its output.
+- `check` — the readiness probe (`null` = none declared); run it yourself or
+  via `pult doctor` (`--json` for the machine-readable runner output — see
+  below), don't assume pult ran it. `interactive` — the command needs a
+  controlling terminal; non-terminal surfaces should treat it as
+  terminal-only rather than capturing its output.
 - `pult <id> <values…> --print` prints the composed script without running it —
   the natural dry-run step before an agent executes anything. It is fully
   side-effect-free: it does **not** prompt, run dynamic option sources, or
   require trust, so you can preview an untrusted command safely. Params you
   don't supply appear as `<name>` metavars rather than being prompted for.
+
+## Machine-readable readiness — `pult doctor --json`
+
+Same trust gate and exit-code semantics as text-mode `pult doctor` (exit 1 if
+any declared check failed), but as a stable document for tooling instead of a
+printed table:
+
+```json
+{
+  "schema": 1,
+  "name": "demo",
+  "manifest": "/repo/pult.yaml",
+  "commands": [
+    { "id": "import", "title": "Import data", "check": "command -v aws", "ready": true, "exit_code": 0 },
+    { "id": "shell", "title": "Open a shell", "check": null, "ready": null, "exit_code": null }
+  ]
+}
+```
+
+`ready` and `exit_code` are `null` when the command declares no `check:` —
+there's nothing to run, not a failure.
+
+## `--params-json` — param values without argv
+
+`pult <command> [values…] --params-json` reads the rest of a command's param
+values from **stdin**, as a flat JSON object of string values, instead of (or
+alongside) positional arguments — the channel the desktop app and scripts use
+to keep secrets out of `ps` output and shell history:
+
+```sh
+echo '{"token":"hunter2"}' | pult import --params-json
+```
+
+Rules: stdin must be a JSON object whose values are all strings (anything
+else — invalid JSON, a non-object, a non-string value — is a load error);
+every key must be a param the invoked command declares (an unknown key names
+the valid ones, for typo safety); a param given both positionally and via
+`--params-json` is a conflict, not a silent override. Params in neither
+source are still prompted for as usual (which fails cleanly on a non-tty
+stdin). Only meaningful for a direct command invocation — `--list`, `doctor`,
+`includes`, and the bare guided flow reject it. Combine with `--print` to
+preview the composed command with concrete values (secrets still masked).
 
 ## Exit codes
 

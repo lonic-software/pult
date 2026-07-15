@@ -1,6 +1,7 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+use serde_json::json;
 
 use crate::resolver::{Resolved, ResolvedCommand};
 use crate::trust;
@@ -9,7 +10,7 @@ use crate::trust;
 /// anything is executed for real. Checks are manifest code, so the trust gate
 /// applies exactly as it does for `run:`. Output is suppressed (a check
 /// signals by exit code); exit 1 if any declared check failed.
-pub fn run(resolved: &Resolved, assume_trusted: bool, _json: bool) -> Result<i32> {
+pub fn run(resolved: &Resolved, assume_trusted: bool, json: bool) -> Result<i32> {
     trust::ensure_trusted(
         &resolved.path,
         &resolved.trust_hash,
@@ -17,7 +18,7 @@ pub fn run(resolved: &Resolved, assume_trusted: bool, _json: bool) -> Result<i32
         assume_trusted,
         None,
     )?;
-    report(resolved)
+    report(resolved, json)
 }
 
 /// One command's readiness probe. `exit_code: None` means no `check:` was
@@ -60,11 +61,21 @@ fn probe_all(resolved: &Resolved) -> Result<Vec<Probe<'_>>> {
         .collect()
 }
 
-/// The probe loop: compute every result once, then render as text.
-fn report(resolved: &Resolved) -> Result<i32> {
+/// The probe loop: compute every result once, then render as text or JSON.
+/// Exit code semantics are identical either way — 1 if any declared check
+/// failed, 0 otherwise.
+fn report(resolved: &Resolved, want_json: bool) -> Result<i32> {
     let probes = probe_all(resolved)?;
     let failed = probes.iter().filter(|p| p.ready() == Some(false)).count();
-    print_text(resolved, &probes);
+
+    if want_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&to_json(resolved, &probes))?
+        );
+    } else {
+        print_text(resolved, &probes);
+    }
     Ok(if failed == 0 { 0 } else { 1 })
 }
 
@@ -103,6 +114,29 @@ fn print_text(resolved: &Resolved, probes: &[Probe]) {
     );
 }
 
+/// The `pult doctor --json` document — schema 1, same additive-only contract
+/// as `--list --json`.
+fn to_json(resolved: &Resolved, probes: &[Probe]) -> serde_json::Value {
+    let commands: Vec<_> = probes
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p.cmd.id,
+                "title": p.cmd.title,
+                "check": p.cmd.check,
+                "ready": p.ready(),
+                "exit_code": p.exit_code,
+            })
+        })
+        .collect();
+    json!({
+        "schema": 1,
+        "name": resolved.name,
+        "manifest": resolved.path,
+        "commands": commands,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,19 +159,48 @@ mod tests {
     #[test]
     fn failing_check_yields_exit_1_passing_yields_0() {
         let (_d, failing) = resolved_from(TRIO);
-        assert_eq!(report(&failing).unwrap(), 1);
+        assert_eq!(report(&failing, false).unwrap(), 1);
 
         let (_d, passing) = resolved_from(
             "version: 1\ncommands:\n\
              \x20 - { id: ok, title: Ok, run: \"true\", check: \"true\" }\n",
         );
-        assert_eq!(report(&passing).unwrap(), 0);
+        assert_eq!(report(&passing, false).unwrap(), 0);
     }
 
     #[test]
     fn no_checks_declared_is_not_a_failure() {
         let (_d, none) =
             resolved_from("version: 1\ncommands:\n  - { id: a, title: A, run: \"true\" }\n");
-        assert_eq!(report(&none).unwrap(), 0);
+        assert_eq!(report(&none, false).unwrap(), 0);
+    }
+
+    #[test]
+    fn json_mode_reports_ready_and_exit_code_for_pass_fail_and_no_check() {
+        let (_d, trio) = resolved_from(TRIO);
+        let probes = probe_all(&trio).unwrap();
+        let doc = to_json(&trio, &probes);
+
+        assert_eq!(doc["schema"], 1);
+        assert_eq!(doc["name"], trio.name);
+        assert_eq!(doc["manifest"], trio.path.to_string_lossy().as_ref());
+
+        let cmds = doc["commands"].as_array().unwrap();
+        assert_eq!(cmds[0]["id"], "ok");
+        assert_eq!(cmds[0]["check"], "true");
+        assert_eq!(cmds[0]["ready"], true);
+        assert_eq!(cmds[0]["exit_code"], 0);
+
+        assert_eq!(cmds[1]["id"], "bad");
+        assert_eq!(cmds[1]["ready"], false);
+        assert_eq!(cmds[1]["exit_code"], 1);
+
+        assert_eq!(cmds[2]["id"], "none");
+        assert_eq!(cmds[2]["check"], serde_json::Value::Null);
+        assert_eq!(cmds[2]["ready"], serde_json::Value::Null);
+        assert_eq!(cmds[2]["exit_code"], serde_json::Value::Null);
+
+        // exit code from report() matches: one failed check -> 1
+        assert_eq!(report(&trio, true).unwrap(), 1);
     }
 }
