@@ -52,8 +52,10 @@ future phase and rejected with an explanatory error.
 ```
 
 - `category:` — an author-assigned display group ("Deploy", "Tests") for the
-  guided flow, `--list`, and future surfaces (palette, desktop app). Grouping
-  rule, implemented once and shared by every surface: a command's group is its
+  guided flow, `--list --json`, and future surfaces (palette, desktop app);
+  the flat `--list` text stays ungrouped (see CLI section below) so the
+  scripts that parse it keep working. Grouping rule, implemented once and
+  shared by every grouped surface: a command's group is its
   `category` if set, else the module's declared `name:` (see the manifest
   `name:` field in [authoring.md](authoring.md)) for commands that came from an
   include, else the include it came from (`origin`, the raw source string),
@@ -265,11 +267,12 @@ cache directory is always safe (next run re-fetches).
 pult                          guided flow
 pult <command> [values…]      direct invocation (missing values are prompted)
 pult <command> --help         generated per-command help
-pult --list                   commands, params, and origins (grouped by category when set)
-pult --list --json            the same, machine-readable (schema below)
+pult --list                   commands, params, and origins (flat, one line each — scripts parse this)
+pult --list --json            the same, machine-readable, grouped by category (schema below)
 pult <command> --print        print the composed script instead of running
 pult <command> --params-json  read this command's param values from stdin as a JSON
-                                object (positional args still work; keeps secrets out of argv)
+                                object (positional args still work; keeps them out of
+                                pult's argv and shell history — see caveat below)
 pult --trust …                trust this manifest without prompting (records immediately)
 pult x <SOURCE> [COMMAND]     run a command from a module source, no manifest (npx-style)
      [values…] [--var N=V]      --trust / --print as elsewhere; a bare source takes the latest tag
@@ -393,7 +396,7 @@ there's nothing to run, not a failure.
 `pult <command> [values…] --params-json` reads the rest of a command's param
 values from **stdin**, as a flat JSON object of string values, instead of (or
 alongside) positional arguments — the channel the desktop app and scripts use
-to keep secrets out of `ps` output and shell history:
+to avoid putting values on the command line:
 
 ```sh
 echo '{"token":"hunter2"}' | pult import --params-json
@@ -404,10 +407,22 @@ else — invalid JSON, a non-object, a non-string value — is a load error);
 every key must be a param the invoked command declares (an unknown key names
 the valid ones, for typo safety); a param given both positionally and via
 `--params-json` is a conflict, not a silent override. Params in neither
-source are still prompted for as usual (which fails cleanly on a non-tty
-stdin). Only meaningful for a direct command invocation — `--list`, `doctor`,
+source are still prompted for as usual — and since stdin is now claimed by
+`--params-json`, an interactive terminal on stdin is rejected up front rather
+than hanging (pipe or redirect it: `echo '{...}' | pult …`, or a file).
+Only meaningful for a direct command invocation — `--list`, `doctor`,
 `includes`, and the bare guided flow reject it. Combine with `--print` to
 preview the composed command with concrete values (secrets still masked).
+
+**What this does and doesn't protect.** `--params-json` keeps values out of
+pult's own argv (so they never show up in `ps` for the `pult` process itself)
+and out of your shell history. It does **not** make the values disappear
+downstream: pult composes the final command line and runs it as
+`sh -c "<cmdline>"`, so while that `sh` (and whatever it execs) is running,
+the values are visible in *its* argv to anything that can read `ps` on the
+same machine — the same exposure positional values already have. Treat it as
+"don't put secrets in argv/history you control", not as a way to hide a
+secret from other processes on the host.
 
 ## Events protocol — `PULT_EVENTS`
 

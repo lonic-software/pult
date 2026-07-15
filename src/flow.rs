@@ -13,9 +13,11 @@ use crate::resolver::{Resolved, ResolvedCommand, group_commands};
 /// When commands span more than one display group (`category:`, else include
 /// origin, else the implicit "local" group — see
 /// [`crate::resolver::group_commands`]), the menu is two-stage: pick a group,
-/// then a command within it. Cancelling the inner select returns to the group
-/// list rather than exiting; cancelling at the group level exits as usual
-/// (exit 130). A single group behaves exactly as the historical flat list.
+/// then a command within it. Esc at the inner "which command?" select steps
+/// back to the group list rather than exiting; Ctrl-C at the inner select
+/// still aborts immediately, same as everywhere else. Esc or Ctrl-C at the
+/// group level exits as usual (exit 130). A single group behaves exactly as
+/// the historical flat list.
 pub fn run(resolved: &Resolved, assume_trusted: bool, print: bool) -> Result<i32> {
     println!("◆  {} · pult", resolved.name);
     let groups = group_commands(&resolved.commands);
@@ -37,7 +39,10 @@ pub fn run(resolved: &Resolved, assume_trusted: bool, print: bool) -> Result<i32
             let labels = command_labels_ref(members);
             match prompt::select_index("Which command?", labels) {
                 Ok(ci) => break members[ci],
-                Err(e) if e.downcast_ref::<prompt::Cancelled>().is_some() => continue,
+                // Esc: back to the group list. Ctrl-C (`Cancelled`) falls
+                // through to the propagating arm below — it must abort, not
+                // step back a menu level.
+                Err(e) if e.downcast_ref::<prompt::Dismissed>().is_some() => continue,
                 Err(e) => return Err(e),
             }
         }

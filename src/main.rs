@@ -33,7 +33,9 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            if e.downcast_ref::<prompt::Cancelled>().is_some() {
+            if e.downcast_ref::<prompt::Cancelled>().is_some()
+                || e.downcast_ref::<prompt::Dismissed>().is_some()
+            {
                 std::process::exit(130);
             }
             eprintln!("pult: error: {e:#}");
@@ -189,11 +191,7 @@ fn run() -> Result<i32> {
             }
         },
         Some((id, sub)) => {
-            let cmd = resolved
-                .commands
-                .iter()
-                .find(|c| c.id == id)
-                .expect("clap only accepts declared subcommands");
+            let cmd = resolve_manifest_command(&resolved.commands, id)?;
             let mut provided = HashMap::new();
             for name in cmd.params.keys() {
                 if let Some(v) = sub.get_one::<String>(name.as_str()) {
@@ -201,6 +199,13 @@ fn run() -> Result<i32> {
                 }
             }
             if params_json {
+                use std::io::IsTerminal;
+                if std::io::stdin().is_terminal() {
+                    bail!(
+                        "--params-json expects a JSON object on stdin — pipe it \
+                         (echo '{{...}}' | pult …) or redirect a file"
+                    );
+                }
                 let mut raw = String::new();
                 std::io::stdin()
                     .read_to_string(&mut raw)
@@ -211,6 +216,28 @@ fn run() -> Result<i32> {
         }
         None => flow::run(&resolved, assume_trusted, print),
     }
+}
+
+/// Resolve a clap-accepted subcommand id against the manifest's own declared
+/// commands. `id` normally reaches this arm because it names a real manifest
+/// command — but it can also be one of pult's own reserved ids (`update`,
+/// `x`, `init`, `self`, …), which are ordinarily intercepted in `run()`
+/// *before* clap parses anything, and only when the id is argv[1] itself.
+/// A leading global flag (`pult --trust update`, `pult --params-json update`)
+/// makes clap parse the reserved id as a generic subcommand instead, so it
+/// lands here with no matching manifest command — the case that used to
+/// `.expect()` and panic. Returning a clear error instead points the user at
+/// the fix (put the reserved id first) rather than crashing.
+fn resolve_manifest_command<'a>(
+    commands: &'a [resolver::ResolvedCommand],
+    id: &str,
+) -> Result<&'a resolver::ResolvedCommand> {
+    commands.iter().find(|c| c.id == id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "`{id}` is pult's own subcommand — put it first: `pult {id} …` \
+             (global flags go after it)"
+        )
+    })
 }
 
 /// Merge param values read from stdin (as a JSON object) into `provided`,
@@ -315,7 +342,10 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 .long("params-json")
                 .global(true)
                 .action(ArgAction::SetTrue)
-                .help("Read param values as a JSON object from stdin (keeps secrets out of argv)"),
+                .help(
+                    "Read param values as a JSON object from stdin (keeps them out of \
+                     pult's argv and shell history)",
+                ),
         )
         // Engine subcommands are hidden from the Commands list (that list is
         // the manifest's surface) and documented in after_help instead.
@@ -517,10 +547,12 @@ fn command_line(cmd: &resolver::ResolvedCommand, width: usize) -> String {
     line
 }
 
-/// `pult --list` (text mode). Commands print flat when they all fall in one
-/// display group; otherwise each group (`category:`, else include origin,
-/// else the implicit "local" group) gets a header line with its commands
-/// indented under it — see `resolver::group_commands` for the grouping rule.
+/// `pult --list` (text mode): one line per command, flat — the format
+/// scripts parse. Grouping (`category:`, else include origin, else the
+/// implicit "local" group — see `resolver::group_commands`) applies to the
+/// guided flow, the future palette, and `--list --json` (`category` plus
+/// each command's `name`/origin fields); this text surface stays flat so it
+/// doesn't break existing consumers.
 fn print_list(resolved: &Resolved) {
     let width = resolved
         .commands
@@ -529,18 +561,8 @@ fn print_list(resolved: &Resolved) {
         .max()
         .unwrap_or(0);
     println!("{} · {}", resolved.name, resolved.path.display());
-    let groups = resolver::group_commands(&resolved.commands);
-    if groups.len() <= 1 {
-        for cmd in &resolved.commands {
-            println!("{}", command_line(cmd, width));
-        }
-        return;
-    }
-    for (label, cmds) in &groups {
-        println!("{label}:");
-        for cmd in cmds {
-            println!("{}", command_line(cmd, width));
-        }
+    for cmd in &resolved.commands {
+        println!("{}", command_line(cmd, width));
     }
 }
 
@@ -669,6 +691,40 @@ commands:
         assert_eq!(includes[0]["name"], "AWS Tooling");
         assert_eq!(includes[1]["source"], "./mods/plain");
         assert_eq!(includes[1]["name"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn resolve_manifest_command_finds_a_declared_command() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            "version: 1\ncommands:\n  - { id: shell, title: Shell, run: \"true\" }\n",
+        )
+        .unwrap();
+        let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
+        let resolved = resolver::resolve(loaded).unwrap();
+        let cmd = resolve_manifest_command(&resolved.commands, "shell").unwrap();
+        assert_eq!(cmd.id, "shell");
+    }
+
+    /// The routing-panic regression (fix: reserved ids like `update` only get
+    /// intercepted before clap runs when they're argv[1]; a leading global
+    /// flag — `pult --trust update` — makes clap parse it as a generic
+    /// subcommand instead, landing here with no manifest command to match).
+    #[test]
+    fn resolve_manifest_command_errors_clearly_for_an_unmatched_reserved_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            "version: 1\ncommands:\n  - { id: shell, title: Shell, run: \"true\" }\n",
+        )
+        .unwrap();
+        let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
+        let resolved = resolver::resolve(loaded).unwrap();
+        let err = resolve_manifest_command(&resolved.commands, "update").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("pult's own subcommand"), "got: {msg}");
+        assert!(msg.contains("pult update …"), "got: {msg}");
     }
 
     /// A command's declared params, for `merge_stdin_params` tests — going

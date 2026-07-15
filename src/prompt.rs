@@ -3,7 +3,27 @@ use std::io::IsTerminal;
 use anyhow::{Result, bail};
 use inquire::{Confirm, InquireError, Password, PasswordDisplayMode, Select, Text};
 
-/// Sentinel error for Esc / Ctrl-C during a prompt; main exits 130 quietly.
+/// Sentinel error for Esc during a prompt (inquire's `OperationCanceled`).
+/// Distinct from [`Cancelled`] (Ctrl-C) because callers may treat the two
+/// differently: the guided flow's inner "which command?" select treats Esc
+/// as "step back to the group list", not as an abort. `main()`'s top-level
+/// handler still exits 130 for this, same as `Cancelled` — only the flow's
+/// inner select gives it special meaning.
+#[derive(Debug)]
+pub struct Dismissed;
+
+impl std::fmt::Display for Dismissed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "dismissed")
+    }
+}
+
+impl std::error::Error for Dismissed {}
+
+/// Sentinel error for Ctrl-C during a prompt (inquire's
+/// `OperationInterrupted`). Always an abort — every caller, including the
+/// guided flow's inner select, must let this propagate rather than
+/// reinterpreting it as "go back a menu level". `main()` exits 130 for it.
 #[derive(Debug)]
 pub struct Cancelled;
 
@@ -24,9 +44,8 @@ fn require_tty(what: &str) -> Result<()> {
 
 fn map_inquire<T>(result: Result<T, InquireError>) -> Result<T> {
     result.map_err(|e| match e {
-        InquireError::OperationCanceled | InquireError::OperationInterrupted => {
-            anyhow::Error::new(Cancelled)
-        }
+        InquireError::OperationCanceled => anyhow::Error::new(Dismissed),
+        InquireError::OperationInterrupted => anyhow::Error::new(Cancelled),
         other => anyhow::Error::new(other),
     })
 }
