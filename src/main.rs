@@ -2,6 +2,7 @@ mod add;
 mod compile;
 mod discovery;
 mod doctor;
+mod events;
 mod exec;
 mod fetch;
 mod flow;
@@ -26,7 +27,7 @@ use indexmap::IndexMap;
 
 use discovery::Scope;
 use manifest::{ParamDef, ParamKind};
-use resolver::{PinInfo, Resolved};
+use resolver::{PinInfo, Resolved, ResolvedRun};
 
 fn main() {
     match run() {
@@ -448,6 +449,16 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                     ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
                 })
                 .collect();
+            // Step names a live run emits as `step k/n <name>` events (see
+            // compile.rs / the PULT_EVENTS protocol) — same labels, so a
+            // surface can render milestones without parsing the script.
+            // `null` for a plain (string-form) `run:`, nothing to name.
+            let steps = match &cmd.run {
+                ResolvedRun::Steps(entries) => {
+                    json!(entries.iter().map(compile::step_label).collect::<Vec<_>>())
+                }
+                ResolvedRun::Script(_) => serde_json::Value::Null,
+            };
             json!({
                 "id": cmd.id,
                 "title": cmd.title,
@@ -459,6 +470,7 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                 // terminal-only.
                 "check": cmd.check,
                 "interactive": cmd.interactive,
+                "steps": steps,
             })
         })
         .collect();
@@ -518,6 +530,11 @@ mod tests {
             r#"
 version: 1
 name: demo
+steps:
+  restore-db: |
+    ./bin/restore
+  run-migrations: |
+    ./bin/migrate
 commands:
   - id: shell
     title: Open a shell
@@ -533,6 +550,12 @@ commands:
     params:
       token: { input: { secret: true } }
     run: "./bin/impl import {token}"
+  - id: deploy
+    title: Deploy
+    run:
+      - use: restore-db
+      - use: run-migrations
+      - "echo done"
 "#,
         )
         .unwrap();
@@ -559,10 +582,20 @@ commands:
         // needs-a-terminal contract, and password-field inputs.
         assert_eq!(cmd["check"], "command -v aws");
         assert_eq!(cmd["interactive"], true);
+        // String-form `run:` has no steps to name.
+        assert_eq!(cmd["steps"], serde_json::Value::Null);
         let import = &doc["commands"][1];
         assert_eq!(import["check"], serde_json::Value::Null);
         assert_eq!(import["interactive"], false);
         assert_eq!(import["params"][0]["secret"], true);
+        assert_eq!(import["steps"], serde_json::Value::Null);
+        // List-form `run:` exposes its step labels — same names a live run
+        // emits as `step k/n <name>` events.
+        let deploy = &doc["commands"][2];
+        assert_eq!(
+            deploy["steps"],
+            serde_json::json!(["restore-db", "run-migrations", "echo done"])
+        );
     }
 
     /// A command's declared params, for `merge_stdin_params` tests — going

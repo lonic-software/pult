@@ -64,9 +64,11 @@ pub fn execute(
                 &resolved.run_dir,
             )
         }
-        ResolvedRun::Steps(_) => {
-            runner::run_bash(&compile::compile(cmd, &values)?, &cmd.id, &resolved.run_dir)
-        }
+        ResolvedRun::Steps(_) => runner::run_bash(
+            &compile::compile(cmd, &values, true)?,
+            &cmd.id,
+            &resolved.run_dir,
+        ),
     }
 }
 
@@ -142,7 +144,7 @@ fn fill(
 fn compose(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Result<String> {
     match &cmd.run {
         ResolvedRun::Script(template) => interp::interpolate(template, values),
-        ResolvedRun::Steps(_) => compile::compile(cmd, values),
+        ResolvedRun::Steps(_) => compile::compile(cmd, values, false),
     }
 }
 

@@ -307,7 +307,8 @@ keep their meaning), breaking changes bump `schema`.
         { "name": "note", "kind": "input", "default": "", "secret": false }
       ],
       "check": "command -v aws",
-      "interactive": true
+      "interactive": true,
+      "steps": null
     }
   ]
 }
@@ -337,6 +338,9 @@ Field notes:
   below), don't assume pult ran it. `interactive` — the command needs a
   controlling terminal; non-terminal surfaces should treat it as
   terminal-only rather than capturing its output.
+- `steps` — the labels a live run emits as `step k/n <name>` events (see
+  [Events protocol](#events-protocol--pult_events) below); `null` for a
+  string-form `run:`, which has no steps to name.
 - `pult <id> <values…> --print` prints the composed script without running it —
   the natural dry-run step before an agent executes anything. It is fully
   side-effect-free: it does **not** prompt, run dynamic option sources, or
@@ -384,6 +388,71 @@ source are still prompted for as usual (which fails cleanly on a non-tty
 stdin). Only meaningful for a direct command invocation — `--list`, `doctor`,
 `includes`, and the bare guided flow reject it. Combine with `--print` to
 preview the composed command with concrete values (secrets still masked).
+
+## Events protocol — `PULT_EVENTS`
+
+A running command *may* write progress lines to the fd named by
+`$PULT_EVENTS` — stdout/stderr stay untouched either way, and a script that
+never emits anything loses nothing. Guard every emission so the same script
+behaves identically whether or not anything is listening:
+
+```sh
+[ -n "${PULT_EVENTS:-}" ] && echo "progress 40 restoring" >&3
+```
+
+(`3` here because that's the fd pult wires up today; always read the number
+from `$PULT_EVENTS` rather than hardcoding it.)
+
+Three verbs, v1:
+
+```
+progress <0-100|?> [text]    # determinate percent, or ? = indeterminate
+status <text>                # transient activity line
+step <k>/<n> <name>          # entering step k of n
+```
+
+**Unknown verbs and malformed lines are silently ignored** — never an error,
+in either direction. This is what makes the vocabulary additive-forever: a
+script targeting a newer pult, or an older script run under a newer one,
+never breaks.
+
+The plain CLI translates events to [OSC
+9;4](https://learn.microsoft.com/en-us/windows/terminal/tutorials/progress-bar-sequences),
+the ConEmu/Windows Terminal/WezTerm/Ghostty progress-bar protocol, so
+terminals that render progress natively show it with zero drawing on our
+side:
+
+| Event | OSC |
+|---|---|
+| `progress <n>` | state 1 (set), pct `n` |
+| `progress ?` | state 3 (indeterminate) |
+| `step <k>/<n>` (no `progress` seen yet) | state 1, pct derived as `(k-1)*100/n` |
+| run exits 0 | state 0 (clear) |
+| run exits non-zero | state 2 (error) |
+
+`status` carries no CLI rendering — it's consumed and dropped; it exists for
+richer surfaces (a pane runner, the desktop app) that can show a live text
+line. **Explicit beats derived**: once any `progress` event has arrived in a
+run, `step` milestones stop driving the percentage — they're a coarse
+fallback for scripts that never call `progress` at all.
+
+**Compiled step lists emit `step` events automatically.** A list-form `run:`
+(see [authoring.md](authoring.md#2--composing-commands-from-steps)) gets a
+guarded `step k/n <name>` emission injected before each top-level entry at
+compile time — structure a command as steps and you get milestones for
+free, no manifest changes required. `--print` shows the script without these
+guards (they'd clutter the dry-run output you're meant to read); a live run
+compiles them in. The same labels are exposed as `"steps"` in `--list --json`
+(below), so a surface can render milestones without parsing the script.
+
+**`PULT_EVENTS` passthrough**: if `PULT_EVENTS` is already set in pult's own
+environment when it runs a command, pult does nothing — no pipe, no
+translation. The var and its fd inherit through to the child as-is. This is
+for a parent process (the future desktop app) that owns the channel itself
+and wants to render events its own way; pult only creates its own channel
+(and does the OSC translation above) when nothing upstream already claimed
+one **and** stderr is a terminal. Piped/non-interactive runs (CI) get neither
+— `PULT_EVENTS` stays unset, zero behavior change.
 
 ## Exit codes
 

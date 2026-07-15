@@ -80,6 +80,23 @@ CLI today, and any future surface (pane runner, desktop app):
   lift that question into a param — every surface can render a param, but a
   mid-run prompt only works in a terminal.
 
+### Progress events (optional)
+
+A command can report progress on the `PULT_EVENTS` fd, guarded so a script
+behaves identically whether or not anything is listening:
+
+```sh
+[ -n "${PULT_EVENTS:-}" ] && echo "progress 40 restoring" >&3
+```
+
+You don't have to write this yourself to get milestones: structure the
+command as a step list (below) and pult injects `step k/n <name>` emissions
+for you at compile time, one per step name. `progress` is for refining
+*within* a step, when you have a real percentage to report. Either way,
+events are entirely optional and a pult-less run (or one piped, non-tty) is
+completely unaffected — see [reference.md](reference.md#events-protocol--pult_events)
+for the full vocabulary and OSC 9;4 rendering.
+
 ## 2 · Composing commands from steps
 
 For anything beyond a one-liner, declare named building blocks and compose:
