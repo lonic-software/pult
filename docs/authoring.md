@@ -80,6 +80,18 @@ CLI today, and any future surface (pane runner, desktop app):
   lift that question into a param — every surface can render a param, but a
   mid-run prompt only works in a terminal.
 
+### Grouping commands with `category:`
+
+An include-heavy manifest reaches 30+ commands fast, and a flat list stops
+helping. Give related commands a `category:` and the guided flow, `--list`,
+and future surfaces (palette, desktop app) group them under it instead;
+`category: Deploy` on a local *and* a module command merges both into one
+"Deploy" group. Module authors: categorize your exported commands — consumers
+inherit organized groups for free. Small manifests can skip it; one group
+renders as today's flat list. If you don't categorize, give your module a
+`name:` — it becomes the group header consumers see instead of the raw
+include source string.
+
 ### Progress events (optional)
 
 A command can report progress on the `PULT_EVENTS` fd, guarded so a script

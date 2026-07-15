@@ -48,8 +48,20 @@ future phase and rejected with an explanatory error.
   run: <run>
   check: "command -v aws" # optional readiness probe — see below
   interactive: true       # optional: `run:` needs a controlling terminal
+  category: Deploy        # optional: display grouping — see below
 ```
 
+- `category:` — an author-assigned display group ("Deploy", "Tests") for the
+  guided flow, `--list`, and future surfaces (palette, desktop app). Grouping
+  rule, implemented once and shared by every surface: a command's group is its
+  `category` if set, else the module's declared `name:` (see the manifest
+  `name:` field in [authoring.md](authoring.md)) for commands that came from an
+  include, else the include it came from (`origin`, the raw source string),
+  else the implicit `local` group; groups containing at least one
+  locally-declared command come first (in order of first appearance), then
+  the remaining groups in include order. Categories merge across sources — a
+  module tagging its exports `Deploy` joins the local `Deploy` group, not a
+  separate one.
 - `check:` — a shell command whose exit 0 means "ready to run". It may not
   reference `{param}`s (it runs before any param exists); `${var}`s are
   substituted as usual. Run via `pult doctor` (all checks, trust-gated, exit 1
@@ -253,7 +265,7 @@ cache directory is always safe (next run re-fetches).
 pult                          guided flow
 pult <command> [values…]      direct invocation (missing values are prompted)
 pult <command> --help         generated per-command help
-pult --list                   commands, params, and origins
+pult --list                   commands, params, and origins (grouped by category when set)
 pult --list --json            the same, machine-readable (schema below)
 pult <command> --print        print the composed script instead of running
 pult <command> --params-json  read this command's param values from stdin as a JSON
@@ -290,16 +302,18 @@ keep their meaning), breaking changes bump `schema`.
   "scope": "repo",
   "trusted": false,
   "includes": [
-    { "source": "./tools", "kind": "local" },
+    { "source": "./tools", "kind": "local", "name": null },
     { "source": "github.com/opskit/aws-common@v1.4.2", "kind": "git",
       "url": "https://github.com/opskit/aws-common",
-      "rev": "v1.4.2", "rev_kind": "tag", "resolved_sha": "8a6e6fd4…" }
+      "rev": "v1.4.2", "rev_kind": "tag", "resolved_sha": "8a6e6fd4…",
+      "name": "AWS Tooling" }
   ],
   "commands": [
     {
       "id": "shell",
       "title": "Open a shell",
       "origin": null,
+      "category": null,
       "params": [
         { "name": "env", "kind": "pick", "options": ["dev", "uat", "pre"] },
         { "name": "customer", "kind": "pick",
@@ -325,6 +339,12 @@ Field notes:
   to a human rather than pass `--trust` itself.
 - `origin` — the include source a command came from; `null` = declared in the
   root manifest.
+- `includes[].name` — that include's declared `name:` (var-substituted), or
+  `null` if the module declared none.
+- `category` — the raw `category:` value the author declared; `null` = none.
+  This is *not* the computed display group — it's the grouping rule's input,
+  not its output (see `<command>` above); a surface applying the grouping rule
+  combines this with the matching include's `name` and `origin` itself.
 - Params appear in **declared order**, which is also positional-argument
   order: `pult <id> <first> <second> …`.
 - Param kinds: `pick` with `options` (static; CLI values are validated

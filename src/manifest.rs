@@ -104,6 +104,15 @@ pub struct CommandDef {
     /// The plain CLI ignores it (stdio is inherited either way).
     #[serde(default)]
     pub interactive: bool,
+    /// Display grouping for the guided flow, the palette, and `--list`: an
+    /// author-assigned label ("Deploy", "Tests"). Commands sharing a category
+    /// are grouped together regardless of which file declared them — a module
+    /// tagging its exports "Deploy" joins the local "Deploy" group. When
+    /// unset, grouping falls back to the include origin (see
+    /// `ResolvedCommand::group_label`), so a manifest with no categories at
+    /// all degrades to today's flat list/menu.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 /// A param is a picker, free input, or a reference to a named param; exactly
@@ -364,6 +373,11 @@ fn validate_file(manifest: &Manifest) -> Result<()> {
         {
             bail!("command `{}` has an empty check", cmd.id);
         }
+        if let Some(category) = &cmd.category
+            && category.trim().is_empty()
+        {
+            bail!("command `{}` has an empty category", cmd.id);
+        }
     }
     Ok(())
 }
@@ -571,6 +585,27 @@ commands:
         );
         let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("empty check"), "got: {err}");
+    }
+
+    #[test]
+    fn category_parses() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: a, title: A, run: \"true\", category: Deploy }\n",
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded.manifest.commands[0].category.as_deref(),
+            Some("Deploy")
+        );
+    }
+
+    #[test]
+    fn blank_category_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - { id: a, title: A, run: \"true\", category: \"  \" }\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty category"), "got: {err}");
     }
 
     #[test]

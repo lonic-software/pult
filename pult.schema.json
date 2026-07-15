@@ -77,6 +77,14 @@
         "title"
       ],
       "properties": {
+        "category": {
+          "description": "Display grouping for the guided flow, the palette, and `--list`: an author-assigned label (\"Deploy\", \"Tests\"). Commands sharing a category are grouped together regardless of which file declared them — a module tagging its exports \"Deploy\" joins the local \"Deploy\" group. When unset, grouping falls back to the include origin (see `ResolvedCommand::group_label`), so a manifest with no categories at all degrades to today's flat list/menu.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "check": {
           "description": "Optional readiness probe: a shell command (no `{param}` placeholders — it runs before params exist) whose exit 0 means \"ready to run\". Surfaced by `pult doctor` and by UIs before the run button; never run implicitly before `run:` — preflight steps in the playbook remain the mitigation.",
           "default": null,

@@ -396,8 +396,11 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
     let includes: Vec<_> = resolved
         .pins
         .iter()
-        .map(|pin| match pin {
-            PinInfo::Local { source } => json!({ "source": source, "kind": "local" }),
+        .zip(&resolved.include_names)
+        .map(|(pin, name)| match pin {
+            PinInfo::Local { source } => {
+                json!({ "source": source, "kind": "local", "name": name })
+            }
             PinInfo::Git {
                 source,
                 url,
@@ -411,6 +414,7 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                 "rev": rev,
                 "rev_kind": rev_kind,
                 "resolved_sha": resolved_sha,
+                "name": name,
             }),
         })
         .collect();
@@ -463,6 +467,10 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                 "id": cmd.id,
                 "title": cmd.title,
                 "origin": cmd.origin,
+                // Raw declared value (not the computed display group — see
+                // `ResolvedCommand::group_label` / `--list` grouping); `null`
+                // when the author set none.
+                "category": cmd.category,
                 "params": params,
                 // Readiness probe (run it via `pult doctor`; null = none
                 // declared) and the "needs a controlling terminal" contract —
@@ -488,6 +496,31 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
     })
 }
 
+fn command_line(cmd: &resolver::ResolvedCommand, width: usize) -> String {
+    let params: Vec<&str> = cmd.params.keys().map(String::as_str).collect();
+    let mut line = format!(
+        "  {:width$}  {}{}",
+        cmd.id,
+        cmd.title,
+        if params.is_empty() {
+            String::new()
+        } else {
+            format!("  <{}>", params.join("> <"))
+        }
+    );
+    if cmd.interactive {
+        line.push_str("  (interactive)");
+    }
+    if let Some(origin) = &cmd.origin {
+        line.push_str(&format!("  ← {origin}"));
+    }
+    line
+}
+
+/// `pult --list` (text mode). Commands print flat when they all fall in one
+/// display group; otherwise each group (`category:`, else include origin,
+/// else the implicit "local" group) gets a header line with its commands
+/// indented under it — see `resolver::group_commands` for the grouping rule.
 fn print_list(resolved: &Resolved) {
     let width = resolved
         .commands
@@ -496,25 +529,18 @@ fn print_list(resolved: &Resolved) {
         .max()
         .unwrap_or(0);
     println!("{} · {}", resolved.name, resolved.path.display());
-    for cmd in &resolved.commands {
-        let params: Vec<&str> = cmd.params.keys().map(String::as_str).collect();
-        let mut line = format!(
-            "  {:width$}  {}{}",
-            cmd.id,
-            cmd.title,
-            if params.is_empty() {
-                String::new()
-            } else {
-                format!("  <{}>", params.join("> <"))
-            }
-        );
-        if cmd.interactive {
-            line.push_str("  (interactive)");
+    let groups = resolver::group_commands(&resolved.commands);
+    if groups.len() <= 1 {
+        for cmd in &resolved.commands {
+            println!("{}", command_line(cmd, width));
         }
-        if let Some(origin) = &cmd.origin {
-            line.push_str(&format!("  ← {origin}"));
+        return;
+    }
+    for (label, cmds) in &groups {
+        println!("{label}:");
+        for cmd in cmds {
+            println!("{}", command_line(cmd, width));
         }
-        println!("{line}");
     }
 }
 
@@ -545,6 +571,7 @@ commands:
     run: "./bin/impl shell {customer} {env}"
     check: "command -v aws"
     interactive: true
+    category: Ops
   - id: import
     title: Import data
     params:
@@ -571,6 +598,7 @@ commands:
         let cmd = &doc["commands"][0];
         assert_eq!(cmd["id"], "shell");
         assert_eq!(cmd["origin"], serde_json::Value::Null);
+        assert_eq!(cmd["category"], "Ops");
         let params = cmd["params"].as_array().unwrap();
         assert_eq!(params[0]["kind"], "pick");
         assert_eq!(params[0]["options"][0], "dev");
@@ -586,6 +614,7 @@ commands:
         assert_eq!(cmd["steps"], serde_json::Value::Null);
         let import = &doc["commands"][1];
         assert_eq!(import["check"], serde_json::Value::Null);
+        assert_eq!(import["category"], serde_json::Value::Null);
         assert_eq!(import["interactive"], false);
         assert_eq!(import["params"][0]["secret"], true);
         assert_eq!(import["steps"], serde_json::Value::Null);
@@ -596,6 +625,50 @@ commands:
             deploy["steps"],
             serde_json::json!(["restore-db", "run-migrations", "echo done"])
         );
+    }
+
+    #[test]
+    fn list_json_includes_module_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("mods/aws")).unwrap();
+        std::fs::write(
+            dir.path().join("mods/aws/pult.module.yaml"),
+            "version: 1\nname: AWS Tooling\ncommands:\n  - { id: shell, title: Shell, run: \"true\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("mods/plain")).unwrap();
+        std::fs::write(
+            dir.path().join("mods/plain/pult.module.yaml"),
+            "version: 1\ncommands:\n  - { id: c, title: C, run: \"true\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            r#"
+version: 1
+name: demo
+includes:
+  - source: ./mods/aws
+    prefix: aws
+  - source: ./mods/plain
+    prefix: plain
+commands:
+  - id: local
+    title: Local
+    run: "true"
+"#,
+        )
+        .unwrap();
+        let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
+        let resolved = resolver::resolve(loaded).unwrap();
+        let doc = list_json(&resolved, false, Scope::Repo);
+
+        let includes = doc["includes"].as_array().unwrap();
+        assert_eq!(includes.len(), 2);
+        assert_eq!(includes[0]["source"], "./mods/aws");
+        assert_eq!(includes[0]["name"], "AWS Tooling");
+        assert_eq!(includes[1]["source"], "./mods/plain");
+        assert_eq!(includes[1]["name"], serde_json::Value::Null);
     }
 
     /// A command's declared params, for `merge_stdin_params` tests — going
