@@ -79,7 +79,11 @@ future phase and rejected with an explanatory error.
 - `description:` — one or two sentences explaining what the command does.
   The title names the control; the description explains it. Shown by
   `pult <cmd> --help`, `--list --json`, and UIs (the command card); the flat
-  `--list` and guided-flow text stay unchanged.
+  `--list` and guided-flow text stay unchanged. Convention: keep `title:` to
+  one word, two at most (usually the id, first letter uppercased) and put the
+  actual explanation in `description:` — every surface renders the title as
+  the big label, and a long title just truncates and duplicates the
+  description's job.
 
 ### `<param>` — exactly one of `pick`, `input`, `use`
 

@@ -86,7 +86,8 @@ name: {name}
 
 commands:
   - id: hello
-    title: Say hello
+    title: Hello
+    description: Say hello, greeting {{name}} by name.
     params:
       # input: free text · pick: a fixed list, or a shell command whose
       # stdout lines become the options ({{earlier-param}} may be referenced)

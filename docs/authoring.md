@@ -23,7 +23,8 @@ name: my-project
 
 commands:
   - id: shell
-    title: Open a shell
+    title: Shell
+    description: Open a shell into a customer's environment.
     params:
       env: { pick: { options: [dev, uat, pre] } }
       customer: { pick: { from: "./bin/list-customers --env {env}" } }
@@ -33,6 +34,16 @@ commands:
 
 Commit it. Everyone who pulls now has `pult shell`, a guided flow, `--help`,
 and `--list` — all generated from this declaration.
+
+**`title:` is a label, not a sentence.** Every surface — the CLI list, the
+guided flow, a desktop board card — renders the title as the big, bold
+control name, usually right next to the id. Keep it to one word, two at
+most: often just the id with its first letter uppercased ("Shell", "Deploy
+stack"). Whatever needs explaining belongs in `description:`, which every
+surface treats as the explanation and none truncates as harshly.
+
+- Good: `title: Import` with `description: Import the data dump from the vendor into the staging table.`
+- Avoid: `title: Import the data dump from the vendor` — that's a description wearing a label's hat; it truncates in a list and duplicates the description field's job.
 
 **Params are prompted in declared order.** That ordering is load-bearing: a
 `from:` option source may reference `{param}` only for params declared
@@ -51,7 +62,8 @@ CLI today, and any future surface (pane runner, desktop app):
 
 ```yaml
 - id: import
-  title: Import the data dump
+  title: Import
+  description: Import the data dump from the vendor into the staging table.
   check: "docker info >/dev/null 2>&1"        # exit 0 = ready to run
   params:
     token: { input: { secret: true } }        # prompted without echo
@@ -59,7 +71,8 @@ CLI today, and any future surface (pane runner, desktop app):
   run: "./bin/import --token {token} --into {table}"
 
 - id: db-shell
-  title: Open a psql shell
+  title: DB shell
+  description: Open a psql shell against the primary database.
   interactive: true                           # needs a real terminal
   run: "psql $DATABASE_URL"
 ```
