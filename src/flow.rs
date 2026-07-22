@@ -33,7 +33,7 @@ fn label_width() -> usize {
 /// still aborts immediately, same as everywhere else. Esc or Ctrl-C at the
 /// group level exits as usual (exit 130). A single group behaves exactly as
 /// the historical flat list.
-pub fn run(resolved: &Resolved, assume_trusted: bool, print: bool) -> Result<i32> {
+pub fn run(resolved: &Resolved, assume_trusted: bool, print: bool, run_id: Option<&str>) -> Result<i32> {
     println!("◆  {} · pult", resolved.name);
     let groups = group_commands(&resolved.commands);
     let width = label_width();
@@ -63,7 +63,7 @@ pub fn run(resolved: &Resolved, assume_trusted: bool, print: bool) -> Result<i32
             }
         }
     };
-    exec::execute(resolved, cmd, &HashMap::new(), assume_trusted, print)
+    exec::execute(resolved, cmd, &HashMap::new(), assume_trusted, print, run_id)
 }
 
 fn command_labels(cmds: &[ResolvedCommand], width: usize) -> Vec<String> {

@@ -4,8 +4,10 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
+use crate::journal;
 use crate::manifest::ParamKind;
 use crate::resolver::{Resolved, ResolvedCommand, ResolvedRun};
+use crate::runner::Journaling;
 use crate::{compile, interp, options, prompt, runner, trust};
 
 /// Execute one command: fill its params (from provided values or interactive
@@ -27,6 +29,7 @@ pub fn execute(
     provided: &HashMap<String, String>,
     assume_trusted: bool,
     print: bool,
+    run_id: Option<&str>,
 ) -> Result<i32> {
     if print {
         // Dry run: compose without executing anything (provided values
@@ -53,6 +56,31 @@ pub fn execute(
     // Trusted now — fill for real (prompting for and resolving any values not
     // given on the command line) and run.
     let values = fill(cmd, provided, Some(&resolved.run_dir))?;
+
+    // Open the run journal (see journal.rs). Ephemeral `pult x` sources are
+    // skipped — no durable repo identity to journal under. The journal's
+    // param audit record gets `<redacted>` for secrets (the spec's literal,
+    // machine-recognizable marker — distinct from the `••••••` display mask
+    // below, which is a human-facing rendering).
+    let journaling = if resolved.ephemeral {
+        Journaling::Off
+    } else {
+        let journal = journal::Journal::start(journal::StartInfo {
+            repo_dir: &resolved.dir,
+            manifest: &resolved.path,
+            command_id: &cmd.id,
+            command_title: &cmd.title,
+            params: journal_params(cmd, &values),
+            interactive: cmd.interactive,
+            run_id,
+        });
+        match journal {
+            Some(j) if cmd.interactive => Journaling::MetaOnly(j),
+            Some(j) => Journaling::Full(j),
+            None => Journaling::Off,
+        }
+    };
+
     match &cmd.run {
         ResolvedRun::Script(template) => {
             // The `running:` banner (and any error message) shows a line with
@@ -62,14 +90,34 @@ pub fn execute(
                 &interp::interpolate(template, &values)?,
                 &display,
                 &resolved.run_dir,
+                journaling,
             )
         }
         ResolvedRun::Steps(_) => runner::run_bash(
             &compile::compile(cmd, &values, true)?,
             &cmd.id,
             &resolved.run_dir,
+            journaling,
         ),
     }
+}
+
+/// `values` for the journal's audit record: secrets as the spec's literal
+/// `"<redacted>"` — the value itself never reaches the journal module.
+fn journal_params(
+    cmd: &ResolvedCommand,
+    values: &IndexMap<String, String>,
+) -> IndexMap<String, String> {
+    let mut out = values.clone();
+    for (name, def) in &cmd.params {
+        if let ParamKind::Input(input) = def.kind()
+            && input.secret
+            && let Some(v) = out.get_mut(name)
+        {
+            *v = "<redacted>".to_string();
+        }
+    }
+    out
 }
 
 /// `values` with every `secret: true` param replaced by a fixed mask (fixed so
@@ -178,6 +226,7 @@ mod tests {
             &HashMap::new(),
             false,
             true,
+            None,
         )
         .unwrap();
         assert_eq!(code, 0);

@@ -8,11 +8,13 @@ mod fetch;
 mod flow;
 mod init;
 mod interp;
+mod journal;
 mod manifest;
 mod options;
 mod prompt;
 mod resolver;
 mod runner;
+mod runs;
 mod selfupdate;
 mod trust;
 mod verify;
@@ -143,10 +145,10 @@ fn run() -> Result<i32> {
 
     // `--params-json` only makes sense feeding a direct command invocation —
     // reject it up front for every other routing (bare flow, `--list`,
-    // `doctor`, `includes`) rather than silently ignoring it.
+    // `doctor`, `includes`, `runs`) rather than silently ignoring it.
     if params_json {
         let is_direct_command = !matches.get_flag("list")
-            && matches!(matches.subcommand(), Some((id, _)) if id != "doctor" && id != "includes");
+            && matches!(matches.subcommand(), Some((id, _)) if id != "doctor" && id != "includes" && id != "runs");
         if !is_direct_command {
             bail!(
                 "--params-json only applies to a direct command invocation \
@@ -181,8 +183,11 @@ fn run() -> Result<i32> {
         return Ok(0);
     }
 
+    let run_id = matches.get_one::<String>("run-id").map(String::as_str);
+
     match matches.subcommand() {
         Some(("doctor", sub)) => doctor::run(&resolved, assume_trusted, sub.get_flag("json")),
+        Some(("runs", sub)) => runs::run_cli(&resolved, sub),
         Some(("includes", sub)) => match sub.subcommand() {
             Some(("verify", _)) => verify::run(&resolved),
             _ => {
@@ -212,9 +217,9 @@ fn run() -> Result<i32> {
                     .context("failed to read stdin for --params-json")?;
                 merge_stdin_params(&raw, &cmd.params, &mut provided)?;
             }
-            exec::execute(&resolved, cmd, &provided, assume_trusted, print)
+            exec::execute(&resolved, cmd, &provided, assume_trusted, print, run_id)
         }
-        None => flow::run(&resolved, assume_trusted, print),
+        None => flow::run(&resolved, assume_trusted, print, run_id),
     }
 }
 
@@ -305,6 +310,8 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
                pult includes verify         check every pin still resolves and no tag moved\n  \
                pult doctor [--json]         run every command's `check:` and report readiness\n  \
+               pult runs list [--json]      this repo's run history (the run journal)\n  \
+               pult runs tail <ID> [--follow]  one run's event stream (--json for tooling)\n  \
                pult self schema             print the manifest JSON Schema (editors/CI)\n  \
                pult --list [--json]         what this manifest declares (--json for tooling)\n\n\
              Run bare `pult` for the guided flow.  Authoring guide: {}",
@@ -345,6 +352,16 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 .help(
                     "Read param values as a JSON object from stdin (keeps them out of \
                      pult's argv and shell history)",
+                ),
+        )
+        .arg(
+            Arg::new("run-id")
+                .long("run-id")
+                .global(true)
+                .value_name("ID")
+                .help(
+                    "Journal this run under a caller-supplied id (for wrapping surfaces \
+                     like the desktop app; defaults to a generated UUIDv7)",
                 ),
         )
         // Engine subcommands are hidden from the Commands list (that list is
@@ -389,6 +406,44 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                         .long("json")
                         .action(ArgAction::SetTrue)
                         .help("Machine-readable JSON (stable schema, for tooling/agents)"),
+                ),
+        )
+        // The run journal's reader surface (the id `runs` is reserved) —
+        // see src/runs.rs and the run-journal spec.
+        .subcommand(
+            clap::Command::new("runs")
+                .hide(true)
+                .about("This repo's run history — the run journal")
+                .subcommand(
+                    clap::Command::new("list")
+                        .about("List journaled runs, newest first")
+                        .arg(
+                            Arg::new("json")
+                                .long("json")
+                                .action(ArgAction::SetTrue)
+                                .help("Machine-readable JSON (meta + derived `crashed` flag)"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("tail")
+                        .about("Print one run's journaled event stream")
+                        .arg(Arg::new("run_id").required(true).value_name("RUN_ID"))
+                        .arg(
+                            Arg::new("follow")
+                                .long("follow")
+                                .action(ArgAction::SetTrue)
+                                .help("Keep following a live run until it ends"),
+                        )
+                        .arg(
+                            Arg::new("json")
+                                .long("json")
+                                .action(ArgAction::SetTrue)
+                                .help("Raw events.jsonl lines (stable schema, for tooling)"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("prune")
+                        .about("Apply journal retention now (PULT_RUNS_KEEP, default 20 per command)"),
                 ),
         );
 

@@ -17,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
+# v7 (time-ordered) ids for the run journal — run dirs sort chronologically
+# by name. See src/journal.rs.
+uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
 tempfile = "3"
