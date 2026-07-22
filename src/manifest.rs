@@ -251,7 +251,6 @@ impl OptionDef {
     }
 }
 
-
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]

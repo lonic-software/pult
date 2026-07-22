@@ -177,8 +177,7 @@ fn fill(
             (None, ParamKind::Pick(pick)) => {
                 let opts = options::resolve_pick(pick, &values, run_dir.unwrap())?;
                 let w = label::width();
-                let labels: Vec<String> =
-                    opts.iter().map(|o| label::option_label(o, w)).collect();
+                let labels: Vec<String> = opts.iter().map(|o| label::option_label(o, w)).collect();
                 let i = prompt::select_index(&format!("{name}?"), labels)?;
                 pick_selection(&opts, i)
             }
