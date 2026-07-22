@@ -246,7 +246,11 @@ impl OptionDef {
     pub fn description(&self) -> Option<&str> {
         match self {
             OptionDef::Plain(_) => None,
-            OptionDef::Full(f) => f.description.as_deref().filter(|d| !d.is_empty()),
+            // trim().is_empty(), matching validate_param's rule — a
+            // whitespace-only description is load-rejected, but this keeps
+            // the accessor itself defense-in-depth-consistent for any
+            // caller that runs before validation.
+            OptionDef::Full(f) => f.description.as_deref().filter(|d| !d.trim().is_empty()),
         }
     }
 }
@@ -497,15 +501,18 @@ fn validate_param(name: &str, def: &ParamDef) -> Result<()> {
         }
         if let Some(options) = &pick.options {
             for opt in options {
-                if let OptionDef::Full(full) = opt {
-                    if full.value.trim().is_empty() {
-                        bail!("param `{name}`: an option has an empty `value`");
-                    }
-                    if let Some(description) = &full.description
-                        && description.trim().is_empty()
-                    {
-                        bail!("param `{name}`: an option has an empty `description`");
-                    }
+                // Uniform across Plain and Full — `value()` abstracts the
+                // variant, so a bare `Plain("")`/`Plain("  ")` (e.g.
+                // `options: ["", dev]`) is rejected exactly like an empty
+                // `Full.value`, instead of only the latter slipping through.
+                if opt.value().trim().is_empty() {
+                    bail!("param `{name}`: an option has an empty `value`");
+                }
+                if let OptionDef::Full(full) = opt
+                    && let Some(description) = &full.description
+                    && description.trim().is_empty()
+                {
+                    bail!("param `{name}`: an option has an empty `description`");
                 }
             }
         }
@@ -852,5 +859,44 @@ commands:
         );
         let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("empty `value`"), "got: {err}");
+    }
+
+    /// Code-review finding #1: a bare blank `Plain` scalar option (not just
+    /// an empty `Full.value`) is rejected uniformly, via `opt.value()`.
+    /// Redden by reverting to the variant-only (`OptionDef::Full` match arm)
+    /// check.
+    #[test]
+    fn blank_plain_option_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: a\n    title: A\n    params:\n      \
+             env: { pick: { options: [\"\", dev] } }\n    run: \"echo {env}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty `value`"), "got: {err}");
+    }
+
+    #[test]
+    fn whitespace_only_plain_option_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: a\n    title: A\n    params:\n      \
+             env: { pick: { options: [\"  \"] } }\n    run: \"echo {env}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty `value`"), "got: {err}");
+    }
+
+    /// Code-review finding #3: `OptionDef::description()` filters with
+    /// `trim().is_empty()`, matching `validate_param`'s predicate — a
+    /// whitespace-only description never leaks `Some("  ")` to a caller
+    /// that runs before load validation. Redden by reverting the accessor
+    /// to a bare `is_empty()` filter.
+    #[test]
+    fn description_accessor_treats_whitespace_only_as_absent() {
+        let full = FullOption {
+            value: "uat".to_string(),
+            description: Some("   ".to_string()),
+        };
+        let opt = OptionDef::Full(full);
+        assert_eq!(opt.description(), None);
     }
 }
