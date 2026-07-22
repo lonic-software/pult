@@ -175,7 +175,8 @@ fn fill(
             (None, _) if run_dir.is_none() => format!("<{name}>"),
             (None, ParamKind::Pick(pick)) => {
                 let opts = options::resolve_pick(pick, &values, run_dir.unwrap())?;
-                prompt::select(&format!("{name}?"), opts)?
+                let labels: Vec<String> = opts.iter().map(|o| o.value.clone()).collect();
+                prompt::select(&format!("{name}?"), labels)?
             }
             (None, ParamKind::Input(input)) if input.secret => {
                 prompt::password(&format!("{name}?"))?
