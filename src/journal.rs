@@ -143,7 +143,8 @@ impl Journal {
         // Canonicalize so one repo reached via different paths (symlinks,
         // `../`) journals to one key. Fall back to the raw path — a journal
         // under a slightly-off key beats no journal.
-        let repo_dir = fs::canonicalize(info.repo_dir).unwrap_or_else(|_| info.repo_dir.to_path_buf());
+        let repo_dir =
+            fs::canonicalize(info.repo_dir).unwrap_or_else(|_| info.repo_dir.to_path_buf());
         let repo_root = state.join("repos").join(repo_key(&repo_dir));
         let runs_root = repo_root.join("runs");
         fs::create_dir_all(&runs_root)
@@ -239,7 +240,11 @@ impl Journal {
         });
         Self::append_locked(&mut inner, doc);
         inner.done = true;
-        inner.meta.status = if stopped { Status::Stopped } else { Status::Exited };
+        inner.meta.status = if stopped {
+            Status::Stopped
+        } else {
+            Status::Exited
+        };
         inner.meta.exit_code = code;
         inner.meta.ended_at = Some(rfc3339_utc(now_ms()));
         let (path, meta) = (inner.meta_path.clone(), inner.meta.clone());
@@ -354,11 +359,10 @@ pub fn prune(runs_root: &Path, keep: usize, only_command: Option<&str>) -> usize
         if only_command.is_some_and(|c| c != meta.command_id) {
             continue;
         }
-        by_command.entry(meta.command_id.clone()).or_default().push((
-            meta.started_at.clone(),
-            run_dir,
-            meta,
-        ));
+        by_command
+            .entry(meta.command_id.clone())
+            .or_default()
+            .push((meta.started_at.clone(), run_dir, meta));
     }
     let mut removed = 0;
     for (_, mut runs) in by_command {
@@ -504,7 +508,11 @@ mod tests {
 
         let journal = Journal::start_at(state.path(), info(repo.path(), &manifest)).unwrap();
         journal.line("stdout", "building image…");
-        journal.event(&Event::Step { k: 1, n: 3, name: "build".into() });
+        journal.event(&Event::Step {
+            k: 1,
+            n: 3,
+            name: "build".into(),
+        });
         journal.finish(Some(0), false);
         // Terminal: further appends are dropped, exit stays the last record.
         journal.line("stdout", "straggler after exit");
@@ -516,7 +524,11 @@ mod tests {
                 .unwrap();
         assert_eq!(repo_doc["dir"], serde_json::json!(canonical));
 
-        let run_dir = fs::read_dir(repo_root.join("runs")).unwrap().next().unwrap().unwrap();
+        let run_dir = fs::read_dir(repo_root.join("runs"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
         let meta = read_meta(&run_dir.path()).unwrap();
         assert_eq!(meta.schema, SCHEMA);
         assert_eq!(meta.command_id, "deploy");
@@ -549,7 +561,11 @@ mod tests {
         journal.finish(None, true);
 
         let canonical = fs::canonicalize(repo.path()).unwrap();
-        let runs = state.path().join("repos").join(repo_key(&canonical)).join("runs");
+        let runs = state
+            .path()
+            .join("repos")
+            .join(repo_key(&canonical))
+            .join("runs");
         let run_dir = fs::read_dir(runs).unwrap().next().unwrap().unwrap();
         let meta = read_meta(&run_dir.path()).unwrap();
         assert_eq!(meta.status, Status::Stopped);
@@ -598,7 +614,11 @@ mod tests {
         other_journal.finish(Some(0), false);
 
         let canonical = fs::canonicalize(repo.path()).unwrap();
-        let runs_root = state.path().join("repos").join(repo_key(&canonical)).join("runs");
+        let runs_root = state
+            .path()
+            .join("repos")
+            .join(repo_key(&canonical))
+            .join("runs");
         let count = || fs::read_dir(&runs_root).unwrap().count();
         assert_eq!(count(), 7);
 

@@ -32,7 +32,9 @@ pub fn run_cli(resolved: &Resolved, matches: &clap::ArgMatches) -> Result<i32> {
         ),
         Some(("prune", _)) => prune(resolved),
         _ => {
-            eprintln!("usage: pult runs <list [--json] | tail <RUN_ID> [--follow] [--json] | prune>");
+            eprintln!(
+                "usage: pult runs <list [--json] | tail <RUN_ID> [--follow] [--json] | prune>"
+            );
             Ok(2)
         }
     }
@@ -44,8 +46,7 @@ pub fn run_cli(resolved: &Resolved, matches: &clap::ArgMatches) -> Result<i32> {
 fn runs_root(resolved: &Resolved) -> Result<PathBuf> {
     let state = journal::state_dir()
         .context("no journal state dir (PULT_STATE_DIR unset and no home directory)")?;
-    let canonical =
-        std::fs::canonicalize(&resolved.dir).unwrap_or_else(|_| resolved.dir.clone());
+    let canonical = std::fs::canonicalize(&resolved.dir).unwrap_or_else(|_| resolved.dir.clone());
     Ok(state
         .join("repos")
         .join(journal::repo_key(&canonical))
@@ -106,7 +107,11 @@ fn list(resolved: &Resolved, json: bool) -> Result<i32> {
         println!("no journaled runs for {}", resolved.dir.display());
         return Ok(0);
     }
-    let id_width = runs.iter().map(|(m, _)| m.command_id.len()).max().unwrap_or(0);
+    let id_width = runs
+        .iter()
+        .map(|(m, _)| m.command_id.len())
+        .max()
+        .unwrap_or(0);
     for (meta, crashed) in &runs {
         let exit = match meta.exit_code {
             Some(code) => format!("exit {code}"),
@@ -194,7 +199,8 @@ fn render_event(line: &str) -> Option<String> {
         }
         "step" => Some(format!(
             "· step {}/{} {}",
-            doc["k"], doc["n"],
+            doc["k"],
+            doc["n"],
             doc["name"].as_str().unwrap_or(""),
         )),
         "progress" => match doc["pct"].as_u64() {
