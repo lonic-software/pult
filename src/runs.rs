@@ -155,47 +155,85 @@ fn tail(resolved: &Resolved, run_id: &str, follow: bool, json: bool) -> Result<i
     let mut offset: u64 = 0;
     let mut stdout = std::io::stdout();
 
+    follow_events(&mut file, &mut offset, follow, json, &mut stdout, || {
+        journal::read_meta(&run_dir)
+    })
+    .map(|()| 0)
+}
+
+/// Drive one run's events file to completion: drain what's there, and (in
+/// `--follow` mode) poll `observe` — normally `journal::read_meta` — until
+/// it reports the run is over. `observe` is a parameter rather than a
+/// direct call so a test can make the writer's exit-then-meta-flip race
+/// land deterministically instead of depending on real thread timing.
+///
+/// The terminal case always drains once more before returning: `finish`
+/// appends the `exit` event *then* flips meta, so anything written in the
+/// gap between a drain pass and the `observe` call that follows it —
+/// always including a same-final-tick `exit` event — would otherwise never
+/// be read. Draining again after observing "over" (whether a terminal
+/// status or a dead writer) closes that gap.
+fn follow_events(
+    file: &mut std::fs::File,
+    offset: &mut u64,
+    follow: bool,
+    json: bool,
+    out: &mut impl Write,
+    mut observe: impl FnMut() -> Option<Meta>,
+) -> Result<()> {
     loop {
-        // Read whatever has been appended since the last pass. A torn final
-        // line (no trailing newline yet) is "not yet written": rewind to
-        // its start and pick it up whole on a later pass.
-        file.seek(SeekFrom::Start(offset))?;
-        let mut reader = BufReader::new(&file);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = reader.read_line(&mut line)?;
-            if n == 0 {
-                break;
-            }
-            if !line.ends_with('\n') {
-                break;
-            }
-            offset += n as u64;
-            let trimmed = line.trim_end();
-            if json {
-                writeln!(stdout, "{trimmed}")?;
-            } else if let Some(rendered) = render_event(trimmed) {
-                writeln!(stdout, "{rendered}")?;
-            }
-            stdout.flush().ok();
-        }
+        drain_events(file, offset, json, out)?;
 
         if !follow {
-            return Ok(0);
+            return Ok(());
         }
         // Follow until the run is over: a terminal status in meta, or a
-        // dead writer (crash) — either way nothing more will be appended.
-        match journal::read_meta(&run_dir) {
+        // dead writer (crash) — either way nothing more will be appended
+        // once that's observed.
+        match observe() {
             Some(meta) if meta.status == Status::Running && journal::writer_alive(&meta) => {
                 std::thread::sleep(FOLLOW_POLL);
             }
             _ => {
-                // One last drain pass already happened above; done.
-                return Ok(0);
+                drain_events(file, offset, json, out)?;
+                return Ok(());
             }
         }
     }
+}
+
+/// One pass over whatever has been appended to `file` since `*offset`,
+/// rendering each complete record to `out`. A torn final line (no trailing
+/// newline yet) is "not yet written": rewind to its start and pick it up
+/// whole on a later pass.
+fn drain_events(
+    file: &mut std::fs::File,
+    offset: &mut u64,
+    json: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    file.seek(SeekFrom::Start(*offset))?;
+    let mut reader = BufReader::new(&*file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            break;
+        }
+        *offset += n as u64;
+        let trimmed = line.trim_end();
+        if json {
+            writeln!(out, "{trimmed}")?;
+        } else if let Some(rendered) = render_event(trimmed) {
+            writeln!(out, "{rendered}")?;
+        }
+        out.flush().ok();
+    }
+    Ok(())
 }
 
 /// Text-mode rendering of one journal event line — a compact human echo of
@@ -262,6 +300,76 @@ mod tests {
                 "id {bad:?}: {err}"
             );
         }
+    }
+
+    fn terminal_meta() -> Meta {
+        Meta {
+            schema: 1,
+            run_id: "test-run".to_string(),
+            repo_dir: PathBuf::from("/tmp/repo"),
+            manifest: PathBuf::from("/tmp/repo/pult.yaml"),
+            command_id: "deploy".to_string(),
+            command_title: "Deploy".to_string(),
+            params: indexmap::IndexMap::new(),
+            origin: "cli".to_string(),
+            interactive: false,
+            pult_version: "0.0.0".to_string(),
+            pid: 1,
+            pgid: None,
+            started_at: "2026-01-01T00:00:00.000Z".to_string(),
+            status: Status::Exited,
+            exit_code: Some(0),
+            ended_at: Some("2026-01-01T00:00:01.000Z".to_string()),
+        }
+    }
+
+    /// M1: `finish` appends the `exit` event *then* flips meta to a
+    /// terminal status — so a reader that drains, then reads meta, then
+    /// stops on seeing "over" can miss anything written in that gap,
+    /// always including the `exit` event itself when the writer's `finish`
+    /// races the reader's check. `observe` (normally `journal::read_meta`)
+    /// is a parameter here specifically so that race can be reproduced
+    /// deterministically instead of depending on real thread timing: the
+    /// closure below appends the straggler line at the exact moment the
+    /// loop asks "is it over yet", landing it in the gap on purpose.
+    ///
+    /// Goes red if `follow_events`'s second `drain_events` call (after the
+    /// terminal match arm) is reverted: the appended exit line would then
+    /// never be read, and this assertion would fail.
+    #[test]
+    fn follow_events_drains_once_more_after_observing_terminal_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let events_path = dir.path().join("events.jsonl");
+        let line1 = r#"{"ts":1,"kind":"line","stream":"stdout","text":"hello"}"#;
+        let exit_line = r#"{"ts":2,"kind":"exit","code":0,"stopped":false}"#;
+        std::fs::write(&events_path, format!("{line1}\n")).unwrap();
+
+        let mut file = std::fs::File::open(&events_path).unwrap();
+        let mut offset = 0u64;
+        let mut out: Vec<u8> = Vec::new();
+
+        let meta = terminal_meta();
+        let mut appended = false;
+        let observe = || {
+            if !appended {
+                appended = true;
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&events_path)
+                    .unwrap();
+                writeln!(f, "{exit_line}").unwrap();
+            }
+            Some(meta.clone())
+        };
+
+        follow_events(&mut file, &mut offset, true, true, &mut out, observe).unwrap();
+
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains(r#""kind":"exit""#),
+            "final drain must pick up the exit event appended during \
+             the terminal observation: {rendered}"
+        );
     }
 
     #[test]
