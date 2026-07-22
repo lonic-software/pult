@@ -719,15 +719,17 @@ commands:
         // parallel array, same order/length, carrying the descriptions.
         assert!(params[0]["options"][0].is_string());
         assert_eq!(params[0]["option_details"][0]["value"], "dev");
-        assert_eq!(params[0]["option_details"][0]["description"], serde_json::Value::Null);
+        assert_eq!(
+            params[0]["option_details"][0]["description"],
+            serde_json::Value::Null
+        );
         assert_eq!(params[0]["option_details"][1]["value"], "uat");
         assert_eq!(
             params[0]["option_details"][1]["description"],
             "User acceptance"
         );
         assert_eq!(
-            params[0]["option_details"][1]["value"],
-            params[0]["options"][1],
+            params[0]["option_details"][1]["value"], params[0]["options"][1],
             "option_details[i].value must equal options[i]"
         );
         // Dynamic picks get neither key — the option set is unknowable at
