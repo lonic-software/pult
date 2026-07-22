@@ -150,8 +150,9 @@ impl Journal {
     }
 
     /// The fallible core of `start`, with the state dir explicit — the seam
-    /// tests use to journal into a tempdir without touching process env.
-    fn start_at(state: &Path, info: StartInfo) -> Result<Journal> {
+    /// tests (in this module and runner.rs's) use to journal into a tempdir
+    /// without touching process env.
+    pub(crate) fn start_at(state: &Path, info: StartInfo) -> Result<Journal> {
         // Canonicalize so one repo reached via different paths (symlinks,
         // `../`) journals to one key. Fall back to the raw path — a journal
         // under a slightly-off key beats no journal.

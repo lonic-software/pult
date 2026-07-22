@@ -140,6 +140,19 @@ mod journaled {
         let spawn_result = command.spawn();
         #[cfg(unix)]
         let events = events.after_spawn();
+        // Passthrough/None claims have no reader thread of ours, so they
+        // count as already-done; Claimed's flips once `read_events` returns
+        // (the pipe's EOF) — see `claim_events_channel`.
+        let events_done = {
+            #[cfg(unix)]
+            {
+                events.done_flag()
+            }
+            #[cfg(not(unix))]
+            {
+                Arc::new(AtomicBool::new(true))
+            }
+        };
 
         let mut child = spawn_result.with_context(|| format!("failed to run `{what}`"))?;
 
@@ -169,12 +182,16 @@ mod journaled {
 
         // The pipes close when the child *and every descendant that
         // inherited them* are done writing — usually right around `wait`
-        // returning. Give the tee threads a short bounded drain, then move
-        // on: a daemonized grandchild holding the pipe open must not hang
-        // pult (its later output is dropped by the journal's done latch,
-        // and its bytes still reach our stdout/stderr until we exit).
+        // returning. Give the tee threads AND the events reader thread
+        // (M2: a `step 3/3` emitted right before the child exits can race
+        // `finish` otherwise) a short bounded drain, then move on: a
+        // daemonized grandchild holding a pipe open must not hang pult (its
+        // later output is dropped by the journal's done latch, and its
+        // bytes still reach our stdout/stderr until we exit).
         let deadline = Instant::now() + Duration::from_millis(500);
-        while !(out_done.load(Ordering::Relaxed) && err_done.load(Ordering::Relaxed))
+        while !(out_done.load(Ordering::Relaxed)
+            && err_done.load(Ordering::Relaxed)
+            && events_done.load(Ordering::Relaxed))
             && Instant::now() < deadline
         {
             std::thread::sleep(Duration::from_millis(10));
@@ -200,6 +217,15 @@ mod journaled {
     /// `read_until` (not `lines()`) so carriage returns and partial-line
     /// content pass through to the live stream unmodified; only the
     /// journal's copy is trimmed.
+    ///
+    /// Journal FIRST, forward second (M3): `out` is a live stream pult
+    /// doesn't control the far end of (a piping parent, e.g. `pult deploy |
+    /// less`, can leave `write_all` blocked indefinitely). If forwarding ran
+    /// first, a blocked consumer would starve the journal of a line the
+    /// child already produced — the 500ms drain deadline in `execute` would
+    /// pass, `finish` would latch, and that line would never be journaled
+    /// even though the run recorded a clean exit. Journaling first means
+    /// the record is safe before a blocked `out` can do any damage.
     fn tee(
         reader: impl Read,
         mut out: impl Write,
@@ -214,14 +240,195 @@ mod journaled {
             match reader.read_until(b'\n', &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    let _ = out.write_all(&buf);
-                    let _ = out.flush();
                     let text = String::from_utf8_lossy(&buf);
                     journal.line(stream, text.trim_end_matches(['\n', '\r']));
+                    let _ = out.write_all(&buf);
+                    let _ = out.flush();
                 }
             }
         }
         done.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::journal::{StartInfo, repo_key};
+        use indexmap::IndexMap;
+        use std::time::Instant;
+
+        // M2 (the events reader thread's done flag, wired through
+        // `EventsClaim::done_flag` into `execute`'s three-flag drain wait)
+        // has no *deterministic* test here alongside M3's `tee` test below.
+        // Unlike `tee`, a standalone function a test can drive with a
+        // hand-rolled blocking `Write`, M2's race is between the events
+        // reader thread finishing one more `read_events` iteration and
+        // `execute`'s `child.wait()` returning — and that race only exists
+        // inside `execute` itself, which spawns a real child end to end
+        // (`Command::spawn`, pipes, `pre_exec`) rather than exposing a seam
+        // a test could drive with a fake clock or a fake child. Forcing the
+        // exact interleaving deterministically would mean adding an
+        // injectable child-process/clock abstraction to production code for
+        // this one test, which the task explicitly rules out.
+        //
+        // What's below instead (`full_execute_journals_a_late_step_event`)
+        // is real, non-mocked coverage: an actual child process emits a
+        // step event over the real events channel and exits immediately
+        // after, exercised through the genuine `execute` (real pipes, real
+        // threads, the real 500ms deadline). It proves the wiring is live
+        // in the common case. It is *not* a reliable revert-check, though,
+        // and empirically so, not just in theory: this command has no
+        // stdout/stderr output of its own, so `out_done`/`err_done` latch
+        // almost immediately once the child's pipes close — without
+        // `events_done` in the wait condition, the loop can fall through
+        // before the events reader thread has caught up, which is exactly
+        // this fix's race. Reverting the `events_done` clause and running
+        // this test 20x in a loop failed it only 2/20 times: real, but too
+        // rare to trust as a red/green gate. Left in as a live sanity check
+        // (and a faint tripwire), not a substitute for a deterministic one.
+
+        /// A `Write` whose every call blocks the calling thread forever —
+        /// stands in for a piping parent that never drains its end (`pult
+        /// deploy | less`, paused).
+        struct BlockingWriter;
+
+        impl Write for BlockingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                loop {
+                    std::thread::park();
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// M3: `tee` must journal a line before attempting to forward it.
+        /// `BlockingWriter` never returns from `write_all`, so if `tee`
+        /// still journaled the line first, it shows up in `events.jsonl`
+        /// even though the forward never completes (and never will — the
+        /// spawned thread below is deliberately leaked, parked forever,
+        /// same as a real blocked consumer would leave it).
+        ///
+        /// Goes red if the journal-then-forward order in `tee` is reverted
+        /// to forward-then-journal: the blocked `write_all` would run
+        /// first, `journal.line` would never be reached, and the poll below
+        /// would time out with nothing written.
+        #[test]
+        fn tee_journals_before_a_blocked_forward_completes() {
+            let state = tempfile::tempdir().unwrap();
+            let repo = tempfile::tempdir().unwrap();
+            let manifest = repo.path().join("pult.yaml");
+            let journal = Journal::start_at(
+                state.path(),
+                StartInfo {
+                    repo_dir: repo.path(),
+                    manifest: &manifest,
+                    command_id: "deploy",
+                    command_title: "Deploy",
+                    params: IndexMap::new(),
+                    interactive: false,
+                    run_id: None,
+                },
+            )
+            .unwrap();
+
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            let done = Arc::new(AtomicBool::new(false));
+            let journal_thread = journal.clone();
+            std::thread::spawn(move || {
+                tee(reader, BlockingWriter, journal_thread, "stdout", done);
+            });
+            writer.write_all(b"straggler line\n").unwrap();
+            // `writer` stays alive (not dropped) for the rest of the test —
+            // EOF is irrelevant here, the point is the blocked forward, not
+            // the pipe's lifetime.
+
+            let canonical = std::fs::canonicalize(repo.path()).unwrap();
+            let runs_dir = state
+                .path()
+                .join("repos")
+                .join(repo_key(&canonical))
+                .join("runs");
+            let run_dir = std::fs::read_dir(&runs_dir)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let events_path = run_dir.join("events.jsonl");
+
+            // Poll instead of a fixed sleep: the forward never completes,
+            // so there's no event to wait on other than the journal file
+            // itself gaining the line, bounded so a genuine regression
+            // fails the test instead of hanging it.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let contents = loop {
+                let contents = std::fs::read_to_string(&events_path).unwrap_or_default();
+                if contents.contains("straggler line") || Instant::now() >= deadline {
+                    break contents;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(
+                contents.contains("straggler line"),
+                "journal did not receive the line before the blocked forward: {contents}"
+            );
+        }
+
+        /// M2, real (non-adversarial) coverage: an actual child emits a
+        /// `step` event over `PULT_EVENTS` and exits immediately after —
+        /// through the genuine `execute` (real pipes, real threads, the
+        /// real 500ms deadline), not a mock. Confirms the events channel
+        /// wiring and the drain wait are live end to end, even though (per
+        /// the module comment above) it can't force the exact interleaving
+        /// M2 targets.
+        #[test]
+        fn full_execute_journals_a_late_step_event() {
+            let state = tempfile::tempdir().unwrap();
+            let repo = tempfile::tempdir().unwrap();
+            let manifest = repo.path().join("pult.yaml");
+            let journal = Journal::start_at(
+                state.path(),
+                StartInfo {
+                    repo_dir: repo.path(),
+                    manifest: &manifest,
+                    command_id: "deploy",
+                    command_title: "Deploy",
+                    params: IndexMap::new(),
+                    interactive: false,
+                    run_id: None,
+                },
+            )
+            .unwrap();
+
+            let mut command = Command::new("bash");
+            command
+                .arg("-c")
+                .arg(r#"echo "step 1/1 done" >&$PULT_EVENTS"#);
+            let (code, stopped) = execute(&mut command, "test", &journal).unwrap();
+            assert_eq!(code, 0);
+            assert!(!stopped);
+
+            let canonical = std::fs::canonicalize(repo.path()).unwrap();
+            let run_dir = std::fs::read_dir(
+                state
+                    .path()
+                    .join("repos")
+                    .join(repo_key(&canonical))
+                    .join("runs"),
+            )
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+            let events = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
+            assert!(
+                events.contains(r#""kind":"step""#),
+                "step event emitted right before child exit must reach the journal: {events}"
+            );
+        }
     }
 }
 
@@ -401,6 +608,12 @@ mod events_unix {
         let render = std::io::stderr().is_terminal();
         let rendered = Arc::new(AtomicBool::new(false));
         let reader_rendered = Arc::clone(&rendered);
+        // M2: this thread is never joined, so without a done flag the
+        // journaled drain in `execute` has no way to know a straggler event
+        // (e.g. a `step 3/3` emitted right before the child exits) is still
+        // in flight, and can call `finish` while it's still in the pipe.
+        let done = Arc::new(AtomicBool::new(false));
+        let reader_done = Arc::clone(&done);
         let reader = channel.reader;
         std::thread::spawn(move || {
             let mut renderer = events::Renderer::new();
@@ -412,23 +625,30 @@ mod events_unix {
                         reader_rendered.store(true, Ordering::Relaxed);
                     }
                 }
-            })
+            });
+            // `read_events` only returns on EOF (the pipe closed) — every
+            // event already read reached the journal above.
+            reader_done.store(true, Ordering::Relaxed);
         });
         EventsClaim::Claimed {
             writer: Some(channel.writer),
             rendered,
+            done,
         }
     }
 
     /// Bookkeeping for `claim_events_channel` across the spawn boundary:
     /// the write end must be dropped right after `spawn` (EOF contract),
-    /// and any rendered OSC badge cleared after the run.
+    /// any rendered OSC badge cleared after the run, and (M2) the reader
+    /// thread's done flag exposed so the journaled drain loop can wait on
+    /// it alongside the tee threads.
     pub(super) enum EventsClaim {
         Passthrough,
         None,
         Claimed {
             writer: Option<std::io::PipeWriter>,
             rendered: Arc<AtomicBool>,
+            done: Arc<AtomicBool>,
         },
     }
 
@@ -445,6 +665,15 @@ mod events_unix {
                 && rendered.load(Ordering::Relaxed)
             {
                 events::render_final(&mut std::io::stderr());
+            }
+        }
+
+        /// Whether the events reader thread has hit EOF — always `true`
+        /// for `Passthrough`/`None`, which have no reader thread of ours.
+        pub(super) fn done_flag(&self) -> Arc<AtomicBool> {
+            match self {
+                EventsClaim::Claimed { done, .. } => Arc::clone(done),
+                EventsClaim::Passthrough | EventsClaim::None => Arc::new(AtomicBool::new(true)),
             }
         }
     }
