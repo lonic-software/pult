@@ -334,10 +334,10 @@ fn write_meta(path: &Path, meta: &Meta) -> Result<()> {
     // own fsync on most filesystems (fsyncing the file's contents, above,
     // doesn't cover it) — so without this, a crash right after `rename`
     // could still lose the rename itself on some filesystems/mount options.
-    if let Some(dir) = path.parent() {
-        if let Ok(d) = fs::File::open(dir) {
-            d.sync_all().ok();
-        }
+    if let Some(dir) = path.parent()
+        && let Ok(d) = fs::File::open(dir)
+    {
+        d.sync_all().ok();
     }
     Ok(())
 }
