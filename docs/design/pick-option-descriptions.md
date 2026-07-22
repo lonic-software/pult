@@ -177,12 +177,14 @@ loud and trivially remedied.
 > losslessly). **One further narrowing** (flagged in the medium code review): an integer literal
 > *outside* `i64`/`u64` range (e.g. a 21-digit `options: [123456789012345678901]`) loaded as a
 > string before this change, but serde_yaml now resolves the overflowing literal as an `f64`, so it
-> too hits `visit_f64` and is rejected with the same "quote it" message. Same remedy (quote it),
-> same near-zero exposure — pick options are overwhelmingly identifiers, not 20-digit numbers — and
-> consistent with the "quote ambiguous numerics" rule; recorded here so the narrowing is not
-> silent. Near-zero real exposure overall, and the fix is one pair of quotes. **Signed off at
-> review** (the alternative, lossy `n.to_string()`, is a one-line change if the corruption risk is
-> ever preferred).
+> too hits `visit_f64` and is rejected with the same "quote it" message. The YAML special floats
+> `.inf`, `-.inf`, and `.nan` resolve the same way and are likewise rejected (they loaded as the
+> literal strings `".inf"` / `".nan"` before). Same remedy in every case (quote it), same near-zero
+> exposure — pick options are overwhelmingly identifiers, not bare decimals, 20-digit numbers, or
+> infinities — and consistent with the "quote ambiguous numerics" rule; recorded here so the
+> narrowing is not silent. The fix is always one pair of quotes. **Signed off at review** (the
+> alternative, lossy `n.to_string()`, is a one-line change if the corruption risk is ever
+> preferred).
 
 **`deny_unknown_fields`** (`ARGUED`): `PickDef` still has one `options` field, so its own
 `deny_unknown_fields` (manifest.rs:159-165, `VERIFIED`) is unaffected. `FullOption` carries its
