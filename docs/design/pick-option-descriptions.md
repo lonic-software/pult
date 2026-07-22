@@ -173,10 +173,16 @@ loud and trivially remedied.
 
 > **This is a second intentional behavior change** (alongside the §3 tab split, §10): an
 > *unquoted* float option that loads today (`options: [1.5]`) becomes a load-time error tomorrow,
-> demanding `["1.5"]`. Integers and bools are unaffected (they round-trip losslessly). Near-zero
-> real exposure — pick options are overwhelmingly identifiers, not bare decimals — and the fix is
-> one pair of quotes. **Flagged for sign-off at review** (the alternative, lossy `n.to_string()`,
-> is a one-line change if you'd rather accept the corruption risk).
+> demanding `["1.5"]`. Integers and bools that fit `i64`/`u64` are unaffected (they round-trip
+> losslessly). **One further narrowing** (flagged in the medium code review): an integer literal
+> *outside* `i64`/`u64` range (e.g. a 21-digit `options: [123456789012345678901]`) loaded as a
+> string before this change, but serde_yaml now resolves the overflowing literal as an `f64`, so it
+> too hits `visit_f64` and is rejected with the same "quote it" message. Same remedy (quote it),
+> same near-zero exposure — pick options are overwhelmingly identifiers, not 20-digit numbers — and
+> consistent with the "quote ambiguous numerics" rule; recorded here so the narrowing is not
+> silent. Near-zero real exposure overall, and the fix is one pair of quotes. **Signed off at
+> review** (the alternative, lossy `n.to_string()`, is a one-line change if the corruption risk is
+> ever preferred).
 
 **`deny_unknown_fields`** (`ARGUED`): `PickDef` still has one `options` field, so its own
 `deny_unknown_fields` (manifest.rs:159-165, `VERIFIED`) is unaffected. `FullOption` carries its
