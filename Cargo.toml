@@ -9,6 +9,7 @@ repository = "https://github.com/lonic-software/pult"
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["string"] }
+crossterm = "=0.25.0"
 dirs = "6"
 indexmap = { version = "2", features = ["serde"] }
 inquire = "0.7"
@@ -16,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
+# v7 (time-ordered) ids for the run journal — run dirs sort chronologically
+# by name. See src/journal.rs.
+uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
 tempfile = "3"

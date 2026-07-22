@@ -117,6 +117,10 @@ commands:
 
 - `params` are ordered; a `from:` source may interpolate `{param}` only for
   params declared **before** it (validated at load).
+- Pick options may carry an optional, display-only description — a static
+  `{ value: uat, description: "User acceptance" }` or a `from:` line of
+  `value<TAB>description` — shown as `value — description` in the picker; the
+  bare value is always what's passed and validated.
 - Interpolated values are shell-quoted, so picker/input values can't inject
   into the command line.
 - `run` executes via `sh -c` with **inherited stdio** — interactive sessions

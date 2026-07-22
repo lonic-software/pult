@@ -4,8 +4,11 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
+use crate::journal;
+use crate::label;
 use crate::manifest::ParamKind;
 use crate::resolver::{Resolved, ResolvedCommand, ResolvedRun};
+use crate::runner::Journaling;
 use crate::{compile, interp, options, prompt, runner, trust};
 
 /// Execute one command: fill its params (from provided values or interactive
@@ -27,6 +30,7 @@ pub fn execute(
     provided: &HashMap<String, String>,
     assume_trusted: bool,
     print: bool,
+    run_id: Option<&str>,
 ) -> Result<i32> {
     if print {
         // Dry run: compose without executing anything (provided values
@@ -53,6 +57,31 @@ pub fn execute(
     // Trusted now — fill for real (prompting for and resolving any values not
     // given on the command line) and run.
     let values = fill(cmd, provided, Some(&resolved.run_dir))?;
+
+    // Open the run journal (see journal.rs). Ephemeral `pult x` sources are
+    // skipped — no durable repo identity to journal under. The journal's
+    // param audit record gets `<redacted>` for secrets (the spec's literal,
+    // machine-recognizable marker — distinct from the `••••••` display mask
+    // below, which is a human-facing rendering).
+    let journaling = if resolved.ephemeral {
+        Journaling::Off
+    } else {
+        let journal = journal::Journal::start(journal::StartInfo {
+            repo_dir: &resolved.dir,
+            manifest: &resolved.path,
+            command_id: &cmd.id,
+            command_title: &cmd.title,
+            params: journal_params(cmd, &values),
+            interactive: cmd.interactive,
+            run_id,
+        });
+        match journal {
+            Some(j) if cmd.interactive => Journaling::MetaOnly(j),
+            Some(j) => Journaling::Full(j),
+            None => Journaling::Off,
+        }
+    };
+
     match &cmd.run {
         ResolvedRun::Script(template) => {
             // The `running:` banner (and any error message) shows a line with
@@ -62,14 +91,34 @@ pub fn execute(
                 &interp::interpolate(template, &values)?,
                 &display,
                 &resolved.run_dir,
+                journaling,
             )
         }
         ResolvedRun::Steps(_) => runner::run_bash(
             &compile::compile(cmd, &values, true)?,
             &cmd.id,
             &resolved.run_dir,
+            journaling,
         ),
     }
+}
+
+/// `values` for the journal's audit record: secrets as the spec's literal
+/// `"<redacted>"` — the value itself never reaches the journal module.
+fn journal_params(
+    cmd: &ResolvedCommand,
+    values: &IndexMap<String, String>,
+) -> IndexMap<String, String> {
+    let mut out = values.clone();
+    for (name, def) in &cmd.params {
+        if let ParamKind::Input(input) = def.kind()
+            && input.secret
+            && let Some(v) = out.get_mut(name)
+        {
+            *v = "<redacted>".to_string();
+        }
+    }
+    out
 }
 
 /// `values` with every `secret: true` param replaced by a fixed mask (fixed so
@@ -101,14 +150,17 @@ fn fill(
     for (name, def) in &cmd.params {
         let value = match (provided.get(name), def.kind()) {
             (Some(v), ParamKind::Pick(pick)) => {
-                // Validate against static options; dynamic sources accept any
-                // value so direct invocation stays fast and scriptable.
+                // Validate against static options — values only, never
+                // labels/descriptions; dynamic sources accept any value so
+                // direct invocation stays fast and scriptable.
                 if let Some(opts) = &pick.options
-                    && !opts.contains(v)
+                    && !opts.iter().any(|o| o.value() == v)
                 {
+                    let values: Vec<&str> =
+                        opts.iter().map(crate::manifest::OptionDef::value).collect();
                     bail!(
                         "invalid value `{v}` for `{name}` (expected one of: {})",
-                        opts.join(", ")
+                        values.join(", ")
                     );
                 }
                 v.clone()
@@ -124,7 +176,10 @@ fn fill(
             (None, _) if run_dir.is_none() => format!("<{name}>"),
             (None, ParamKind::Pick(pick)) => {
                 let opts = options::resolve_pick(pick, &values, run_dir.unwrap())?;
-                prompt::select(&format!("{name}?"), opts)?
+                let w = label::width();
+                let labels: Vec<String> = opts.iter().map(|o| label::option_label(o, w)).collect();
+                let i = prompt::select_index(&format!("{name}?"), labels)?;
+                pick_selection(&opts, i)
             }
             (None, ParamKind::Input(input)) if input.secret => {
                 prompt::password(&format!("{name}?"))?
@@ -137,6 +192,15 @@ fn fill(
         values.insert(name.clone(), value);
     }
     Ok(values)
+}
+
+/// Map a picker's chosen index back to the value that reaches the command —
+/// never its display label (which may include a ` — description` suffix the
+/// command must never see). `labels` and `opts` are built from the same
+/// slice in the same order (see the `fill` call site), so `i` is always in
+/// range for both.
+fn pick_selection(opts: &[options::PickOption], i: usize) -> String {
+    opts[i].value.clone()
 }
 
 /// Render the final command text for `values`: a plain `run:` interpolates to a
@@ -152,6 +216,63 @@ fn compose(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Result<S
 mod tests {
     use super::*;
     use crate::{manifest, resolver};
+
+    /// §7.1 — the value handed to the command equals the selected option's
+    /// `value`, never its label. Pins the new `pick_selection` call site
+    /// (the mechanism itself — index into the option slice — is already
+    /// proven live by flow.rs:56's `members[ci]`). Redden by having
+    /// `pick_selection` return the label instead of `opts[i].value`.
+    #[test]
+    fn pick_selection_returns_the_value_not_the_label() {
+        let opts = vec![
+            options::PickOption {
+                value: "dev".to_string(),
+                description: None,
+            },
+            options::PickOption {
+                value: "uat".to_string(),
+                description: Some("User acceptance".to_string()),
+            },
+        ];
+        let w = label::width();
+        let labels: Vec<String> = opts.iter().map(|o| label::option_label(o, w)).collect();
+
+        let picked = pick_selection(&opts, 1);
+        assert_eq!(picked, "uat");
+        assert_ne!(
+            picked, labels[1],
+            "the value must differ from its own label when a description is set"
+        );
+    }
+
+    /// §7.7 — provided values validate against values, not labels. A
+    /// description-bearing static option accepts its bare value; the label
+    /// text (with or without the description) is rejected with a
+    /// values-only message.
+    #[test]
+    fn provided_pick_value_validates_against_values_not_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    params:\n      \
+             env: { pick: { options: [{ value: dev, description: Sandbox }] } }\n    \
+             run: \"echo {env}\"\n",
+        )
+        .unwrap();
+        let resolved =
+            resolver::resolve(manifest::load(&dir.path().join("pult.yaml")).unwrap()).unwrap();
+        let cmd = &resolved.commands[0];
+
+        let ok: HashMap<_, _> = [("env".to_string(), "dev".to_string())].into();
+        let values = fill(cmd, &ok, None).unwrap();
+        assert_eq!(values["env"], "dev");
+
+        for bad in ["Sandbox", "dev — Sandbox"] {
+            let provided: HashMap<_, _> = [("env".to_string(), bad.to_string())].into();
+            let err = fill(cmd, &provided, None).unwrap_err().to_string();
+            assert!(err.contains("expected one of: dev"), "got: {err}");
+        }
+    }
 
     #[test]
     fn print_is_a_trustfree_dry_run_that_never_runs_option_sources() {
@@ -178,6 +299,7 @@ mod tests {
             &HashMap::new(),
             false,
             true,
+            None,
         )
         .unwrap();
         assert_eq!(code, 0);

@@ -8,11 +8,14 @@ mod fetch;
 mod flow;
 mod init;
 mod interp;
+mod journal;
+mod label;
 mod manifest;
 mod options;
 mod prompt;
 mod resolver;
 mod runner;
+mod runs;
 mod selfupdate;
 mod trust;
 mod verify;
@@ -26,7 +29,7 @@ use clap::{Arg, ArgAction};
 use indexmap::IndexMap;
 
 use discovery::Scope;
-use manifest::{ParamDef, ParamKind};
+use manifest::{OptionDef, ParamDef, ParamKind};
 use resolver::{PinInfo, Resolved, ResolvedRun};
 
 fn main() {
@@ -143,10 +146,10 @@ fn run() -> Result<i32> {
 
     // `--params-json` only makes sense feeding a direct command invocation —
     // reject it up front for every other routing (bare flow, `--list`,
-    // `doctor`, `includes`) rather than silently ignoring it.
+    // `doctor`, `includes`, `runs`) rather than silently ignoring it.
     if params_json {
         let is_direct_command = !matches.get_flag("list")
-            && matches!(matches.subcommand(), Some((id, _)) if id != "doctor" && id != "includes");
+            && matches!(matches.subcommand(), Some((id, _)) if id != "doctor" && id != "includes" && id != "runs");
         if !is_direct_command {
             bail!(
                 "--params-json only applies to a direct command invocation \
@@ -181,8 +184,12 @@ fn run() -> Result<i32> {
         return Ok(0);
     }
 
+    let run_id = matches.get_one::<String>("run-id").map(String::as_str);
+    validate_run_id_arg(run_id)?;
+
     match matches.subcommand() {
         Some(("doctor", sub)) => doctor::run(&resolved, assume_trusted, sub.get_flag("json")),
+        Some(("runs", sub)) => runs::run_cli(&resolved, sub),
         Some(("includes", sub)) => match sub.subcommand() {
             Some(("verify", _)) => verify::run(&resolved),
             _ => {
@@ -212,10 +219,26 @@ fn run() -> Result<i32> {
                     .context("failed to read stdin for --params-json")?;
                 merge_stdin_params(&raw, &cmd.params, &mut provided)?;
             }
-            exec::execute(&resolved, cmd, &provided, assume_trusted, print)
+            exec::execute(&resolved, cmd, &provided, assume_trusted, print, run_id)
         }
-        None => flow::run(&resolved, assume_trusted, print),
+        None => flow::run(&resolved, assume_trusted, print, run_id),
     }
+}
+
+/// H1: an explicit `--run-id` is arg validation, not a journaling failure —
+/// it fails the invocation before anything runs, loudly, rather than
+/// degrading to a warning the way an in-flight journaling fault does. This
+/// is also defense in depth: `journal::start_at` re-checks the same id
+/// (invalid → journaling disabled for that run) in case some future caller
+/// reaches it without going through here.
+fn validate_run_id_arg(run_id: Option<&str>) -> Result<()> {
+    if let Some(id) = run_id {
+        anyhow::ensure!(
+            journal::valid_run_id(id),
+            "--run-id `{id}` is invalid: must be 1-64 ASCII alphanumeric/`-` characters"
+        );
+    }
+    Ok(())
 }
 
 /// Resolve a clap-accepted subcommand id against the manifest's own declared
@@ -305,6 +328,8 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
                pult includes verify         check every pin still resolves and no tag moved\n  \
                pult doctor [--json]         run every command's `check:` and report readiness\n  \
+               pult runs list [--json]      this repo's run history (the run journal)\n  \
+               pult runs tail <ID> [--follow]  one run's event stream (--json for tooling)\n  \
                pult self schema             print the manifest JSON Schema (editors/CI)\n  \
                pult --list [--json]         what this manifest declares (--json for tooling)\n\n\
              Run bare `pult` for the guided flow.  Authoring guide: {}",
@@ -345,6 +370,16 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 .help(
                     "Read param values as a JSON object from stdin (keeps them out of \
                      pult's argv and shell history)",
+                ),
+        )
+        .arg(
+            Arg::new("run-id")
+                .long("run-id")
+                .global(true)
+                .value_name("ID")
+                .help(
+                    "Journal this run under a caller-supplied id (for wrapping surfaces \
+                     like the desktop app; defaults to a generated UUIDv7)",
                 ),
         )
         // Engine subcommands are hidden from the Commands list (that list is
@@ -390,6 +425,44 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                         .action(ArgAction::SetTrue)
                         .help("Machine-readable JSON (stable schema, for tooling/agents)"),
                 ),
+        )
+        // The run journal's reader surface (the id `runs` is reserved) —
+        // see src/runs.rs and the run-journal spec.
+        .subcommand(
+            clap::Command::new("runs")
+                .hide(true)
+                .about("This repo's run history — the run journal")
+                .subcommand(
+                    clap::Command::new("list")
+                        .about("List journaled runs, newest first")
+                        .arg(
+                            Arg::new("json")
+                                .long("json")
+                                .action(ArgAction::SetTrue)
+                                .help("Machine-readable JSON (meta + derived `crashed` flag)"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("tail")
+                        .about("Print one run's journaled event stream")
+                        .arg(Arg::new("run_id").required(true).value_name("RUN_ID"))
+                        .arg(
+                            Arg::new("follow")
+                                .long("follow")
+                                .action(ArgAction::SetTrue)
+                                .help("Keep following a live run until it ends"),
+                        )
+                        .arg(
+                            Arg::new("json")
+                                .long("json")
+                                .action(ArgAction::SetTrue)
+                                .help("Raw events.jsonl lines (stable schema, for tooling)"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("prune")
+                        .about("Apply journal retention now (PULT_RUNS_KEEP, default 20 per command)"),
+                ),
         );
 
     for cmd in &resolved.commands {
@@ -404,7 +477,10 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 .value_name(name.to_uppercase());
             arg = match def.kind() {
                 ParamKind::Pick(pick) => match &pick.options {
-                    Some(opts) => arg.help(format!("one of: {}", opts.join(", "))),
+                    Some(opts) => {
+                        let values: Vec<&str> = opts.iter().map(OptionDef::value).collect();
+                        arg.help(format!("one of: {}", values.join(", ")))
+                    }
                     None => arg.help("picked from a dynamic option source if omitted"),
                 },
                 ParamKind::Input(input) if input.secret => {
@@ -424,6 +500,12 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
 /// agents and tooling. Schema 1; changes are additive only, breaking changes
 /// bump `schema`. `trusted` is passed in so this stays a pure function of the
 /// resolved manifest (the caller consults the trust store).
+///
+/// Additive Schema 1 field: a static pick's `params[].option_details` —
+/// `[{"value", "description"}, ...]`, parallel to `options` (same order,
+/// same length, present iff `options` is). Dynamic picks have neither key —
+/// the option set is unknowable at list time (the source is never run, the
+/// same no-side-effects guarantee as the preview path).
 fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Value {
     use serde_json::json;
     let includes: Vec<_> = resolved
@@ -461,7 +543,20 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                 .map(|(name, def)| match def.kind() {
                     ParamKind::Pick(pick) => match (&pick.options, &pick.from) {
                         (Some(options), _) => {
-                            json!({ "name": name, "kind": "pick", "options": options })
+                            let values: Vec<&str> = options.iter().map(OptionDef::value).collect();
+                            // `option_details` is present iff `options` is —
+                            // same order, same length; old consumers ignore
+                            // it, new ones get value + display description.
+                            let details: Vec<_> = options
+                                .iter()
+                                .map(|o| json!({ "value": o.value(), "description": o.description() }))
+                                .collect();
+                            json!({
+                                "name": name,
+                                "kind": "pick",
+                                "options": values,
+                                "option_details": details,
+                            })
                         }
                         (None, Some(from)) => json!({
                             "name": name,
@@ -577,6 +672,26 @@ fn print_list(resolved: &Resolved) {
 mod tests {
     use super::*;
 
+    /// H1: an explicit `--run-id` fails the invocation immediately when it
+    /// isn't a safe path component — before discovery, before anything
+    /// runs. Goes red if `validate_run_id_arg`'s check is reverted: each of
+    /// these would then return `Ok(())` and the traversal would only be
+    /// caught later (or not at all, per the other H1 tests).
+    #[test]
+    fn validate_run_id_arg_rejects_traversal_and_malformed_ids() {
+        for bad in ["../x", "/tmp/evil", "a/b", "", &"x".repeat(65)] {
+            let err = validate_run_id_arg(Some(bad)).unwrap_err();
+            assert!(err.to_string().contains("--run-id"), "id {bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_run_id_arg_accepts_well_formed_ids_and_absence() {
+        assert!(validate_run_id_arg(None).is_ok());
+        assert!(validate_run_id_arg(Some("550e8400-e29b-41d4-a716-446655440000")).is_ok());
+        assert!(validate_run_id_arg(Some("desktop-supplied-id")).is_ok());
+    }
+
     #[test]
     fn list_json_exposes_params_and_dependencies() {
         let dir = tempfile::tempdir().unwrap();
@@ -594,7 +709,7 @@ commands:
   - id: shell
     title: Open a shell
     params:
-      env: { pick: { options: [dev, uat] } }
+      env: { pick: { options: [dev, { value: uat, description: "User acceptance" }] } }
       customer: { pick: { from: "./bin/impl list --env {env}" } }
       note: { input: { default: "" } }
     run: "./bin/impl shell {customer} {env}"
@@ -636,6 +751,28 @@ commands:
         let params = cmd["params"].as_array().unwrap();
         assert_eq!(params[0]["kind"], "pick");
         assert_eq!(params[0]["options"][0], "dev");
+        assert_eq!(params[0]["options"][1], "uat");
+        // §7.8 — "options" stays plain strings; "option_details" is a
+        // parallel array, same order/length, carrying the descriptions.
+        assert!(params[0]["options"][0].is_string());
+        assert_eq!(params[0]["option_details"][0]["value"], "dev");
+        assert_eq!(
+            params[0]["option_details"][0]["description"],
+            serde_json::Value::Null
+        );
+        assert_eq!(params[0]["option_details"][1]["value"], "uat");
+        assert_eq!(
+            params[0]["option_details"][1]["description"],
+            "User acceptance"
+        );
+        assert_eq!(
+            params[0]["option_details"][1]["value"], params[0]["options"][1],
+            "option_details[i].value must equal options[i]"
+        );
+        // Dynamic picks get neither key — the option set is unknowable at
+        // list time (the source is never run).
+        assert!(params[1].get("options").is_none());
+        assert!(params[1].get("option_details").is_none());
         assert_eq!(params[1]["depends_on"][0], "env");
         assert_eq!(params[2]["kind"], "input");
         assert_eq!(params[2]["default"], "");

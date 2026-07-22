@@ -50,11 +50,6 @@ fn map_inquire<T>(result: Result<T, InquireError>) -> Result<T> {
     })
 }
 
-pub fn select(message: &str, options: Vec<String>) -> Result<String> {
-    require_tty(&format!("`{message}` needs an interactive choice"))?;
-    map_inquire(Select::new(message, options).prompt())
-}
-
 /// Select by index, for menus whose display labels differ from their values.
 pub fn select_index(message: &str, labels: Vec<String>) -> Result<usize> {
     require_tty(&format!("`{message}` needs an interactive choice"))?;

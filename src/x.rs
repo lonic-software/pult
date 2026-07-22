@@ -154,9 +154,9 @@ pub fn run(
                 let (name, _) = cmd.params.get_index(i).expect("bounds checked above");
                 provided.insert(name.clone(), value.clone());
             }
-            exec::execute(&resolved, cmd, &provided, assume_trusted, print)
+            exec::execute(&resolved, cmd, &provided, assume_trusted, print, None)
         }
-        None if interactive => flow::run(&resolved, assume_trusted, print),
+        None if interactive => flow::run(&resolved, assume_trusted, print, None),
         None => {
             eprintln!("specify a command:  pult x {source} <command> [values…]");
             eprintln!("commands:");
