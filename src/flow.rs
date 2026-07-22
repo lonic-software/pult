@@ -3,23 +3,9 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::exec;
+use crate::label;
 use crate::prompt;
 use crate::resolver::{Resolved, ResolvedCommand, group_commands};
-
-/// Fallback terminal width when it can't be detected (not a tty, env issue).
-const FALLBACK_WIDTH: usize = 100;
-
-/// Columns to reserve for inquire's prompt chrome (the rendered cursor arrow
-/// and padding it adds to each option line) when sizing menu labels.
-const INQUIRE_CHROME_MARGIN: usize = 4;
-
-/// Terminal width to size menu labels against, minus inquire's chrome margin.
-fn label_width() -> usize {
-    let width = crossterm::terminal::size()
-        .map(|(cols, _)| cols as usize)
-        .unwrap_or(FALLBACK_WIDTH);
-    width.saturating_sub(INQUIRE_CHROME_MARGIN)
-}
 
 /// Bare `pult`: the guided flow (spec §9 Phase 1). A command menu, then one
 /// prompt per param — sequential, so each picker can shell out with every
@@ -36,7 +22,7 @@ fn label_width() -> usize {
 pub fn run(resolved: &Resolved, assume_trusted: bool, print: bool, run_id: Option<&str>) -> Result<i32> {
     println!("◆  {} · pult", resolved.name);
     let groups = group_commands(&resolved.commands);
-    let width = label_width();
+    let width = label::width();
 
     let cmd = if groups.len() <= 1 {
         let index = prompt::select_index(
@@ -86,15 +72,10 @@ fn label_for(c: &ResolvedCommand, width: usize) -> String {
 
 /// Compose a menu label: `Title — description  (id)  ← src`. The `←src`
 /// origin suffix and the `— description` segment are both optional (origin
-/// when there's no source repo, description when the command has none).
-///
-/// The label must fit on one line within `width` columns. The description
-/// absorbs all truncation — ellipsized with a single trailing `…` — while
-/// `title`, `(id)`, and `← src` always survive whole. If there isn't even
-/// room for a single truncated description character, the description is
-/// dropped entirely rather than emitting a lone `…`. If `width` is too small
-/// even for the description-less label, that label is returned untouched and
-/// left for the terminal to wrap.
+/// when there's no source repo, description when the command has none). A
+/// thin wrapper over the shared [`label::compose`] — see that function for
+/// the truncation contract (description absorbs all truncation, char-boundary
+/// safe, dropped entirely rather than a lone `…`).
 fn menu_label(
     title: &str,
     desc: Option<&str>,
@@ -106,36 +87,7 @@ fn menu_label(
         Some(src) => format!("  ({id})  ← {src}"),
         None => format!("  ({id})"),
     };
-    let base = format!("{title}{tail}");
-
-    let desc = desc.filter(|d| !d.is_empty());
-    let Some(desc) = desc else {
-        return base;
-    };
-
-    if base.chars().count() > width {
-        return base;
-    }
-
-    const SEP: &str = " — ";
-    let full = format!("{title}{SEP}{desc}{tail}");
-    if full.chars().count() <= width {
-        return full;
-    }
-
-    let non_desc_len = title.chars().count() + SEP.chars().count() + tail.chars().count();
-    if non_desc_len >= width {
-        return base;
-    }
-    let avail = width - non_desc_len;
-    // Need room for at least one desc char plus the ellipsis; otherwise omit
-    // the description entirely rather than emit a lone `…`.
-    if avail < 2 {
-        return base;
-    }
-    let desc_chars = avail - 1;
-    let truncated: String = desc.chars().take(desc_chars).collect();
-    format!("{title}{SEP}{truncated}…{tail}")
+    label::compose(title, desc, &tail, width)
 }
 
 #[cfg(test)]

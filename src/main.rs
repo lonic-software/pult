@@ -9,6 +9,7 @@ mod flow;
 mod init;
 mod interp;
 mod journal;
+mod label;
 mod manifest;
 mod options;
 mod prompt;

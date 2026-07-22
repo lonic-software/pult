@@ -7,6 +7,15 @@ use indexmap::IndexMap;
 use crate::interp;
 use crate::manifest::PickDef;
 
+/// A resolved pick option: the value handed to the command, and an optional
+/// display-only description shown next to it in the interactive picker. The
+/// value is never affected by the description — see `label::option_label`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickOption {
+    pub value: String,
+    pub description: Option<String>,
+}
+
 /// Resolve a picker's options: either the static list, or the stdout lines of
 /// its `from:` shell command (interpolated with the params answered so far).
 pub fn resolve_pick(
