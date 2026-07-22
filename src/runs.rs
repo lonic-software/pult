@@ -129,8 +129,22 @@ fn list(resolved: &Resolved, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// One run's directory inside `runs_root`, given a caller-supplied run id.
+/// `Path::join` is unsafe for an unvalidated id — an absolute operand
+/// discards `runs_root` outright, and `../` escapes it — so this is the one
+/// seam every reader must route a `run_id` through rather than joining
+/// directly. Rejects with the same message `tail` uses for a merely-unknown
+/// id: a distinguishable error here would tell a traversal attempt it found
+/// a real path instead of a missing run.
+fn run_dir_for(runs_root: &std::path::Path, run_id: &str) -> Result<PathBuf> {
+    if !journal::valid_run_id(run_id) {
+        bail!("no journaled run `{run_id}` for this repo (see `pult runs list`)");
+    }
+    Ok(runs_root.join(run_id))
+}
+
 fn tail(resolved: &Resolved, run_id: &str, follow: bool, json: bool) -> Result<i32> {
-    let run_dir = runs_root(resolved)?.join(run_id);
+    let run_dir = run_dir_for(&runs_root(resolved)?, run_id)?;
     let events_path = run_dir.join("events.jsonl");
     if !events_path.exists() {
         bail!("no journaled run `{run_id}` for this repo (see `pult runs list`)");
@@ -231,6 +245,35 @@ fn prune(resolved: &Resolved) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// H1: a path-escaping run id must be rejected before it is ever joined
+    /// onto `runs_root` — `../x` and an absolute path would otherwise let
+    /// `pult runs tail` read a file outside the run journal entirely. If
+    /// the `valid_run_id` check inside `run_dir_for` is reverted, this test
+    /// goes red: the traversal/absolute/slash/empty/overlong ids below would
+    /// each start returning `Ok` (a joined, escaping path) instead of `Err`.
+    #[test]
+    fn run_dir_for_rejects_path_escaping_ids() {
+        let root = tempfile::tempdir().unwrap();
+        for bad in ["../x", "/tmp/evil", "a/b", "", &"x".repeat(65)] {
+            let err = run_dir_for(root.path(), bad).unwrap_err();
+            assert!(
+                err.to_string().contains("no journaled run"),
+                "id {bad:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_dir_for_accepts_well_formed_ids() {
+        let root = tempfile::tempdir().unwrap();
+        for ok in [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "desktop-supplied-id",
+        ] {
+            assert_eq!(run_dir_for(root.path(), ok).unwrap(), root.path().join(ok));
+        }
+    }
 
     #[test]
     fn render_event_covers_every_kind_and_skips_unknown() {

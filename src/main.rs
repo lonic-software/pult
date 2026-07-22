@@ -185,6 +185,7 @@ fn run() -> Result<i32> {
     }
 
     let run_id = matches.get_one::<String>("run-id").map(String::as_str);
+    validate_run_id_arg(run_id)?;
 
     match matches.subcommand() {
         Some(("doctor", sub)) => doctor::run(&resolved, assume_trusted, sub.get_flag("json")),
@@ -222,6 +223,22 @@ fn run() -> Result<i32> {
         }
         None => flow::run(&resolved, assume_trusted, print, run_id),
     }
+}
+
+/// H1: an explicit `--run-id` is arg validation, not a journaling failure —
+/// it fails the invocation before anything runs, loudly, rather than
+/// degrading to a warning the way an in-flight journaling fault does. This
+/// is also defense in depth: `journal::start_at` re-checks the same id
+/// (invalid → journaling disabled for that run) in case some future caller
+/// reaches it without going through here.
+fn validate_run_id_arg(run_id: Option<&str>) -> Result<()> {
+    if let Some(id) = run_id {
+        anyhow::ensure!(
+            journal::valid_run_id(id),
+            "--run-id `{id}` is invalid: must be 1-64 ASCII alphanumeric/`-` characters"
+        );
+    }
+    Ok(())
 }
 
 /// Resolve a clap-accepted subcommand id against the manifest's own declared
@@ -654,6 +671,26 @@ fn print_list(resolved: &Resolved) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// H1: an explicit `--run-id` fails the invocation immediately when it
+    /// isn't a safe path component — before discovery, before anything
+    /// runs. Goes red if `validate_run_id_arg`'s check is reverted: each of
+    /// these would then return `Ok(())` and the traversal would only be
+    /// caught later (or not at all, per the other H1 tests).
+    #[test]
+    fn validate_run_id_arg_rejects_traversal_and_malformed_ids() {
+        for bad in ["../x", "/tmp/evil", "a/b", "", &"x".repeat(65)] {
+            let err = validate_run_id_arg(Some(bad)).unwrap_err();
+            assert!(err.to_string().contains("--run-id"), "id {bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_run_id_arg_accepts_well_formed_ids_and_absence() {
+        assert!(validate_run_id_arg(None).is_ok());
+        assert!(validate_run_id_arg(Some("550e8400-e29b-41d4-a716-446655440000")).is_ok());
+        assert!(validate_run_id_arg(Some("desktop-supplied-id")).is_ok());
+    }
 
     #[test]
     fn list_json_exposes_params_and_dependencies() {

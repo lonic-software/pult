@@ -90,6 +90,18 @@ pub enum Status {
     Stopped,
 }
 
+/// Whether `s` is safe to use as a run directory name: nonempty, ASCII
+/// alphanumeric or `-` only, at most 64 bytes. Rejects anything that could
+/// escape `runs_root` when passed to `Path::join` — `/`, `\`, `.` (so no
+/// `..` traversal and no absolute path, since `Path::join` with an absolute
+/// operand discards the base entirely). UUIDs and desktop-supplied dashed
+/// ids both pass; this is the one caller-supplied string that reaches a
+/// path join, so both the writer (`start_at`) and every reader must call
+/// this before using a `--run-id`/`RUN_ID` value.
+pub fn valid_run_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 /// Everything `start` needs to open a journal. `params` must already be
 /// redacted (see `Meta::params`).
 pub struct StartInfo<'a> {
@@ -161,7 +173,15 @@ impl Journal {
         prune(&runs_root, keep_limit(), Some(info.command_id));
 
         let run_id = match info.run_id {
-            Some(id) => id.to_string(),
+            Some(id) => {
+                // Defense in depth: `main.rs` already rejects a bad
+                // `--run-id` before anything runs, but this is the seam
+                // every path to `runs_root.join(&run_id)` funnels through,
+                // so an unvalidated id must never reach it even if some
+                // future caller bypasses main's check.
+                anyhow::ensure!(valid_run_id(id), "invalid run id `{id}`");
+                id.to_string()
+            }
             None => uuid::Uuid::now_v7().to_string(),
         };
         let run_dir = runs_root.join(&run_id);
@@ -570,6 +590,42 @@ mod tests {
         let meta = read_meta(&run_dir.path()).unwrap();
         assert_eq!(meta.status, Status::Stopped);
         assert_eq!(meta.exit_code, None);
+    }
+
+    #[test]
+    fn valid_run_id_accepts_uuids_and_dashed_ids() {
+        assert!(valid_run_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(valid_run_id("desktop-supplied-id"));
+        assert!(valid_run_id("a"));
+        assert!(valid_run_id(&"x".repeat(64)));
+    }
+
+    #[test]
+    fn valid_run_id_rejects_traversal_and_malformed_ids() {
+        assert!(!valid_run_id("../x"));
+        assert!(!valid_run_id("/tmp/evil"));
+        assert!(!valid_run_id("a/b"));
+        assert!(!valid_run_id("a\\b"));
+        assert!(!valid_run_id("."));
+        assert!(!valid_run_id(""));
+        assert!(!valid_run_id(&"x".repeat(65)));
+    }
+
+    /// H1, writer side: `start_at` must refuse an invalid `--run-id` before
+    /// it ever reaches `runs_root.join(&run_id)` — the seam every path
+    /// under a run dir is built from. If the `valid_run_id` check inside
+    /// `start_at` is reverted, this test goes red: `../evil` would succeed
+    /// and (per the traversal it enables) write outside `runs_root`
+    /// entirely instead of returning `Err`.
+    #[test]
+    fn start_at_rejects_a_path_escaping_run_id() {
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let manifest = repo.path().join("pult.yaml");
+        let mut i = info(repo.path(), &manifest);
+        i.run_id = Some("../escaped");
+        let err = Journal::start_at(state.path(), i).err().unwrap();
+        assert!(err.to_string().contains("invalid run id"));
     }
 
     #[test]
