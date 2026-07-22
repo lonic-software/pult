@@ -28,7 +28,7 @@ use clap::{Arg, ArgAction};
 use indexmap::IndexMap;
 
 use discovery::Scope;
-use manifest::{ParamDef, ParamKind};
+use manifest::{OptionDef, ParamDef, ParamKind};
 use resolver::{PinInfo, Resolved, ResolvedRun};
 
 fn main() {
@@ -459,7 +459,10 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 .value_name(name.to_uppercase());
             arg = match def.kind() {
                 ParamKind::Pick(pick) => match &pick.options {
-                    Some(opts) => arg.help(format!("one of: {}", opts.join(", "))),
+                    Some(opts) => {
+                        let values: Vec<&str> = opts.iter().map(OptionDef::value).collect();
+                        arg.help(format!("one of: {}", values.join(", ")))
+                    }
                     None => arg.help("picked from a dynamic option source if omitted"),
                 },
                 ParamKind::Input(input) if input.secret => {
@@ -516,7 +519,8 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                 .map(|(name, def)| match def.kind() {
                     ParamKind::Pick(pick) => match (&pick.options, &pick.from) {
                         (Some(options), _) => {
-                            json!({ "name": name, "kind": "pick", "options": options })
+                            let values: Vec<&str> = options.iter().map(OptionDef::value).collect();
+                            json!({ "name": name, "kind": "pick", "options": values })
                         }
                         (None, Some(from)) => json!({
                             "name": name,

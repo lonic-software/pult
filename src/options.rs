@@ -15,7 +15,7 @@ pub fn resolve_pick(
     dir: &Path,
 ) -> Result<Vec<String>> {
     if let Some(options) = &pick.options {
-        return Ok(options.clone());
+        return Ok(options.iter().map(|o| o.value().to_string()).collect());
     }
     let from = pick
         .from
@@ -50,11 +50,15 @@ pub fn resolve_pick(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::OptionDef;
 
     #[test]
     fn static_options_pass_through() {
         let pick = PickDef {
-            options: Some(vec!["dev".into(), "uat".into()]),
+            options: Some(vec![
+                OptionDef::Plain("dev".into()),
+                OptionDef::Plain("uat".into()),
+            ]),
             from: None,
         };
         let opts = resolve_pick(&pick, &IndexMap::new(), Path::new(".")).unwrap();

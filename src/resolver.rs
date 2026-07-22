@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use crate::fetch::{self, Source};
 use crate::interp;
 use crate::manifest::{
-    self, IncludeDef, Loaded, Manifest, ParamDef, ParamKind, PipeEntry, RunEntry, RunSpec, StepDef,
+    self, IncludeDef, Loaded, Manifest, OptionDef, ParamDef, ParamKind, PipeEntry, RunEntry,
+    RunSpec, StepDef,
 };
 
 /// Command ids the engine claims for its own subcommands — current and
@@ -601,7 +602,10 @@ fn visit_param(def: &mut ParamDef, f: &dyn Fn(&mut String)) {
         }
         if let Some(options) = &mut pick.options {
             for o in options {
-                f(o);
+                match o {
+                    OptionDef::Plain(s) => f(s),
+                    OptionDef::Full(full) => f(&mut full.value),
+                }
             }
         }
     }
@@ -954,10 +958,17 @@ commands:
         // use: param inlined to the module's concrete picker
         let deploy = &r.commands[1];
         let env = &deploy.params["env"];
-        assert_eq!(
-            env.pick.as_ref().unwrap().options.as_ref().unwrap(),
-            &["dev".to_string(), "uat".to_string()]
-        );
+        let values: Vec<&str> = env
+            .pick
+            .as_ref()
+            .unwrap()
+            .options
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(OptionDef::value)
+            .collect();
+        assert_eq!(values, ["dev", "uat"]);
 
         // vars substituted into the step script; exports carried through
         let ResolvedRun::Steps(entries) = &deploy.run else {

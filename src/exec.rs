@@ -149,14 +149,17 @@ fn fill(
     for (name, def) in &cmd.params {
         let value = match (provided.get(name), def.kind()) {
             (Some(v), ParamKind::Pick(pick)) => {
-                // Validate against static options; dynamic sources accept any
-                // value so direct invocation stays fast and scriptable.
+                // Validate against static options — values only, never
+                // labels/descriptions; dynamic sources accept any value so
+                // direct invocation stays fast and scriptable.
                 if let Some(opts) = &pick.options
-                    && !opts.contains(v)
+                    && !opts.iter().any(|o| o.value() == v)
                 {
+                    let values: Vec<&str> =
+                        opts.iter().map(crate::manifest::OptionDef::value).collect();
                     bail!(
                         "invalid value `{v}` for `{name}` (expected one of: {})",
-                        opts.join(", ")
+                        values.join(", ")
                     );
                 }
                 v.clone()

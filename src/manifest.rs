@@ -1,9 +1,11 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 
 /// The manifest schema version this binary understands.
 pub const SUPPORTED_VERSION: u32 = 1;
@@ -157,12 +159,98 @@ impl ParamDef {
 pub struct PickDef {
     /// Static option list.
     #[serde(default)]
-    pub options: Option<Vec<String>>,
+    pub options: Option<Vec<OptionDef>>,
     /// Shell command whose stdout lines become the options. May interpolate
     /// `{param}` for params declared *earlier* in the same command.
     #[serde(default)]
     pub from: Option<String>,
 }
+
+/// A pick option: a plain value, or a value with a display description.
+///
+/// Deliberately *not* `#[serde(untagged)]` — see the manual `Deserialize`
+/// below for why. The `JsonSchema` derive can't read a `#[serde(untagged)]`
+/// attribute off a manually-`Deserialize`d type, so it gets schemars' own
+/// untagged marker (test-only) to keep the emitted schema
+/// "string-or-mapping", matching the `StepDef` idiom.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[cfg_attr(test, schemars(untagged))]
+pub enum OptionDef {
+    Plain(String),
+    Full(FullOption),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct FullOption {
+    pub value: String,
+    /// Shown as `value — description` in the picker; display-only.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+// Manual impl: a scalar (string/int/bool) → Plain(text); a mapping → Full.
+// deserialize_any is required to branch on the node kind, which is *why* the
+// derived untagged form is wrong (§2a of the design doc: it silently drops
+// non-string scalar options that load today).
+impl<'de> Deserialize<'de> for OptionDef {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = OptionDef;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a value string or a {value, description} mapping")
+            }
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<OptionDef, E> {
+                Ok(OptionDef::Plain(s.to_owned()))
+            }
+            fn visit_bool<E: de::Error>(self, b: bool) -> Result<OptionDef, E> {
+                Ok(OptionDef::Plain(b.to_string()))
+            }
+            fn visit_i64<E: de::Error>(self, n: i64) -> Result<OptionDef, E> {
+                Ok(OptionDef::Plain(n.to_string()))
+            }
+            fn visit_u64<E: de::Error>(self, n: u64) -> Result<OptionDef, E> {
+                Ok(OptionDef::Plain(n.to_string()))
+            }
+            fn visit_f64<E: de::Error>(self, _n: f64) -> Result<OptionDef, E> {
+                // A float scalar reaches us as an f64 with the source text
+                // already lost (`1.10` → 1.1); silently accepting would
+                // corrupt a value that works verbatim today. Fail loud; the
+                // author quotes it.
+                Err(E::custom(
+                    "option values that look like floats must be quoted, e.g. \"1.10\"",
+                ))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, m: A) -> Result<OptionDef, A::Error> {
+                FullOption::deserialize(de::value::MapAccessDeserializer::new(m))
+                    .map(OptionDef::Full)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+impl OptionDef {
+    pub fn value(&self) -> &str {
+        match self {
+            OptionDef::Plain(s) => s,
+            OptionDef::Full(f) => &f.value,
+        }
+    }
+
+    /// `None` for `Plain`, and for a `Full` whose description is absent or
+    /// blank.
+    pub fn description(&self) -> Option<&str> {
+        match self {
+            OptionDef::Plain(_) => None,
+            OptionDef::Full(f) => f.description.as_deref().filter(|d| !d.is_empty()),
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -408,6 +496,20 @@ fn validate_param(name: &str, def: &ParamDef) -> Result<()> {
             (None, None) => bail!("param `{name}`: `pick` needs either `options` or `from`"),
             _ => {}
         }
+        if let Some(options) = &pick.options {
+            for opt in options {
+                if let OptionDef::Full(full) = opt {
+                    if full.value.trim().is_empty() {
+                        bail!("param `{name}`: an option has an empty `value`");
+                    }
+                    if let Some(description) = &full.description
+                        && description.trim().is_empty()
+                    {
+                        bail!("param `{name}`: an option has an empty `description`");
+                    }
+                }
+            }
+        }
     }
     if let Some(input) = &def.input
         && input.secret
@@ -646,5 +748,110 @@ commands:
         );
         let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("not built yet"), "got: {err}");
+    }
+
+    // ── pick option descriptions (§7.2, §7.2a, §7.2b, §7.10) ──
+
+    #[test]
+    fn full_option_parses_with_description() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: a\n    title: A\n    params:\n      \
+             env: { pick: { options: [dev, { value: uat, description: \"User acceptance\" }, prod] } }\n    \
+             run: \"echo {env}\"\n",
+        );
+        let loaded = load(&path).unwrap();
+        let opts = loaded.manifest.commands[0].params["env"]
+            .pick
+            .as_ref()
+            .unwrap()
+            .options
+            .as_ref()
+            .unwrap();
+        assert_eq!(opts[0].value(), "dev");
+        assert_eq!(opts[0].description(), None);
+        assert_eq!(opts[1].value(), "uat");
+        assert_eq!(opts[1].description(), Some("User acceptance"));
+        assert_eq!(opts[2].value(), "prod");
+    }
+
+    #[test]
+    fn full_option_rejects_unknown_field() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: a\n    title: A\n    params:\n      \
+             env: { pick: { options: [{ value: uat, desc: x }] } }\n    run: \"echo {env}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("unknown field"), "got: {err}");
+        assert!(err.contains("desc"), "got: {err}");
+    }
+
+    /// §7.2a — the §2a regression guard: non-string scalar options still
+    /// load. Redden by switching `OptionDef` to `#[serde(untagged)]`.
+    #[test]
+    fn non_string_scalar_options_still_load() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: a\n    title: A\n    params:\n      \
+             env: { pick: { options: [1, true, 8080] } }\n    run: \"echo {env}\"\n",
+        );
+        let loaded = load(&path).unwrap();
+        let opts = loaded.manifest.commands[0].params["env"]
+            .pick
+            .as_ref()
+            .unwrap()
+            .options
+            .as_ref()
+            .unwrap();
+        let values: Vec<&str> = opts.iter().map(OptionDef::value).collect();
+        assert_eq!(values, ["1", "true", "8080"]);
+    }
+
+    /// §7.2b — unquoted float options are rejected at load; quoted ones
+    /// accepted. Redden by making `visit_f64` return `Plain(n.to_string())`.
+    #[test]
+    fn unquoted_float_option_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: a\n    title: A\n    params:\n      \
+             env: { pick: { options: [1.5] } }\n    run: \"echo {env}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("quoted"), "got: {err}");
+    }
+
+    #[test]
+    fn quoted_float_option_is_accepted() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: a\n    title: A\n    params:\n      \
+             env: { pick: { options: [\"1.5\"] } }\n    run: \"echo {env}\"\n",
+        );
+        let loaded = load(&path).unwrap();
+        let opts = loaded.manifest.commands[0].params["env"]
+            .pick
+            .as_ref()
+            .unwrap()
+            .options
+            .as_ref()
+            .unwrap();
+        assert_eq!(opts[0].value(), "1.5");
+    }
+
+    /// §7.10 — blank descriptions and empty `Full` values are rejected.
+    #[test]
+    fn blank_option_description_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: a\n    title: A\n    params:\n      \
+             env: { pick: { options: [{ value: uat, description: \"  \" }] } }\n    run: \"echo {env}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty `description`"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_option_value_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: a\n    title: A\n    params:\n      \
+             env: { pick: { options: [{ value: \"  \", description: x }] } }\n    run: \"echo {env}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("empty `value`"), "got: {err}");
     }
 }

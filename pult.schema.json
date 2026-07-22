@@ -124,6 +124,26 @@
       },
       "additionalProperties": false
     },
+    "FullOption": {
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "description": {
+          "description": "Shown as `value — description` in the picker; display-only.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "FullStep": {
       "type": "object",
       "required": [
@@ -195,6 +215,17 @@
       },
       "additionalProperties": false
     },
+    "OptionDef": {
+      "description": "A pick option: a plain value, or a value with a display description.\n\nDeliberately *not* `#[serde(untagged)]` — see the manual `Deserialize` below for why. The `JsonSchema` derive can't read a `#[serde(untagged)]` attribute off a manually-`Deserialize`d type, so it gets schemars' own untagged marker (test-only) to keep the emitted schema \"string-or-mapping\", matching the `StepDef` idiom.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/FullOption"
+        }
+      ]
+    },
     "ParamDef": {
       "description": "A param is a picker, free input, or a reference to a named param; exactly one of the three must be set (validated at load, so `kind()` is infallible).",
       "type": "object",
@@ -242,13 +273,12 @@
         },
         "options": {
           "description": "Static option list.",
-          "default": null,
           "type": [
             "array",
             "null"
           ],
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/OptionDef"
           }
         }
       },
