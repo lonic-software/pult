@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
 use crate::journal;
+use crate::label;
 use crate::manifest::ParamKind;
 use crate::resolver::{Resolved, ResolvedCommand, ResolvedRun};
 use crate::runner::Journaling;
@@ -175,8 +176,11 @@ fn fill(
             (None, _) if run_dir.is_none() => format!("<{name}>"),
             (None, ParamKind::Pick(pick)) => {
                 let opts = options::resolve_pick(pick, &values, run_dir.unwrap())?;
-                let labels: Vec<String> = opts.iter().map(|o| o.value.clone()).collect();
-                prompt::select(&format!("{name}?"), labels)?
+                let w = label::width();
+                let labels: Vec<String> =
+                    opts.iter().map(|o| label::option_label(o, w)).collect();
+                let i = prompt::select_index(&format!("{name}?"), labels)?;
+                pick_selection(&opts, i)
             }
             (None, ParamKind::Input(input)) if input.secret => {
                 prompt::password(&format!("{name}?"))?
@@ -189,6 +193,15 @@ fn fill(
         values.insert(name.clone(), value);
     }
     Ok(values)
+}
+
+/// Map a picker's chosen index back to the value that reaches the command —
+/// never its display label (which may include a ` — description` suffix the
+/// command must never see). `labels` and `opts` are built from the same
+/// slice in the same order (see the `fill` call site), so `i` is always in
+/// range for both.
+fn pick_selection(opts: &[options::PickOption], i: usize) -> String {
+    opts[i].value.clone()
 }
 
 /// Render the final command text for `values`: a plain `run:` interpolates to a
@@ -204,6 +217,63 @@ fn compose(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Result<S
 mod tests {
     use super::*;
     use crate::{manifest, resolver};
+
+    /// §7.1 — the value handed to the command equals the selected option's
+    /// `value`, never its label. Pins the new `pick_selection` call site
+    /// (the mechanism itself — index into the option slice — is already
+    /// proven live by flow.rs:56's `members[ci]`). Redden by having
+    /// `pick_selection` return the label instead of `opts[i].value`.
+    #[test]
+    fn pick_selection_returns_the_value_not_the_label() {
+        let opts = vec![
+            options::PickOption {
+                value: "dev".to_string(),
+                description: None,
+            },
+            options::PickOption {
+                value: "uat".to_string(),
+                description: Some("User acceptance".to_string()),
+            },
+        ];
+        let w = label::width();
+        let labels: Vec<String> = opts.iter().map(|o| label::option_label(o, w)).collect();
+
+        let picked = pick_selection(&opts, 1);
+        assert_eq!(picked, "uat");
+        assert_ne!(
+            picked, labels[1],
+            "the value must differ from its own label when a description is set"
+        );
+    }
+
+    /// §7.7 — provided values validate against values, not labels. A
+    /// description-bearing static option accepts its bare value; the label
+    /// text (with or without the description) is rejected with a
+    /// values-only message.
+    #[test]
+    fn provided_pick_value_validates_against_values_not_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    params:\n      \
+             env: { pick: { options: [{ value: dev, description: Sandbox }] } }\n    \
+             run: \"echo {env}\"\n",
+        )
+        .unwrap();
+        let resolved =
+            resolver::resolve(manifest::load(&dir.path().join("pult.yaml")).unwrap()).unwrap();
+        let cmd = &resolved.commands[0];
+
+        let ok: HashMap<_, _> = [("env".to_string(), "dev".to_string())].into();
+        let values = fill(cmd, &ok, None).unwrap();
+        assert_eq!(values["env"], "dev");
+
+        for bad in ["Sandbox", "dev — Sandbox"] {
+            let provided: HashMap<_, _> = [("env".to_string(), bad.to_string())].into();
+            let err = fill(cmd, &provided, None).unwrap_err().to_string();
+            assert!(err.contains("expected one of: dev"), "got: {err}");
+        }
+    }
 
     #[test]
     fn print_is_a_trustfree_dry_run_that_never_runs_option_sources() {
