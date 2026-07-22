@@ -90,7 +90,8 @@ commands:
     description: Say hello, greeting {{name}} by name.
     params:
       # input: free text · pick: a fixed list, or a shell command whose
-      # stdout lines become the options ({{earlier-param}} may be referenced)
+      # stdout lines become the options ({{earlier-param}} may be referenced);
+      # options may be {{ value, description }} for a display-only label
       name: {{ input: {{ default: world }} }}
       # env: {{ pick: {{ options: [dev, uat, prod] }} }}
     run: "echo hello {{name}}"

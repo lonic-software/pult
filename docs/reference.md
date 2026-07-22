@@ -93,11 +93,19 @@ customer: { pick: { from: "cmd --env {env}" } }    # dynamic source
 note:     { input: { default: "hi" } }             # free text
 token:    { input: { secret: true } }              # prompted without echo
 region:   { use: aws:region }                      # copy of a named param
+zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-east-1] } }  # per-value descriptions
 ```
 
-- `pick.options` — static; values provided on the CLI are validated against it.
+- `pick.options` — a static list. Each entry is a bare value or a
+  `{ value, description }` mapping; the optional `description` renders as
+  `value — description` in the interactive picker but is display-only — the
+  bare `value` is what reaches the command, and CLI-provided values are
+  validated against the values, never the descriptions.
 - `pick.from` — a shell command (strict template); its stdout lines (trimmed,
-  non-empty) become the options. May reference only params declared earlier in
+  non-empty) become the options. Each line is either a value or
+  `value<TAB>description` — split on the first tab, both sides trimmed, an
+  empty description omitted (e.g. `printf '%s\t%s\n' "$id" "$label"`); a
+  tab-free line is a plain value. May reference only params declared earlier in
   the same command. An empty result or non-zero exit is an error (stderr shown).
   CLI-provided values are **not** validated against dynamic sources.
 - `use` — must reference an existing named param, which must itself be

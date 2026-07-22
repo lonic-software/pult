@@ -50,6 +50,15 @@ surface treats as the explanation and none truncates as harshly.
 *before* it (the answer already exists when the source runs — that's how
 dependent pickers work, and it's validated at load).
 
+**Any pick option can carry a description.** It's display-only — shown as
+`value — description` in the interactive picker — while the bare value is
+still what reaches the command and what CLI-provided values are validated
+against. Static entries use `{ value, description }` (e.g.
+`{ value: uat, description: "User acceptance" }` alongside plain scalars like
+`dev`); a `from:` source emits `value<TAB>description` per line — split on the
+first tab — e.g. `printf '%s\t%s\n' "$id" "$label"`, with a plain `value` line
+still working unchanged.
+
 **Interpolation in `run:` strings and `from:` sources is strict**: `{env}`
 must be a declared param, unknown placeholders are load errors, `{{`/`}}` are
 literal braces. Interpolated values are shell-quoted — a user typing
