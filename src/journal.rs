@@ -133,18 +133,34 @@ struct Inner {
 
 impl Journal {
     /// Open a journal for a run about to start. `None` means journaling is
-    /// off (disabled via `PULT_JOURNAL=0`, no resolvable state dir, or an
-    /// I/O failure — already warned) and the run proceeds unjournaled.
+    /// off (disabled via `PULT_JOURNAL=0`, no resolvable state dir, an I/O
+    /// failure — already warned, or a non-unix target — see below) and the
+    /// run proceeds unjournaled.
     pub fn start(info: StartInfo) -> Option<Journal> {
-        if std::env::var_os("PULT_JOURNAL").is_some_and(|v| v == "0") {
+        // M4, decided: journaling is off entirely on non-unix targets for
+        // now. `writer_alive` has no process-liveness probe wired up there
+        // (its non-unix arm always says "alive"), so a crashed run would
+        // stay `status: "running"` forever — `pult runs list` would show it
+        // live forever and prune would spare it forever, unbounded phantom
+        // runs on disk. Honest absence beats that; revisit once an
+        // OpenProcess-based probe lands.
+        #[cfg(not(unix))]
+        {
+            let _ = info;
             return None;
         }
-        let state = state_dir()?;
-        match Self::start_at(&state, info) {
-            Ok(j) => Some(j),
-            Err(e) => {
-                eprintln!("pult: warning: run journal disabled: {e:#}");
-                None
+        #[cfg(unix)]
+        {
+            if std::env::var_os("PULT_JOURNAL").is_some_and(|v| v == "0") {
+                return None;
+            }
+            let state = state_dir()?;
+            match Self::start_at(&state, info) {
+                Ok(j) => Some(j),
+                Err(e) => {
+                    eprintln!("pult: warning: run journal disabled: {e:#}");
+                    None
+                }
             }
         }
     }
@@ -163,8 +179,10 @@ impl Journal {
         fs::create_dir_all(&runs_root)
             .with_context(|| format!("failed to create {}", runs_root.display()))?;
 
-        // The human-readable reverse mapping (key -> dir); written once,
-        // refreshed if the canonical path ever changes for the same key.
+        // The human-readable reverse mapping (key -> dir): written once, on
+        // this key's first run, and never rewritten after — `key` is a hash
+        // of the canonical dir, so the dir this file records can't change
+        // out from under an existing key without also changing the key.
         let repo_json = repo_root.join("repo.json");
         if !repo_json.exists() {
             let doc = serde_json::json!({ "schema": SCHEMA, "dir": repo_dir });
@@ -312,6 +330,15 @@ fn write_meta(path: &Path, meta: &Meta) -> Result<()> {
     f.sync_all().ok();
     fs::rename(&tmp, path)
         .with_context(|| format!("failed to move meta into place at {}", path.display()))?;
+    // Best-effort: the rename is a directory-entry update, which needs its
+    // own fsync on most filesystems (fsyncing the file's contents, above,
+    // doesn't cover it) — so without this, a crash right after `rename`
+    // could still lose the rename itself on some filesystems/mount options.
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = fs::File::open(dir) {
+            d.sync_all().ok();
+        }
+    }
     Ok(())
 }
 
@@ -412,9 +439,12 @@ pub fn read_meta(run_dir: &Path) -> Option<Meta> {
 }
 
 /// Whether the journaling process recorded in `meta` is still alive —
-/// the probe behind reader-derived crash detection. Windows has no cheap
-/// equivalent wired up yet; err on "alive" there (a stale "running" is
-/// less wrong than a live run shown crashed).
+/// the probe behind reader-derived crash detection. `Journal::start`
+/// disables journaling entirely on non-unix targets (M4), so this arm
+/// mostly matters for a reader on a shared drive encountering a run a unix
+/// pult journaled; Windows still has no cheap liveness equivalent wired up,
+/// so it errs on "alive" there (a stale "running" is less wrong than a live
+/// run shown crashed).
 pub fn writer_alive(meta: &Meta) -> bool {
     #[cfg(unix)]
     {

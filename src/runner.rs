@@ -129,9 +129,12 @@ mod journaled {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         // Unix: watch for stop signals and claim the events channel when
-        // free. Both are no-ops elsewhere (Windows journals lines + exit
-        // only, and stop detection falls to reader-side crash detection —
-        // see the run-journal spec's Windows notes).
+        // free. Both are no-ops on other targets, but this whole function
+        // is unreachable there in practice anyway: journaling is off
+        // entirely on non-unix (M4, journal.rs's `Journal::start`), so
+        // `Journaling::Full` — the only caller of `journaled::execute` — is
+        // never constructed off-unix. The `#[cfg(not(unix))]` arms below
+        // exist only so this module still compiles for those targets.
         #[cfg(unix)]
         super::events_unix::install_stop_flag();
         #[cfg(unix)]
