@@ -604,7 +604,12 @@ fn visit_param(def: &mut ParamDef, f: &dyn Fn(&mut String)) {
             for o in options {
                 match o {
                     OptionDef::Plain(s) => f(s),
-                    OptionDef::Full(full) => f(&mut full.value),
+                    OptionDef::Full(full) => {
+                        f(&mut full.value);
+                        if let Some(d) = &mut full.description {
+                            f(d);
+                        }
+                    }
                 }
             }
         }
@@ -1022,6 +1027,44 @@ commands:
             "got: {from}"
         );
         assert!(from.contains("x-{env}"), "got: {from}");
+    }
+
+    /// §7.9 — descriptions are `${var}`-substituted in modules, mirroring
+    /// how command-level `description` and pick option values already are.
+    /// Redden by skipping descriptions in `visit_param`.
+    #[test]
+    fn option_description_var_is_substituted() {
+        let module = r#"
+version: 1
+vars:
+  cluster_prefix: { required: true }
+params:
+  env:
+    pick:
+      options:
+        - dev
+        - { value: uat, description: "${cluster_prefix} env" }
+commands:
+  - id: c
+    title: C
+    params:
+      env: { use: env }
+    run: "echo {env}"
+"#;
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/aws\n    vars: { cluster_prefix: dirconn }\ncommands:\n  - { id: local, title: L, run: \"true\" }\n",
+            &[("mods/aws/module.yaml", module)],
+        );
+        let r = resolved.unwrap();
+        let cmd = r.commands.iter().find(|c| c.id == "c").unwrap();
+        let opts = cmd.params["env"]
+            .pick
+            .as_ref()
+            .unwrap()
+            .options
+            .as_ref()
+            .unwrap();
+        assert_eq!(opts[1].description(), Some("dirconn env"));
     }
 
     #[test]
