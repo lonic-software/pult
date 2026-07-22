@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use crate::fetch::{self, Source};
 use crate::interp;
 use crate::manifest::{
-    self, IncludeDef, Loaded, Manifest, ParamDef, ParamKind, PipeEntry, RunEntry, RunSpec, StepDef,
+    self, IncludeDef, Loaded, Manifest, OptionDef, ParamDef, ParamKind, PipeEntry, RunEntry,
+    RunSpec, StepDef,
 };
 
 /// Command ids the engine claims for its own subcommands — current and
@@ -601,7 +602,15 @@ fn visit_param(def: &mut ParamDef, f: &dyn Fn(&mut String)) {
         }
         if let Some(options) = &mut pick.options {
             for o in options {
-                f(o);
+                match o {
+                    OptionDef::Plain(s) => f(s),
+                    OptionDef::Full(full) => {
+                        f(&mut full.value);
+                        if let Some(d) = &mut full.description {
+                            f(d);
+                        }
+                    }
+                }
             }
         }
     }
@@ -954,10 +963,17 @@ commands:
         // use: param inlined to the module's concrete picker
         let deploy = &r.commands[1];
         let env = &deploy.params["env"];
-        assert_eq!(
-            env.pick.as_ref().unwrap().options.as_ref().unwrap(),
-            &["dev".to_string(), "uat".to_string()]
-        );
+        let values: Vec<&str> = env
+            .pick
+            .as_ref()
+            .unwrap()
+            .options
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(OptionDef::value)
+            .collect();
+        assert_eq!(values, ["dev", "uat"]);
 
         // vars substituted into the step script; exports carried through
         let ResolvedRun::Steps(entries) = &deploy.run else {
@@ -1011,6 +1027,44 @@ commands:
             "got: {from}"
         );
         assert!(from.contains("x-{env}"), "got: {from}");
+    }
+
+    /// §7.9 — descriptions are `${var}`-substituted in modules, mirroring
+    /// how command-level `description` and pick option values already are.
+    /// Redden by skipping descriptions in `visit_param`.
+    #[test]
+    fn option_description_var_is_substituted() {
+        let module = r#"
+version: 1
+vars:
+  cluster_prefix: { required: true }
+params:
+  env:
+    pick:
+      options:
+        - dev
+        - { value: uat, description: "${cluster_prefix} env" }
+commands:
+  - id: c
+    title: C
+    params:
+      env: { use: env }
+    run: "echo {env}"
+"#;
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/aws\n    vars: { cluster_prefix: dirconn }\ncommands:\n  - { id: local, title: L, run: \"true\" }\n",
+            &[("mods/aws/module.yaml", module)],
+        );
+        let r = resolved.unwrap();
+        let cmd = r.commands.iter().find(|c| c.id == "c").unwrap();
+        let opts = cmd.params["env"]
+            .pick
+            .as_ref()
+            .unwrap()
+            .options
+            .as_ref()
+            .unwrap();
+        assert_eq!(opts[1].description(), Some("dirconn env"));
     }
 
     #[test]

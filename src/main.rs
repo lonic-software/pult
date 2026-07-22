@@ -9,6 +9,7 @@ mod flow;
 mod init;
 mod interp;
 mod journal;
+mod label;
 mod manifest;
 mod options;
 mod prompt;
@@ -28,7 +29,7 @@ use clap::{Arg, ArgAction};
 use indexmap::IndexMap;
 
 use discovery::Scope;
-use manifest::{ParamDef, ParamKind};
+use manifest::{OptionDef, ParamDef, ParamKind};
 use resolver::{PinInfo, Resolved, ResolvedRun};
 
 fn main() {
@@ -459,7 +460,10 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 .value_name(name.to_uppercase());
             arg = match def.kind() {
                 ParamKind::Pick(pick) => match &pick.options {
-                    Some(opts) => arg.help(format!("one of: {}", opts.join(", "))),
+                    Some(opts) => {
+                        let values: Vec<&str> = opts.iter().map(OptionDef::value).collect();
+                        arg.help(format!("one of: {}", values.join(", ")))
+                    }
                     None => arg.help("picked from a dynamic option source if omitted"),
                 },
                 ParamKind::Input(input) if input.secret => {
@@ -479,6 +483,12 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
 /// agents and tooling. Schema 1; changes are additive only, breaking changes
 /// bump `schema`. `trusted` is passed in so this stays a pure function of the
 /// resolved manifest (the caller consults the trust store).
+///
+/// Additive Schema 1 field: a static pick's `params[].option_details` —
+/// `[{"value", "description"}, ...]`, parallel to `options` (same order,
+/// same length, present iff `options` is). Dynamic picks have neither key —
+/// the option set is unknowable at list time (the source is never run, the
+/// same no-side-effects guarantee as the preview path).
 fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Value {
     use serde_json::json;
     let includes: Vec<_> = resolved
@@ -516,7 +526,20 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                 .map(|(name, def)| match def.kind() {
                     ParamKind::Pick(pick) => match (&pick.options, &pick.from) {
                         (Some(options), _) => {
-                            json!({ "name": name, "kind": "pick", "options": options })
+                            let values: Vec<&str> = options.iter().map(OptionDef::value).collect();
+                            // `option_details` is present iff `options` is —
+                            // same order, same length; old consumers ignore
+                            // it, new ones get value + display description.
+                            let details: Vec<_> = options
+                                .iter()
+                                .map(|o| json!({ "value": o.value(), "description": o.description() }))
+                                .collect();
+                            json!({
+                                "name": name,
+                                "kind": "pick",
+                                "options": values,
+                                "option_details": details,
+                            })
                         }
                         (None, Some(from)) => json!({
                             "name": name,
@@ -649,7 +672,7 @@ commands:
   - id: shell
     title: Open a shell
     params:
-      env: { pick: { options: [dev, uat] } }
+      env: { pick: { options: [dev, { value: uat, description: "User acceptance" }] } }
       customer: { pick: { from: "./bin/impl list --env {env}" } }
       note: { input: { default: "" } }
     run: "./bin/impl shell {customer} {env}"
@@ -691,6 +714,28 @@ commands:
         let params = cmd["params"].as_array().unwrap();
         assert_eq!(params[0]["kind"], "pick");
         assert_eq!(params[0]["options"][0], "dev");
+        assert_eq!(params[0]["options"][1], "uat");
+        // §7.8 — "options" stays plain strings; "option_details" is a
+        // parallel array, same order/length, carrying the descriptions.
+        assert!(params[0]["options"][0].is_string());
+        assert_eq!(params[0]["option_details"][0]["value"], "dev");
+        assert_eq!(
+            params[0]["option_details"][0]["description"],
+            serde_json::Value::Null
+        );
+        assert_eq!(params[0]["option_details"][1]["value"], "uat");
+        assert_eq!(
+            params[0]["option_details"][1]["description"],
+            "User acceptance"
+        );
+        assert_eq!(
+            params[0]["option_details"][1]["value"], params[0]["options"][1],
+            "option_details[i].value must equal options[i]"
+        );
+        // Dynamic picks get neither key — the option set is unknowable at
+        // list time (the source is never run).
+        assert!(params[1].get("options").is_none());
+        assert!(params[1].get("option_details").is_none());
         assert_eq!(params[1]["depends_on"][0], "env");
         assert_eq!(params[2]["kind"], "input");
         assert_eq!(params[2]["default"], "");
