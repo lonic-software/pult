@@ -11,6 +11,15 @@
 //! This is load-bearing for forward compatibility: a script or surface built
 //! against a later vocabulary must never break an older pult, and vice versa.
 
+// This module's only callers are the journal (`journal.rs`'s `Event` import)
+// and the unix-only events channel (`runner.rs`'s `events_unix`) — both
+// gated off on non-unix by M4 (journaling disabled entirely there, see
+// `Journal::start`). So on a non-unix target every item below is compiled
+// but unreachable; `allow` only there, never on unix (where this module is
+// live and dead-code detection should stay fully armed). Expected to become
+// vestigial once journaling reaches Windows (issue #8).
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::io::Write;
 
 /// One parsed protocol line — kept minimal, just what the CLI renderer (and,

@@ -14,5 +14,27 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Install Windows target for cross-target clippy
+        run: rustup target add x86_64-pc-windows-msvc
+      # Clippy type-checks but doesn't link, so no MSVC toolchain is needed —
+      # just the target's std. This is what keeps the `#[cfg(windows)]` shell
+      # resolution code (src/shell.rs) honest between the windows-latest
+      # runs below: it can't bit-rot unnoticed on the ubuntu-only common path.
+      - name: Clippy (Windows target)
+        run: cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
       - name: Tests
         run: cargo test --locked
+
+  # Not full Windows coverage — this suite has never run on Windows, so
+  # there is no existing signal to preserve here, only a specific new one to
+  # add. Deliberately name-filtered to `shell::` (src/shell.rs's pure-logic
+  # and Windows-behavioral tests) rather than the whole suite: that keeps
+  # this job honest about what it verifies (shell resolution) instead of
+  # silently widening into an implied "Windows is supported" claim the rest
+  # of the codebase hasn't earned yet.
+  windows-shell-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell-resolution tests
+        run: "cargo test --locked shell::"

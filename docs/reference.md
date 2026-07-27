@@ -575,4 +575,14 @@ local path, or validate manifests in CI with any JSON-Schema validator.
 
 - `sh` and `bash` on PATH (command execution; compiled step scripts use bash).
 - `git` on PATH for git module sources.
-- Windows: both are provided by Git for Windows; run `pult` from Git Bash.
+- Windows: install [Git for Windows](https://git-scm.com/download/win). pult
+  does *not* trust a bare `sh`/`bash` PATH lookup there — Windows' own
+  executable search checks `%SystemRoot%\System32` before `PATH`, and a
+  stock install ships a `bash.exe` stub there (the WSL launcher) that wins
+  even with Git's own `bash.exe` first on PATH. Instead pult resolves an
+  absolute path itself: PATH (skipping anything under `System32`/
+  `SysWOW64`/`Sysnative`/`WindowsApps`), then a location derived from
+  `git --exec-path`, then fixed install paths — so a default install
+  launched from **PowerShell** works, even though its PATH has only
+  `Git\cmd`, not `Git\bin`/`Git\usr\bin`. Launching from Git Bash is no
+  longer required.

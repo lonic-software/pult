@@ -9,7 +9,7 @@ use crate::label;
 use crate::manifest::ParamKind;
 use crate::resolver::{Resolved, ResolvedCommand, ResolvedRun};
 use crate::runner::Journaling;
-use crate::{compile, interp, options, prompt, runner, trust};
+use crate::{compile, interp, options, prompt, runner, shell, trust};
 
 /// Execute one command: fill its params (from provided values or interactive
 /// prompts, in declared order — which is what makes dependent `from:` sources
@@ -57,6 +57,29 @@ pub fn execute(
     // Trusted now — fill for real (prompting for and resolving any values not
     // given on the command line) and run.
     let values = fill(cmd, provided, Some(&resolved.run_dir))?;
+
+    // Resolve the shell this run will need before the journal below is
+    // opened, not after: `run_sh`/`run_bash` call `shell::sh()`/`bash()`
+    // internally too, but by then a journal may already be open, and their
+    // `?` returns out of `execute` before ever reaching `runner::execute`'s
+    // `journal.finish(...)` calls — the `Journal` (no `Drop` impl) would
+    // just be silently dropped, orphaning its `meta.json` at
+    // `status: "running"` forever. Only reachable on Windows (unix
+    // resolution is infallible) and dormant until journaling reaches
+    // non-unix targets (#8), but that's exactly what this PR anticipates.
+    // Resolving here instead closes the window by construction: a failure
+    // now means no journal was ever opened to orphan. `shell::sh()`/
+    // `bash()` memoize their result, so the resolution `run_sh`/`run_bash`
+    // repeat below is guaranteed to replay this same (already-succeeded)
+    // outcome, never a fresh OS call that could disagree.
+    match &cmd.run {
+        ResolvedRun::Script(_) => {
+            shell::sh()?;
+        }
+        ResolvedRun::Steps(_) => {
+            shell::bash()?;
+        }
+    }
 
     // Open the run journal (see journal.rs). Ephemeral `pult x` sources are
     // skipped — no durable repo identity to journal under. The journal's

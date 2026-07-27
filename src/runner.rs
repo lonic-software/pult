@@ -43,7 +43,7 @@ pub enum Journaling {
 pub fn run_sh(cmdline: &str, display: &str, dir: &Path, journaling: Journaling) -> Result<i32> {
     eprintln!("└  running: {display}");
     execute(
-        Command::new("sh").arg("-c").arg(cmdline).current_dir(dir),
+        crate::shell::sh()?.arg("-c").arg(cmdline).current_dir(dir),
         display,
         journaling,
     )
@@ -54,7 +54,7 @@ pub fn run_sh(cmdline: &str, display: &str, dir: &Path, journaling: Journaling) 
 pub fn run_bash(script: &str, label: &str, dir: &Path, journaling: Journaling) -> Result<i32> {
     eprintln!("└  running: {label} (compiled steps — `--print` shows the script)");
     execute(
-        Command::new("bash").arg("-c").arg(script).current_dir(dir),
+        crate::shell::bash()?.arg("-c").arg(script).current_dir(dir),
         label,
         journaling,
     )
@@ -405,7 +405,7 @@ mod journaled {
             )
             .unwrap();
 
-            let mut command = Command::new("bash");
+            let mut command = crate::shell::bash().unwrap();
             command
                 .arg("-c")
                 .arg(r#"echo "step 1/1 done" >&$PULT_EVENTS"#);
