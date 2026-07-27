@@ -91,22 +91,6 @@ pub fn execute(
     // error text. An ephemeral `pult x` source can carry secret params and
     // render a banner too, so it needs the same masker a journaled run gets.
     let (masker, unmaskable) = build_masker(cmd, &values);
-    // Warn for every secret this run's masker can't mask — covers the
-    // `running:` banner and the journal for any run that reaches this
-    // point (this function only gets here after the early `--print` return
-    // above, so every call is a non-preview one). It does *not* cover a
-    // run that never reaches this point: a failing `pick.from` aborts
-    // inside `fill`, above, before `execute` resumes — that's exactly the
-    // #12 scenario (a too-short secret, a failing option source, the
-    // secret in stderr) — so `fill`'s own `Pick` arm calls
-    // `warn_unmaskable` too, at the one point that precedes that abort.
-    // `warn_unmaskable` dedupes by name (a process-global set) so a secret
-    // already warned about there isn't warned about again here. This is a
-    // deliberate partial reversal of #11's narrower gating (which only
-    // warned on the `Journaling::Full` path, on the premise that masking
-    // only ever happened there) — the premise that justified it is what
-    // this PR falsified, not a regression to "fix" by re-narrowing the gate.
-    warn_unmaskable(&unmaskable);
 
     // Open the run journal (see journal.rs). Ephemeral `pult x` sources are
     // skipped — no durable repo identity to journal under. The journal's
@@ -132,6 +116,30 @@ pub fn execute(
             None => Journaling::Off,
         }
     };
+
+    // Warn for every secret this run's masker can't mask, but only when
+    // something at the run level actually masks with it: `Journaling::Full`
+    // (the journal does), or `ResolvedRun::Script` (the `running:` banner
+    // below does, regardless of journaling state, since `masker` is applied
+    // there unconditionally). A `ResolvedRun::Steps` run that isn't
+    // `Journaling::Full` has nothing at this level that masks anything — its
+    // banner is just `cmd.id` (see `run_bash`'s call below), no masker ever
+    // touches it — so warning there would be exactly the misleading noise
+    // #11's narrower gate existed to prevent, reintroduced by gating on "the
+    // banner is masked" without checking which arm that's actually true for.
+    //
+    // This does *not* cover a run that never reaches this point: a failing
+    // `pick.from` aborts inside `fill`, above, before `execute` resumes —
+    // that's exactly the #12 scenario (a too-short secret, a failing option
+    // source, the secret in stderr) — so `fill`'s own `Pick` arm calls
+    // `warn_unmaskable` too, unconditionally (option-source masking runs
+    // regardless of `cmd.run`'s shape or journaling state), at the one point
+    // that precedes that abort. `warn_unmaskable` dedupes by name (a
+    // process-global set) so a secret already warned about there isn't
+    // warned about again here.
+    if matches!(journaling, Journaling::Full(..)) || matches!(cmd.run, ResolvedRun::Script(_)) {
+        warn_unmaskable(&unmaskable);
+    }
 
     match &cmd.run {
         ResolvedRun::Script(template) => {
@@ -328,10 +336,11 @@ fn fill(
                 // pick, for a command with more than one).
                 warn_unmaskable(&unmaskable);
                 let redaction = options::Redaction {
+                    values: &values,
                     display_values: &display_values,
                     masker: &masker,
                 };
-                let opts = options::resolve_pick(pick, &values, &redaction, run_dir.unwrap())?;
+                let opts = options::resolve_pick(pick, &redaction, run_dir.unwrap())?;
                 // A `from:` source can echo a secret back on *stdout* too —
                 // an argv-echoing CLI, or a source that just reflects one of
                 // its inputs — and that line becomes a `PickOption`, not an

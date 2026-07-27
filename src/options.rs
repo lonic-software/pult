@@ -7,12 +7,26 @@ use crate::interp;
 use crate::manifest::PickDef;
 use crate::mask::Masker;
 
-/// Bundles both halves of `resolve_pick`'s redaction so a call site can't
-/// silently swap them — see the type's field docs and `resolve_pick` below
-/// for why that matters. Passing `(display_values, masker)` as two loose
-/// `&IndexMap`/`&Masker` arguments would let a transposition compile clean;
-/// bundling them here makes that swap a type error instead.
+/// Bundles all three of `resolve_pick`'s value/redaction inputs so a call
+/// site can't silently swap two of them — see the field docs and
+/// `resolve_pick` below for why that matters.
+///
+/// All three live here, not just `display_values` and `masker`: an earlier
+/// revision bundled only those two on the theory that bundling made a swap a
+/// type error, but that was false — `values` stayed a separate, adjacent,
+/// same-typed argument next to `redaction`, so `resolve_pick(pick, &values,
+/// &redaction, dir)` and `resolve_pick(pick, &display_values, &Redaction {
+/// display_values: &values, .. }, dir)` both still compiled, and the second
+/// one inverts the fix (pult would execute the masked command and display
+/// the real one). Folding `values` in here too makes that swap require named
+/// fields — `Redaction { values: &display_values, display_values: &values,
+/// masker }` — which is visible at the call site rather than a silent
+/// positional transposition. That's the property this type actually
+/// provides now; see `resolve_pick` for how each field is used.
 pub struct Redaction<'a> {
+    /// The real param values — used to build the command that actually
+    /// executes.
+    pub values: &'a IndexMap<String, String>,
     /// The `redact()`-masked param values — secrets replaced with the fixed,
     /// human-facing `••••••` (issue #7's other layer, `exec.rs`'s `redact`).
     /// Used to build the *display* copy of the interpolated `from:` command
@@ -41,7 +55,6 @@ pub struct PickOption {
 /// its `from:` shell command (interpolated with the params answered so far).
 pub fn resolve_pick(
     pick: &PickDef,
-    values: &IndexMap<String, String>,
     redaction: &Redaction<'_>,
     dir: &Path,
 ) -> Result<Vec<PickOption>> {
@@ -67,12 +80,12 @@ pub fn resolve_pick(
     // raw value resurfacing through a *different*, non-secret param — e.g. a
     // URL built from it — which `redact` structurally cannot see, being
     // name-based). Neither pass alone covers both leak shapes, so both run.
-    // `redact` clones the values map, so `values` and
+    // `redact` clones the values map, so `redaction.values` and
     // `redaction.display_values` have identical key sets, and STRICT-mode
     // `interpolate`'s only error (`unknown parameter`) embeds the raw
     // template, never a value — so this second interpolation can't fail
     // differently from the first, and its own error text can't leak either.
-    let cmd = interp::interpolate(from, values)?;
+    let cmd = interp::interpolate(from, redaction.values)?;
     let display = redaction
         .masker
         .apply(&interp::interpolate(from, redaction.display_values)?)
@@ -116,8 +129,16 @@ pub fn resolve_pick(
         //     depends on every other char in the value, so this is a
         //     moving target, not a fixed second needle) — not attempted
         //     here.
+        // Mask *before* trimming, not after: `Masker`'s needle is the raw
+        // secret value, trailing whitespace and all (a pasted credential
+        // picks up trailing whitespace constantly), and the child's own
+        // trailing newline sits right after it in the captured stderr.
+        // Trimming first would strip exactly the whitespace the needle
+        // needs to match, so `apply` would find nothing — the #12 failure
+        // mode again, for a very ordinary input.
         let raw_stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = redaction.masker.apply(raw_stderr.trim_end());
+        let masked_stderr = redaction.masker.apply(&raw_stderr);
+        let stderr = masked_stderr.trim_end();
         bail!(
             "option source `{display}` failed ({}):\n{}",
             output.status,
@@ -195,6 +216,7 @@ mod tests {
     /// and the masker has no needles loaded.
     fn no_redaction<'a>(values: &'a IndexMap<String, String>, masker: &'a Masker) -> Redaction<'a> {
         Redaction {
+            values,
             display_values: values,
             masker,
         }
@@ -213,8 +235,7 @@ mod tests {
         };
         let vals = IndexMap::new();
         let masker = Masker::new(Vec::<String>::new());
-        let opts =
-            resolve_pick(&pick, &vals, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
+        let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(values(&opts), ["dev", "uat"]);
         assert!(opts.iter().all(|o| o.description.is_none()));
     }
@@ -233,8 +254,7 @@ mod tests {
         };
         let vals = IndexMap::new();
         let masker = Masker::new(Vec::<String>::new());
-        let opts =
-            resolve_pick(&pick, &vals, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
+        let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(opts[0].description, None);
         assert_eq!(opts[1].description.as_deref(), Some("User acceptance"));
     }
@@ -251,8 +271,7 @@ mod tests {
         };
         let vals = IndexMap::new();
         let masker = Masker::new(Vec::<String>::new());
-        let opts =
-            resolve_pick(&pick, &vals, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
+        let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(values(&opts), ["alpha", "beta"]);
         assert!(opts.iter().all(|o| o.description.is_none()));
     }
@@ -267,8 +286,7 @@ mod tests {
         };
         let vals = IndexMap::new();
         let masker = Masker::new(Vec::<String>::new());
-        let opts =
-            resolve_pick(&pick, &vals, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
+        let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].value, "a");
         assert_eq!(opts[0].description.as_deref(), Some("b\tc"));
@@ -284,8 +302,7 @@ mod tests {
         };
         let vals = IndexMap::new();
         let masker = Masker::new(Vec::<String>::new());
-        let opts =
-            resolve_pick(&pick, &vals, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
+        let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(opts[0].value, "a");
         assert_eq!(opts[0].description, None);
     }
@@ -300,7 +317,7 @@ mod tests {
         };
         let vals = IndexMap::new();
         let masker = Masker::new(Vec::<String>::new());
-        let err = resolve_pick(&pick, &vals, &no_redaction(&vals, &masker), Path::new("."))
+        let err = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new("."))
             .unwrap_err()
             .to_string();
         assert!(err.contains("empty value before the tab"), "got: {err}");
@@ -316,8 +333,7 @@ mod tests {
         let mut vals = IndexMap::new();
         vals.insert("env".to_string(), "dev".to_string());
         let masker = Masker::new(Vec::<String>::new());
-        let opts =
-            resolve_pick(&pick, &vals, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
+        let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(values(&opts), ["dev-customer"]);
     }
 
@@ -333,10 +349,41 @@ mod tests {
         };
         let vals = IndexMap::new();
         let masker = Masker::new(Vec::<String>::new());
-        let err = resolve_pick(&pick, &vals, &no_redaction(&vals, &masker), Path::new("."))
+        let err = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new("."))
             .unwrap_err()
             .to_string();
         assert!(err.contains("boom"), "got: {err}");
+    }
+
+    /// Adversarial-review finding (round 3): `Masker`'s needle is the secret
+    /// value exactly as stored, trailing whitespace included — a pasted
+    /// credential picks up trailing whitespace constantly. Trimming the
+    /// child's stderr *before* masking (the bug this reddens against) strips
+    /// exactly the whitespace the needle requires, so `apply` matches
+    /// nothing and the secret prints in cleartext — the #12 failure mode
+    /// again, for an ordinary input. Masking must run on the untrimmed
+    /// stderr; only the *result* gets trimmed. Redden by reordering back to
+    /// `masker.apply(raw_stderr.trim_end())`.
+    #[test]
+    fn stderr_masks_a_secret_with_trailing_whitespace() {
+        let secret_core = "hunter2-super-secret";
+        let secret = format!("{secret_core} "); // trailing space, deliberately
+        let pick = PickDef {
+            options: None,
+            from: Some(format!("printf 'tok={secret}\\n' >&2; exit 1")),
+        };
+        let vals = IndexMap::new();
+        let masker = Masker::new([secret]);
+        let redaction = Redaction {
+            values: &vals,
+            display_values: &vals,
+            masker: &masker,
+        };
+        let err = resolve_pick(&pick, &redaction, Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains(secret_core), "leaked: {err}");
+        assert!(err.contains("<redacted>"), "got: {err}");
     }
 
     /// Complement to `exec.rs`'s `fill`-level regression test: pins the
@@ -357,10 +404,11 @@ mod tests {
         display.insert("token".to_string(), "••••••".to_string());
         let masker = Masker::new(Vec::<String>::new());
         let redaction = Redaction {
+            values: &real,
             display_values: &display,
             masker: &masker,
         };
-        let opts = resolve_pick(&pick, &real, &redaction, Path::new(".")).unwrap();
+        let opts = resolve_pick(&pick, &redaction, Path::new(".")).unwrap();
         assert_eq!(values(&opts), ["hunter2-secret"]);
     }
 }

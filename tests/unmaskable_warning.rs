@@ -67,3 +67,58 @@ fn too_short_secret_is_warned_about_even_though_a_failing_pick_from_aborts_the_r
         "expected the documented sub-MIN_LEN leak in stderr: {stderr}"
     );
 }
+
+/// Adversarial-review finding (round 3): the run-level warning was gated on
+/// the claim that masking always happens somewhere at the run level once
+/// `execute` reaches it — true for `ResolvedRun::Script` (the `running:`
+/// banner is masked regardless of journaling), false for
+/// `ResolvedRun::Steps` on any run that isn't `Journaling::Full` (its
+/// "banner" is just the command id — see `run_bash`'s call site in
+/// `exec.rs` — no masker ever touches it). Warning there would be exactly
+/// the misleading noise #11's narrower gate existed to prevent: a run where
+/// *nothing* is masked, but pult claims a secret was "too short to mask" as
+/// if some masking pass had actually looked for it.
+///
+/// `PULT_JOURNAL=0` forces `Journaling::Off` even for this non-interactive,
+/// non-ephemeral run, so the only way this run's masker ever gets applied to
+/// anything is if the (wrong) old gate fires it anyway.
+#[test]
+fn steps_run_with_masking_off_is_not_warned_about_an_unmaskable_secret() {
+    const SHORT_SECRET: &str = "abcd"; // 4 chars — under MIN_LEN
+
+    let state = tempfile::tempdir().unwrap();
+    let trust_dir = tempfile::tempdir().unwrap();
+    let trust_store = trust_dir.path().join("trust.json");
+    let repo = tempfile::tempdir().unwrap();
+
+    std::fs::write(
+        repo.path().join("pult.yaml"),
+        "version: 1\ncommands:\n  - id: deploy\n    title: Deploy\n    params:\n      \
+         token: { input: { secret: true } }\n    \
+         run: [\"echo {token}\"]\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pult"))
+        .current_dir(repo.path())
+        .env("PULT_STATE_DIR", state.path())
+        .env("PULT_TRUST_STORE", &trust_store)
+        .env("PULT_JOURNAL", "0")
+        .args(["--trust", "deploy", SHORT_SECRET])
+        .output()
+        .expect("failed to run the pult binary");
+
+    assert!(
+        output.status.success(),
+        "expected the steps run to succeed: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("too short to mask"),
+        "warned about masking on a run where a `Steps` command with \
+         journaling off never masks anything at the run level: {stderr}"
+    );
+}
