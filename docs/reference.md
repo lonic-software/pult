@@ -119,6 +119,24 @@ zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-eas
   — prefer the prompt for anything truly sensitive, or `--params-json` (below)
   when tooling needs to pass it non-interactively without putting it in argv.
 
+  **What journaling masks, and what it doesn't.** Journaling is on by
+  default for a non-interactive, non-ephemeral run (see `pult runs list`/
+  `pult runs tail`) and also masks a secret's value wherever a *child*
+  prints it back — in the retained `events.jsonl` for that run, and in the
+  copy forwarded to your terminal. The guarantee is bounded, not complete:
+  an exact occurrence of a secret value **6 characters or longer** is
+  replaced with the literal `<redacted>`, with each line of a multi-line
+  value matched separately. Not recognized: the value base64-encoded,
+  hex-encoded, URL-encoded, case-changed, or reassembled a piece at a time
+  across separate lines. A value under 6 characters is never masked (pult
+  warns at start when one is). Output pult never sees at all — an
+  interactive command's stdio, or any run journaled as `MetaOnly`/not
+  journaled at all — is never masked, because there is nothing for pult to
+  mask. Treat this as scrubbing of verbatim reflections, **not a security
+  boundary**: a script that transforms a secret before printing it (encodes
+  it, echoes half of it, wraps it in other text a character at a time)
+  still leaks it.
+
 ### `<step>`
 
 ```yaml

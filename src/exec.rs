@@ -6,7 +6,8 @@ use indexmap::IndexMap;
 
 use crate::journal;
 use crate::label;
-use crate::manifest::ParamKind;
+use crate::manifest::{ParamDef, ParamKind};
+use crate::mask::{self, Masker};
 use crate::resolver::{Resolved, ResolvedCommand, ResolvedRun};
 use crate::runner::Journaling;
 use crate::{compile, interp, options, prompt, runner, shell, trust};
@@ -89,6 +90,10 @@ pub fn execute(
     let journaling = if resolved.ephemeral {
         Journaling::Off
     } else {
+        // Post-`fill`, so an interactively prompted secret (not just one
+        // supplied on the command line) is covered — `fill` above already
+        // ran before this point.
+        let masker = build_masker(cmd, &values);
         let journal = journal::Journal::start(journal::StartInfo {
             repo_dir: &resolved.dir,
             manifest: &resolved.path,
@@ -97,10 +102,11 @@ pub fn execute(
             params: journal_params(cmd, &values),
             interactive: cmd.interactive,
             run_id,
+            masker: masker.clone(),
         });
         match journal {
             Some(j) if cmd.interactive => Journaling::MetaOnly(j),
-            Some(j) => Journaling::Full(j),
+            Some(j) => Journaling::Full(j, masker),
             None => Journaling::Off,
         }
     };
@@ -126,6 +132,14 @@ pub fn execute(
     }
 }
 
+/// Whether `def` is a `secret: true` input — the one condition
+/// `journal_params`, `redact`, and `build_masker` all need. Unified here so
+/// issue #6 (masking values discovered mid-run, not just supplied up front)
+/// only has to extend this one place instead of three.
+fn is_secret(def: &ParamDef) -> bool {
+    matches!(def.kind(), ParamKind::Input(input) if input.secret)
+}
+
 /// `values` for the journal's audit record: secrets as the spec's literal
 /// `"<redacted>"` — the value itself never reaches the journal module.
 fn journal_params(
@@ -134,8 +148,7 @@ fn journal_params(
 ) -> IndexMap<String, String> {
     let mut out = values.clone();
     for (name, def) in &cmd.params {
-        if let ParamKind::Input(input) = def.kind()
-            && input.secret
+        if is_secret(def)
             && let Some(v) = out.get_mut(name)
         {
             *v = "<redacted>".to_string();
@@ -149,14 +162,35 @@ fn journal_params(
 fn redact(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> IndexMap<String, String> {
     let mut out = values.clone();
     for (name, def) in &cmd.params {
-        if let ParamKind::Input(input) = def.kind()
-            && input.secret
+        if is_secret(def)
             && let Some(v) = out.get_mut(name)
         {
             *v = "••••••".to_string();
         }
     }
     out
+}
+
+/// Build the run's `Masker` from post-`fill` secret values, warning once per
+/// value that's too short to ever be masked (cheap, honest, no knob — see
+/// `mask::MIN_LEN`'s doc comment for why there's a floor at all).
+fn build_masker(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Masker {
+    let secrets: Vec<(&str, &str)> = cmd
+        .params
+        .iter()
+        .filter(|(_, def)| is_secret(def))
+        .filter_map(|(name, _)| values.get(name).map(|v| (name.as_str(), v.as_str())))
+        .collect();
+    for (name, value) in &secrets {
+        if value.len() < mask::MIN_LEN {
+            eprintln!(
+                "pult: warning: secret `{name}` is too short to mask in output \
+                 (under {} characters)",
+                mask::MIN_LEN
+            );
+        }
+    }
+    Masker::new(secrets.into_iter().map(|(_, v)| v.to_string()))
 }
 
 /// Fill a command's params in declared order. `run_dir: None` = **preview**:
