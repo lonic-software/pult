@@ -173,7 +173,9 @@ fn redact(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> IndexMap<
 
 /// Build the run's `Masker` from post-`fill` secret values, warning once per
 /// value that's too short to ever be masked (cheap, honest, no knob — see
-/// `mask::MIN_LEN`'s doc comment for why there's a floor at all).
+/// `mask::MIN_LEN`'s doc comment for why there's a floor at all). An empty
+/// value is exempted: there's nothing in it to leak, so warning about it
+/// would just be noise on any optional secret the user left unset.
 fn build_masker(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Masker {
     let secrets: Vec<(&str, &str)> = cmd
         .params
@@ -182,7 +184,7 @@ fn build_masker(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Mas
         .filter_map(|(name, _)| values.get(name).map(|v| (name.as_str(), v.as_str())))
         .collect();
     for (name, value) in &secrets {
-        if value.len() < mask::MIN_LEN {
+        if !value.is_empty() && value.len() < mask::MIN_LEN {
             eprintln!(
                 "pult: warning: secret `{name}` is too short to mask in output \
                  (under {} characters)",

@@ -25,7 +25,14 @@ fn secret_param_never_reaches_events_jsonl_in_plaintext() {
     const RUN_ID: &str = "wiring-falsifier-run";
 
     let state = tempfile::tempdir().unwrap();
-    let trust_store = tempfile::tempdir().unwrap().path().join("trust.json");
+    // Bound to a named local (like `state`/`repo`) so the directory isn't
+    // deleted until the test ends — a `TempDir` dropped after `.path()` is
+    // taken (as a bare `tempfile::tempdir().unwrap().path().join(...)`
+    // expression would) removes its directory at the end of that statement,
+    // before the child process ever runs, leaving `PULT_TRUST_STORE`
+    // pointing at nothing.
+    let trust_dir = tempfile::tempdir().unwrap();
+    let trust_store = trust_dir.path().join("trust.json");
     let repo = tempfile::tempdir().unwrap();
 
     std::fs::write(

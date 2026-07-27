@@ -81,11 +81,15 @@ impl Masker {
                 }
             }
         }
-        // Longest-first: if one secret's value is a substring of another's,
-        // the longer needle must be tried first at each position, or the
-        // shorter one would match inside it and leave a mangled remainder
-        // (part marker, part leftover plaintext) instead of one clean match.
-        needles.sort_by_key(|n| std::cmp::Reverse(n.len()));
+        // Longest-first, and length alone isn't enough to dedupe on: two
+        // equal needles sorted only by length can still have other
+        // same-length (but different) needles land between them, so a plain
+        // `dedup()` (adjacent-only) could leave a duplicate in place.
+        // Breaking ties on the bytes themselves groups equal needles
+        // together first, so `dedup()` (which only needs to look at
+        // neighbors) actually removes every duplicate, not just the ones
+        // that happened to sort next to each other.
+        needles.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         needles.dedup();
         Masker(Arc::new(Inner { needles }))
     }
@@ -94,19 +98,53 @@ impl Masker {
     /// matches — the common case on the hot path of every journaled line,
     /// where the caller already pays for serde serialization and a `flush()`
     /// syscall regardless.
+    ///
+    /// Deliberately not implemented via `apply_bytes` + an unchecked UTF-8
+    /// conversion on the result: every needle is byte-for-byte a substring
+    /// of some valid UTF-8 `&str` and `MARKER` is plain ASCII, so replacing
+    /// a match can't split a multi-byte character — that reasoning is
+    /// correct, but this is the secret-handling path in the crate's own
+    /// security fix, the worst place to trade a soundness proof for a
+    /// validation pass no one has measured a need for. So this mirrors
+    /// `apply_bytes`'s algorithm at the `&str` level instead: matches are
+    /// still found byte-for-byte (needles are raw bytes), but the copy step
+    /// only ever appends whole characters, so the result is provably valid
+    /// UTF-8 by construction rather than by an unchecked assumption about
+    /// the input.
     pub fn apply<'a>(&self, s: &'a str) -> Cow<'a, str> {
-        match self.apply_bytes(s.as_bytes()) {
-            Cow::Borrowed(_) => Cow::Borrowed(s),
-            Cow::Owned(bytes) => {
-                // SAFETY: every needle is byte-for-byte a substring of some
-                // valid UTF-8 `&str` (a secret value or one `\n`-split line
-                // of one), and `s` is valid UTF-8 by the type of this
-                // parameter. Replacing an exact match of one valid-UTF-8
-                // byte sequence with another (`MARKER`, plain ASCII) can
-                // never land on or split a multi-byte boundary, so the
-                // result is valid UTF-8 too.
-                Cow::Owned(unsafe { String::from_utf8_unchecked(bytes) })
+        if self.0.needles.is_empty() {
+            return Cow::Borrowed(s);
+        }
+        let bytes = s.as_bytes();
+        let mut out: Option<String> = None;
+        let mut i = 0;
+        while i < bytes.len() {
+            let hit = self
+                .0
+                .needles
+                .iter()
+                .find(|n| bytes[i..].starts_with(n.as_slice()));
+            match hit {
+                Some(needle) => {
+                    out.get_or_insert_with(|| s[..i].to_string())
+                        .push_str(MARKER);
+                    i += needle.len();
+                }
+                None => {
+                    // Advance one whole character, never a lone byte, so
+                    // the copy below only ever appends a complete,
+                    // already-valid `&str` slice.
+                    let ch_len = s[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+                    if let Some(out) = out.as_mut() {
+                        out.push_str(&s[i..i + ch_len]);
+                    }
+                    i += ch_len;
+                }
             }
+        }
+        match out {
+            Some(v) => Cow::Owned(v),
+            None => Cow::Borrowed(s),
         }
     }
 
@@ -219,6 +257,24 @@ mod tests {
         expected.extend_from_slice(MARKER.as_bytes());
         expected.push(0xFEu8);
         assert_eq!(masked.into_owned(), expected);
+    }
+
+    /// Two equal-length needles ("bbbbbb", "aaaaaa") separated by a
+    /// duplicate of the first ("bbbbbb" again) — sorting on length alone
+    /// (with a stable sort) would leave the two "bbbbbb"s in their original,
+    /// non-adjacent order, and `dedup()` only ever looks at neighbors, so
+    /// the duplicate would survive. Breaking length ties on the bytes
+    /// themselves sorts both "bbbbbb"s next to each other regardless of
+    /// input order, so `dedup()` actually removes it — pinned here via the
+    /// needle count `Debug` reports (2, not 3).
+    #[test]
+    fn equal_length_duplicate_needles_are_still_deduped() {
+        let masker = Masker::new([
+            "bbbbbb".to_string(),
+            "aaaaaa".to_string(),
+            "bbbbbb".to_string(),
+        ]);
+        assert_eq!(format!("{masker:?}"), "Masker { secrets: 2 }");
     }
 
     #[test]
