@@ -265,6 +265,27 @@ fn resolve_manifest_command<'a>(
     })
 }
 
+/// Name a JSON value's type for an error message, never its content.
+/// `--params-json` (below) is the mechanism `docs/reference.md` recommends
+/// specifically for passing a secret without putting it in argv — so a
+/// tooling bug that sends a non-string value (`{"token": ["hunter2-…"]}`, or
+/// a bare number) must not print that value back out on the very path
+/// chosen to avoid exposure. There's no name-based slot to redact by here
+/// (this runs before `provided` even exists as param values) and no masker
+/// yet either (that's built post-`fill`, and this rejects the input before
+/// `fill` ever runs) — the only fix available at this site is to never
+/// format the value at all.
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
 /// Merge param values read from stdin (as a JSON object) into `provided`,
 /// which is already populated from positional args. Kept as a pure function so
 /// the parsing/merge rules are unit-testable without an actual stdin pipe.
@@ -296,7 +317,10 @@ fn merge_stdin_params(
             );
         }
         let s = v.as_str().with_context(|| {
-            format!("--params-json: param `{key}` must be a JSON string, got {v}")
+            format!(
+                "--params-json: param `{key}` must be a JSON string, got {}",
+                json_type_name(v)
+            )
         })?;
         if provided.contains_key(key) {
             bail!("param `{key}` was given both positionally and via --params-json — pick one");
@@ -938,6 +962,30 @@ commands:
             format!("{err:#}").contains("must be a JSON string"),
             "got: {err:#}"
         );
+    }
+
+    /// Follow-up review finding on #12's fix, same class, a fifth site:
+    /// `--params-json` is the mechanism `docs/reference.md` recommends
+    /// specifically for passing a secret without putting it in argv, so a
+    /// non-string value must never be echoed back on this path — a token
+    /// wrapped in an array by a tooling bug, say, must render as a *type*
+    /// name, not the array's contents. Reddens if `json_type_name` is
+    /// dropped in favor of `format!("... got {v}")`.
+    #[test]
+    fn merge_stdin_params_non_string_value_error_names_the_type_not_the_value() {
+        let declared = declared_params(TOKEN_CMD);
+        let mut provided = HashMap::new();
+        let secret = "hunter2-super-secret";
+        let err = merge_stdin_params(
+            &format!(r#"{{"token": ["{secret}"]}}"#),
+            &declared,
+            &mut provided,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(!msg.contains(secret), "leaked: {msg}");
+        assert!(msg.contains("must be a JSON string"), "got: {msg}");
+        assert!(msg.contains("an array"), "got: {msg}");
     }
 
     #[test]

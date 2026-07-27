@@ -93,12 +93,29 @@ pub fn resolve_pick(
         // `MIN_LEN` floor — see mask.rs's doc for why that floor exists) in
         // either half. That's the existing two-layer doctrine (see mask.rs's
         // doc comments) working as designed — don't unify them into one
-        // marker or one pass. The one residual gap this leaves: a secret
-        // under `MIN_LEN`, cross-leaked into a differently-named param,
-        // isn't caught by either pass (`redact` doesn't recognize it by
-        // name there; `masker` won't touch anything that short). That's
-        // `Masker`'s documented floor, not something to "fix" by giving
-        // `redact` one too or removing `masker`'s.
+        // marker or one pass.
+        //
+        // Two residual gaps in the value-based half specifically, both to
+        // document rather than chase (neither is fixable without real cost
+        // — see each):
+        //   - `MIN_LEN`: a secret under 6 characters, cross-leaked into a
+        //     differently-named param, isn't caught (`redact` doesn't
+        //     recognize it there by name; `masker` won't touch anything
+        //     that short). Fixing it would mean giving `redact` a floor
+        //     too, or removing `masker`'s — don't.
+        //   - Quote-mangling: `interp::interpolate` shell-quotes every
+        //     substituted value, and `shell_quote` (interp.rs) rewrites a
+        //     `'` inside a quoted value to `'\''`. A secret containing a
+        //     single quote, cross-leaked into a non-secret param, is no
+        //     longer a contiguous copy of itself by the time it's embedded
+        //     here — the needle `masker` built from the *unquoted* secret
+        //     can't match text that's since been split by an escape
+        //     sequence, so it leaks through this exact `display` route,
+        //     mangled but present. Fixing it would mean `masker` tracking
+        //     every secret's *quoted* form too (which quoting applies
+        //     depends on every other char in the value, so this is a
+        //     moving target, not a fixed second needle) — not attempted
+        //     here.
         let raw_stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = redaction.masker.apply(raw_stderr.trim_end());
         bail!(

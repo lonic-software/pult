@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
@@ -90,16 +91,21 @@ pub fn execute(
     // error text. An ephemeral `pult x` source can carry secret params and
     // render a banner too, so it needs the same masker a journaled run gets.
     let (masker, unmaskable) = build_masker(cmd, &values);
-    // Warn on every non-preview run now (this function only reaches here
-    // after the early `--print` return above), not just a journaled one.
-    // Before this PR "masking only ever happens on the `Full` journaling
-    // path" was true, and the warning was gated to match; it no longer is,
-    // now that option-source stderr/display masking runs inside `fill`
-    // itself on every live run, and the `running:` banner below is masked
-    // unconditionally too. This is a deliberate partial reversal of #11's
-    // narrower gating (filed there because warning on a run that masks
-    // nothing is noise) — the premise that justified it is what this PR
-    // falsified, not a regression to "fix" by re-narrowing the gate.
+    // Warn for every secret this run's masker can't mask — covers the
+    // `running:` banner and the journal for any run that reaches this
+    // point (this function only gets here after the early `--print` return
+    // above, so every call is a non-preview one). It does *not* cover a
+    // run that never reaches this point: a failing `pick.from` aborts
+    // inside `fill`, above, before `execute` resumes — that's exactly the
+    // #12 scenario (a too-short secret, a failing option source, the
+    // secret in stderr) — so `fill`'s own `Pick` arm calls
+    // `warn_unmaskable` too, at the one point that precedes that abort.
+    // `warn_unmaskable` dedupes by name (a process-global set) so a secret
+    // already warned about there isn't warned about again here. This is a
+    // deliberate partial reversal of #11's narrower gating (which only
+    // warned on the `Journaling::Full` path, on the premise that masking
+    // only ever happened there) — the premise that justified it is what
+    // this PR falsified, not a regression to "fix" by re-narrowing the gate.
     warn_unmaskable(&unmaskable);
 
     // Open the run journal (see journal.rs). Ephemeral `pult x` sources are
@@ -137,7 +143,11 @@ pub fn execute(
             // *different*, non-secret param, e.g. a pick source that echoed
             // it back, or a URL built from it). Neither pass alone covers
             // both leak shapes; see `options::resolve_pick`'s `display` for
-            // the same two-pass reasoning applied to option-source errors.
+            // the same two-pass reasoning applied to option-source errors,
+            // and for two residual gaps in the value-based pass (the
+            // `MIN_LEN` floor, and `shell_quote`'s quote-mangling) that
+            // apply here identically, since this goes through the same
+            // `interp::interpolate` → `shell_quote` path.
             let display = masker
                 .apply(&interp::interpolate(template, &redact(cmd, &values))?)
                 .into_owned();
@@ -218,13 +228,29 @@ fn build_masker(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> (Ma
 
 /// Cheap, honest, no knob (see `mask::MIN_LEN`'s doc comment for why there's
 /// a floor at all): one line per secret `build_masker` reports as unmaskable.
+///
+/// Idempotent per secret **name**, via a process-global set — not because a
+/// name recurs across runs (one process is one run), but because within a
+/// single run this can now legitimately be called more than once for the
+/// same name: `fill`'s `Pick` arm calls it once per dynamic picker (see that
+/// call site for why it has to), and `execute` calls it again afterward with
+/// the full post-`fill` values. Both need to fire to close the coverage gap
+/// each documents at its own call site; neither should make the user read
+/// the same warning twice.
 fn warn_unmaskable(names: &[String]) {
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut warned = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for name in names {
-        eprintln!(
-            "pult: warning: secret `{name}` is too short to mask in output \
-             (under {} characters)",
-            mask::MIN_LEN
-        );
+        if warned.insert(name.clone()) {
+            eprintln!(
+                "pult: warning: secret `{name}` is too short to mask in output \
+                 (under {} characters)",
+                mask::MIN_LEN
+            );
+        }
     }
 }
 
@@ -263,6 +289,17 @@ fn fill(
             (Some(_), ParamKind::Input(input)) if input.secret && run_dir.is_none() => {
                 format!("<{name}>")
             }
+            // Deliberate exclusion, not an oversight: if this non-secret
+            // value happens to embed a *different* param's secret (e.g. a
+            // URL the user assembled themselves before invoking pult),
+            // `compose` below applies no masking pass at all, so `--print`
+            // and the ephemeral trust prompt show it exactly as given. That's
+            // fine — the value is already sitting in the user's own argv and
+            // shell history regardless of what pult does with it — but it's
+            // an exclusion from the live-run masking this PR adds (the
+            // `running:` banner, option-source errors, picker options),
+            // which only ever applies once execution begins, not to these
+            // pre-trust previews.
             (Some(v), ParamKind::Input(_)) => v.clone(),
             // Preview: show the slot instead of prompting or shelling out.
             (None, _) if run_dir.is_none() => format!("<{name}>"),
@@ -279,14 +316,17 @@ fn fill(
                 // values up by name and skip absent ones), so this is safe
                 // per-call, not just at the end of `fill`.
                 let display_values = redact(cmd, &values);
-                let (masker, _unmaskable) = build_masker(cmd, &values);
-                // Discarding `unmaskable` here (rather than warning) is
-                // deliberate: warning on every pick resolution would be
-                // noise, and the real run-level warning already fires once,
-                // unconditionally, from the run's own masker built in
-                // `execute` above (see that call site — no longer gated on
-                // `Journaling::Full`; this PR is what stopped masking being
-                // conditional on it).
+                let (masker, unmaskable) = build_masker(cmd, &values);
+                // Warn *here*, not just at the run level in `execute` — this
+                // is the one point that precedes a failing `pick.from`
+                // aborting `fill` entirely (the #12 scenario: a too-short
+                // secret, a failing option source, the secret in stderr).
+                // `execute`'s own call happens after `fill` returns, so it
+                // never runs if this one doesn't. `warn_unmaskable` dedupes
+                // by name, so a secret already warned about here isn't
+                // warned about again at the run level (or at an earlier
+                // pick, for a command with more than one).
+                warn_unmaskable(&unmaskable);
                 let redaction = options::Redaction {
                     display_values: &display_values,
                     masker: &masker,
@@ -325,13 +365,34 @@ fn fill(
 /// fix — a dynamic source can echo a secret in a value it emits, not just in
 /// its own failure text) needs and `resolve_pick`'s return type doesn't: the
 /// value stays exactly what it was, only its rendered text changes.
+///
+/// Masks `value` and `description` **before** calling `label::option_label`,
+/// not the composed label string afterward — order matters. `option_label`
+/// (via `label::compose`) truncates a too-long description to fit `width`
+/// and appends `…`, keeping only the *head* (the value) whole; masking the
+/// already-truncated composed string would only ever see a byte-prefix of a
+/// description-borne secret, which no longer matches the full needle, so
+/// nothing gets replaced and the prefix renders in cleartext (review found
+/// this live, in an earlier revision of this function — a fixed-width test
+/// with no description couldn't catch it because truncation never
+/// triggered). Masking first means `compose` truncates an already-safe
+/// `<redacted>` marker at worst, never a raw secret fragment.
 fn masked_option_labels(
     opts: &[options::PickOption],
     masker: &Masker,
     width: usize,
 ) -> Vec<String> {
     opts.iter()
-        .map(|o| masker.apply(&label::option_label(o, width)).into_owned())
+        .map(|o| {
+            let masked = options::PickOption {
+                value: masker.apply(&o.value).into_owned(),
+                description: o
+                    .description
+                    .as_deref()
+                    .map(|d| masker.apply(d).into_owned()),
+            };
+            label::option_label(&masked, width)
+        })
         .collect()
 }
 
@@ -622,6 +683,42 @@ mod tests {
         assert!(labels[0].contains("<redacted>"), "got: {:?}", labels[0]);
         // The option itself must stay real for execution.
         assert_eq!(opts[0].value, secret);
+    }
+
+    /// Adversarial-review finding on `masked_option_labels`: `option_label`
+    /// (via `label::compose`) truncates a too-long *description* to fit
+    /// `width`, keeping the value whole. Masking the label string *after*
+    /// composing (the bug this test reddens against) only ever sees
+    /// whatever byte-prefix of a description-borne secret survived
+    /// truncation — never the full needle — so nothing matches and that
+    /// prefix renders in cleartext. The sibling test above uses width 80
+    /// and no description, so truncation never triggers and can't catch
+    /// this; this one picks a `width` deliberately too narrow to fit the
+    /// whole secret in the description, and checks every prefix of the
+    /// secret from `mask::MIN_LEN` characters up to the whole thing, not
+    /// just the full string — a partial leak is still a leak.
+    #[test]
+    fn masked_option_labels_hides_every_prefix_of_a_secret_truncated_out_of_a_description() {
+        let secret = "hunter2-super-secret"; // 20 chars
+        let opts = vec![options::PickOption {
+            value: "v".to_string(),
+            description: Some(secret.to_string()),
+        }];
+        let masker = Masker::new([secret.to_string()]);
+
+        // Narrow enough that `label::compose` must truncate the description
+        // if it were still the raw secret at that point.
+        let labels = masked_option_labels(&opts, &masker, 15);
+
+        assert_eq!(labels.len(), 1);
+        for len in mask::MIN_LEN..=secret.len() {
+            let prefix = &secret[..len];
+            assert!(
+                !labels[0].contains(prefix),
+                "leaked prefix `{prefix}` in label {:?}",
+                labels[0]
+            );
+        }
     }
 
     /// #7 review finding 1, pinned at the site it was filed against
