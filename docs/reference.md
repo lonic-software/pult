@@ -110,14 +110,40 @@ zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-eas
   CLI-provided values are **not** validated against dynamic sources.
 - `use` — must reference an existing named param, which must itself be
   concrete (a named param cannot be another `use:`).
-- `input.secret` — prompted masked (no echo into scrollback) and redacted
-  wherever the composed command line is *displayed*: the `running:` banner,
-  `--print`, and the ephemeral trust prompt show `••••••` / `<name>` instead
-  of the value. A `default:` is rejected for secrets — that would commit a
-  credential to the manifest. The value still reaches the child process argv
-  as usual; a value passed as a CLI argument also lands in your shell history
-  — prefer the prompt for anything truly sensitive, or `--params-json` (below)
-  when tooling needs to pass it non-interactively without putting it in argv.
+- `input.secret` — prompted masked (no echo into scrollback). What pult
+  displays about the value itself is covered by two different guarantees,
+  and they are not the same strength:
+  - **By name, in its own declared slot — always, no floor.** The
+    `running:` banner, `--print`, and the ephemeral trust prompt show
+    `••••••` / `<name>` there instead of the value, regardless of how
+    short it is. This doesn't reach a *different*, non-secret param that
+    happens to embed the same value — see the exclusion noted below.
+  - **By value, wherever it echoes into other text pult renders itself** —
+    a `pick.from` source's own error text (the interpolated command shown
+    and the child's stderr, on a discovery failure) and a dynamic picker's
+    rendered options (a `from:` source can echo a secret back as one of its
+    own option values, e.g. an argv-echoing CLI) are scanned for the raw
+    value and get `<redacted>` in its place. This is the same mechanism,
+    with the same bounded guarantee, as "What journaling masks, and what it
+    doesn't" below — including its 6-character floor and its blind spots
+    (encoding, case-changes, reassembly, and shell-quote escaping).
+
+  **Deliberate exclusion:** a *non-secret* param whose value happens to
+  embed a different param's secret (e.g. a URL you assembled yourself
+  before invoking pult) is shown as given by `--print` and the trust
+  prompt — those previews run no masking pass at all. Defensible, not an
+  oversight: the value is already sitting in your own argv and shell
+  history regardless of what pult does with it, and the live-run masking
+  above only ever applies once execution begins.
+
+  A `default:` is rejected for secrets — that would commit a credential to
+  the manifest. The value still reaches the child process argv as usual; a
+  value passed as a CLI argument also lands in your shell history — prefer
+  the prompt for anything truly sensitive, or `--params-json` (below) when
+  tooling needs to pass it non-interactively without putting it in argv.
+  (`--params-json` rejects a non-string param value outright, and names
+  only its JSON type in the error, never its content — so a tooling bug
+  that wraps a secret in an array, say, doesn't itself become the leak.)
 
   **What journaling masks, and what it doesn't.** Journaling is on by
   default for a non-interactive, non-ephemeral run (see `pult runs list`/
@@ -129,19 +155,33 @@ zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-eas
   value **6 characters or longer** is replaced with the literal
   `<redacted>`, with each line of a multi-line value matched separately.
   Not recognized: the value base64-encoded, hex-encoded, URL-encoded,
-  case-changed, or reassembled a piece at a time across separate lines. A
-  value under 6 characters is never masked (pult warns at start, on a run
-  where masking would otherwise apply, when one is). Never masked, because
-  pult never sees the output to mask it: an interactive command's stdio, a
-  run journaled as `MetaOnly` or not journaled at all, and — even on an
-  otherwise-fully-journaled run — anything a child writes over
-  `PULT_EVENTS` when a parent process already owns that channel (pult's
-  documented passthrough case: the child's `progress`/`status` lines go
-  straight to the ancestor that owns the fd, so pult's masking never runs
-  on them). Treat this as scrubbing of verbatim reflections, **not a
-  security boundary**: a script that transforms a secret before printing it
-  (encodes it, echoes half of it, wraps it in other text a character at a
-  time) still leaks it.
+  case-changed, or reassembled a piece at a time across separate lines —
+  or, specific to the by-value masking described above, rewritten by
+  pult's own shell-quoting first (a secret containing a `'`, cross-leaked
+  into a non-secret param, is quote-escaped by the time it's embedded in
+  displayed text and no longer matches itself byte-for-byte). A value
+  under 6 characters is never masked; pult warns once per secret name,
+  before showing anything that depends on masking it, not only at a run's
+  very end.
+
+  An interactive command owns its stdio directly — that's what `MetaOnly`
+  journaling means: no output is ever captured, so none is ever masked
+  either. Its `meta.json` audit record still gets the same by-name and
+  by-value masking as any journaled run, though — that part isn't
+  output-dependent. A run that isn't journaled at all (`PULT_JOURNAL=0`,
+  no state dir, non-unix) skips the journal and its masking entirely, but
+  only for the child's *own* output — the `running:` banner, a
+  `pick.from` source's own error text, and a dynamic picker's rendered
+  options are still masked regardless (see above), because that masking
+  happens where the value is filled in, before a journal, if any, ever
+  opens. And even on an otherwise-fully-journaled run, anything a child
+  writes over `PULT_EVENTS` when a parent process already owns that
+  channel is never masked (pult's documented passthrough case: the
+  child's `progress`/`status` lines go straight to the ancestor that owns
+  the fd, so pult's masking never runs on them). Treat all of this as
+  scrubbing of verbatim reflections, **not a security boundary**: a script
+  that transforms a secret before printing it (encodes it, echoes half of
+  it, wraps it in other text a character at a time) still leaks it.
 
 ### `<step>`
 
