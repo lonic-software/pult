@@ -30,6 +30,15 @@
 //!   child exited) are dropped, so readers can treat `exit` as the last
 //!   record of a completed run.
 
+// M4: journaling is off entirely on non-unix targets (`Journal::start`'s
+// `#[cfg(not(unix))]` arm always returns `None`), so on those targets
+// everything downstream — `start_at`, `event`, `Meta`/`StartInfo`'s fields,
+// `process_group`, the lot — is compiled but genuinely unreachable. `allow`
+// only there, never on unix (where this module is live and dead-code
+// detection should stay fully armed): this is expected to become vestigial
+// once journaling reaches Windows (issue #8).
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -147,7 +156,7 @@ impl Journal {
         #[cfg(not(unix))]
         {
             let _ = info;
-            return None;
+            None
         }
         #[cfg(unix)]
         {
