@@ -34,7 +34,9 @@
 //!   `Progress`/`Status`/`Step` text) if the child prints it back — masking
 //!   happens once, at `append_locked`, for every writer (see its comment).
 //!   A masked record's `text` (or `Step.name`) may therefore contain the
-//!   literal `"<redacted>"` in place of the original substring.
+//!   literal `"<redacted>"` in place of the original substring. `meta.json`
+//!   is a second durable file outside that choke point (see `Meta.params`'
+//!   doc comment) — its values are masked once, at `start_at`.
 
 // M4: journaling is off entirely on non-unix targets (`Journal::start`'s
 // `#[cfg(not(unix))]` arm always returns `None`), so on those targets
@@ -76,16 +78,21 @@ pub struct Meta {
     pub manifest: PathBuf,
     pub command_id: String,
     pub command_title: String,
-    /// Pre-redacted by the caller: secret params arrive here as the literal
-    /// `"<redacted>"`. This field is `exec.rs`'s audit record of *what pult
-    /// itself was asked to run* — a different concern from `Masker`, below,
-    /// which masks what the *child* prints. Values reach this module only
-    /// sealed inside a `Masker`, which can replace an occurrence in text but
-    /// never expose it: it isn't `Serialize`, its `Debug` never prints a
-    /// value, and nothing in `Inner` outside it holds a secret. So the
-    /// stronger invariant is: the caller pre-redacts what it records about
-    /// itself; this module masks what a child says, and can only ever do
-    /// that through `Masker::apply`/`apply_bytes`.
+    /// Pre-redacted by the caller for params *declared* `secret: true`:
+    /// those arrive here as the literal `"<redacted>"` — `exec.rs`'s audit
+    /// record of *what pult itself was asked to run*. That alone doesn't
+    /// close every leak, though: a secret's value can still show up in a
+    /// *different*, non-secret param's value (`--token=X --url=.../X`), so
+    /// `start_at` additionally runs every value here through the run's
+    /// `Masker` before this struct is ever serialized — the same masking
+    /// `append_locked` applies to `events.jsonl`, applied here once, at
+    /// construction, to this second durable file. Values reach this module
+    /// only sealed inside a `Masker`, which can replace an occurrence in
+    /// text but never expose it: it isn't `Serialize`, its `Debug` never
+    /// prints a value, and nothing in `Inner` outside it holds a secret. So
+    /// the invariant is: the caller pre-redacts what it *declares* about
+    /// itself, and this module masks what ends up here regardless — and can
+    /// only ever do that through `Masker::apply`/`apply_bytes`.
     pub params: IndexMap<String, String>,
     /// `"cli"`, `"desktop"`, … — informational in schema 1 (`PULT_ORIGIN`
     /// env, set by wrapping surfaces; defaults to `"cli"`).
@@ -240,7 +247,7 @@ impl Journal {
         fs::create_dir(&run_dir)
             .with_context(|| format!("failed to create run dir {}", run_dir.display()))?;
 
-        let meta = Meta {
+        let mut meta = Meta {
             schema: SCHEMA,
             run_id,
             repo_dir,
@@ -258,6 +265,16 @@ impl Journal {
             exit_code: None,
             ended_at: None,
         };
+        // `journal_params` (exec.rs) only pre-redacts params *declared*
+        // `secret: true` — a secret value copy-pasted into a different,
+        // non-secret param (`--token=X --url=https://svc/X`) would
+        // otherwise sit in `meta.json` in plaintext for the whole retention
+        // window, a second durable file entirely outside `append_locked`'s
+        // choke point. Masking here, once, at construction, closes that:
+        // `finish` only ever rewrites this same `Meta` (mutating `status`/
+        // `exit_code`/`ended_at`, never `params`), so there is no second
+        // place `params` needs re-masking.
+        mask_params(&info.masker, &mut meta.params);
 
         let meta_path = run_dir.join("meta.json");
         write_meta(&meta_path, &meta)?;
@@ -398,6 +415,20 @@ fn mask_value_strings(masker: &Masker, value: &mut serde_json::Value) {
             }
         }
         serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {}
+    }
+}
+
+/// Mask every value in `params` in place — the `Meta.params` counterpart to
+/// `mask_value_strings`. `journal_params` (`exec.rs`) only pre-redacts
+/// params *declared* `secret: true`; this catches the same secret value
+/// showing up in a *different*, non-secret param's value before `meta.json`
+/// (a second durable file, entirely outside `append_locked`'s choke point)
+/// is ever written.
+fn mask_params(masker: &Masker, params: &mut IndexMap<String, String>) {
+    for v in params.values_mut() {
+        if let Cow::Owned(masked) = masker.apply(v) {
+            *v = masked;
+        }
     }
 }
 
@@ -681,6 +712,58 @@ mod tests {
         assert!(lines[2]["text"].as_str().unwrap().contains("<redacted>"));
         assert_eq!(lines[3]["kind"], "step");
         assert!(lines[3]["name"].as_str().unwrap().contains("<redacted>"));
+    }
+
+    /// #7 review finding 3: `meta.json` is a second durable file entirely
+    /// outside `append_locked`'s choke point, and `journal_params`
+    /// (`exec.rs`) only pre-redacts params *declared* `secret: true` — so a
+    /// secret value copy-pasted into a *different*, non-secret param (e.g.
+    /// `--token=X --url=https://svc/X`) used to sit in `meta.json` in
+    /// plaintext for the whole retention window even though `token` itself
+    /// came in pre-redacted. Read back from disk, like the choke-point test
+    /// above. Goes red if the `mask_params` call is removed from `start_at`.
+    #[test]
+    fn meta_json_masks_a_secret_leaked_into_a_different_non_secret_param() {
+        const SECRET: &str = "s3cret-value-x";
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let manifest = repo.path().join("pult.yaml");
+        let mut i = info(repo.path(), &manifest);
+        i.masker = Masker::new([SECRET.to_string()]);
+        let mut params = IndexMap::new();
+        // `token` is the declared secret: pre-redacted by the caller
+        // already, same as `journal_params` would produce.
+        params.insert("token".to_string(), "<redacted>".to_string());
+        // `url` is a plain, non-secret param whose value happens to embed
+        // the same secret — the leak `journal_params`'s declared-secret-only
+        // check can't catch, and `mask_params` must.
+        params.insert("url".to_string(), format!("https://svc/{SECRET}"));
+        i.params = params;
+        let journal = Journal::start_at(state.path(), i).unwrap();
+        journal.finish(Some(0), false);
+
+        let canonical = fs::canonicalize(repo.path()).unwrap();
+        let run_dir = fs::read_dir(
+            state
+                .path()
+                .join("repos")
+                .join(repo_key(&canonical))
+                .join("runs"),
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+        let meta_json = fs::read_to_string(run_dir.join("meta.json")).unwrap();
+        assert!(
+            !meta_json.contains(SECRET),
+            "plaintext secret leaked into meta.json via a non-secret param: {meta_json}"
+        );
+        assert!(
+            meta_json.contains("<redacted>"),
+            "expected the marker in meta.json: {meta_json}"
+        );
     }
 
     #[test]

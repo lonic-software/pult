@@ -93,7 +93,7 @@ pub fn execute(
         // Post-`fill`, so an interactively prompted secret (not just one
         // supplied on the command line) is covered — `fill` above already
         // ran before this point.
-        let masker = build_masker(cmd, &values);
+        let (masker, unmaskable) = build_masker(cmd, &values);
         let journal = journal::Journal::start(journal::StartInfo {
             repo_dir: &resolved.dir,
             manifest: &resolved.path,
@@ -106,7 +106,17 @@ pub fn execute(
         });
         match journal {
             Some(j) if cmd.interactive => Journaling::MetaOnly(j),
-            Some(j) => Journaling::Full(j, masker),
+            Some(j) => {
+                // Warn only here: masking only ever happens on the `Full`
+                // path (non-interactive, successfully journaled). Warning
+                // on `MetaOnly` (interactive — the child owns stdio, pult
+                // never sees output to mask) or `Off`/no-journal
+                // (`PULT_JOURNAL=0`, no state dir, non-unix) would tell the
+                // user a secret is "too short to mask" on a run where
+                // nothing is ever masked regardless of its length.
+                warn_unmaskable(&unmaskable);
+                Journaling::Full(j, masker)
+            }
             None => Journaling::Off,
         }
     };
@@ -171,28 +181,36 @@ fn redact(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> IndexMap<
     out
 }
 
-/// Build the run's `Masker` from post-`fill` secret values, warning once per
-/// value that's too short to ever be masked (cheap, honest, no knob — see
-/// `mask::MIN_LEN`'s doc comment for why there's a floor at all). An empty
-/// value is exempted: there's nothing in it to leak, so warning about it
-/// would just be noise on any optional secret the user left unset.
-fn build_masker(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Masker {
-    let secrets: Vec<(&str, &str)> = cmd
+/// Build the run's `Masker` from post-`fill` secret values, returning
+/// alongside it the name of every secret `Masker::from_named` reports as
+/// producing no maskable segment at all. Deliberately does *not* decide for
+/// itself which values are "too short" — that would be exactly the drift
+/// this fixes (`build_masker` used to run its own whole-value length check,
+/// a different rule from what `Masker::from_named` actually splits and
+/// filters per line; a multi-line value whose every individual line was too
+/// short passed the whole-value check while masking nothing). One rule,
+/// derived from what construction actually did; the caller (`execute`,
+/// above) decides *whether* to warn from it.
+fn build_masker(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> (Masker, Vec<String>) {
+    let secrets: Vec<(String, String)> = cmd
         .params
         .iter()
         .filter(|(_, def)| is_secret(def))
-        .filter_map(|(name, _)| values.get(name).map(|v| (name.as_str(), v.as_str())))
+        .filter_map(|(name, _)| values.get(name).map(|v| (name.clone(), v.clone())))
         .collect();
-    for (name, value) in &secrets {
-        if !value.is_empty() && value.len() < mask::MIN_LEN {
-            eprintln!(
-                "pult: warning: secret `{name}` is too short to mask in output \
-                 (under {} characters)",
-                mask::MIN_LEN
-            );
-        }
+    Masker::from_named(secrets)
+}
+
+/// Cheap, honest, no knob (see `mask::MIN_LEN`'s doc comment for why there's
+/// a floor at all): one line per secret `build_masker` reports as unmaskable.
+fn warn_unmaskable(names: &[String]) {
+    for name in names {
+        eprintln!(
+            "pult: warning: secret `{name}` is too short to mask in output \
+             (under {} characters)",
+            mask::MIN_LEN
+        );
     }
-    Masker::new(secrets.into_iter().map(|(_, v)| v.to_string()))
 }
 
 /// Fill a command's params in declared order. `run_dir: None` = **preview**:
@@ -421,5 +439,28 @@ mod tests {
         assert!(!display.contains("hunter2"), "leaked: {display}");
         assert!(display.contains("••••••"), "got: {display}");
         assert!(display.contains("--region us"), "got: {display}");
+    }
+
+    /// #7 review finding 1, pinned at the site it was filed against
+    /// (`build_masker`, formerly `exec.rs:187`): a multi-line secret whose
+    /// every individual line is too short to mask must be reported
+    /// unmaskable, even though the *whole* value (joined with `\n`) is long
+    /// enough that a naive whole-value length check — the rule
+    /// `build_masker` used to apply, independently of what `Masker`
+    /// actually does with the value — would miss it entirely. Reddens if
+    /// `build_masker` goes back to deciding "too short" itself instead of
+    /// reading it off `Masker::from_named`'s own result.
+    #[test]
+    fn build_masker_reports_a_multiline_secret_whose_every_line_is_too_short() {
+        let (_d, resolved) = secret_cmd();
+        let cmd = &resolved.commands[0];
+        let values: IndexMap<_, _> = [
+            ("token".to_string(), "ab\ncd\nef".to_string()),
+            ("region".to_string(), "us".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let (_masker, unmaskable) = build_masker(cmd, &values);
+        assert_eq!(unmaskable, vec!["token".to_string()]);
     }
 }

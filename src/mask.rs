@@ -14,11 +14,18 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// Values shorter than this are never masked. Masking `eu`, `dev`, `true`,
-/// or `0` would shred unrelated output that merely happens to contain a
-/// short secret's characters as a substring; this is the same floor CI
-/// secret-masking (e.g. GitHub Actions) uses, and the only property of a
-/// value usable to decide "mask this" without interpreting it.
+/// Values shorter than this many **characters** are never masked. Masking
+/// `eu`, `dev`, `true`, or `0` would shred unrelated output that merely
+/// happens to contain a short secret's characters as a substring; this is
+/// the same floor CI secret-masking (e.g. GitHub Actions) uses, and the only
+/// property of a value usable to decide "mask this" without interpreting
+/// it. Characters, deliberately, not bytes: the floor exists to protect
+/// short *values*, and a user reasoning about their own secret counts
+/// characters — counting bytes instead would let a short non-ASCII value
+/// slip under the floor (`"パス"` is 2 characters but 6 UTF-8 bytes) and get
+/// masked anyway, shredding every unrelated occurrence of those two
+/// characters in child output — exactly the failure this floor exists to
+/// prevent.
 pub const MIN_LEN: usize = 6;
 
 /// The fixed, machine-recognizable marker a match is replaced with — already
@@ -50,35 +57,70 @@ const MARKER: &str = "<redacted>";
 pub struct Masker(Arc<Inner>);
 
 struct Inner {
-    /// Longest-first byte needles — see `Masker::new` for why both the
+    /// Longest-first byte needles — see `Masker::from_named` for why both the
     /// ordering and the per-line split matter.
     needles: Vec<Vec<u8>>,
 }
 
 impl Masker {
-    /// Build a masker from raw secret values. Each value is split on `\n`
-    /// first — a multi-line secret (a PEM body, say) is masked line by line
-    /// rather than as one contiguous span, the same way GitHub Actions masks
-    /// multi-line secrets. This is a construction-time decision, not a
-    /// buffering one: `tee` and `Journal::append_locked` each see one
-    /// already-decoded chunk of text at a time and must decide on the spot,
-    /// so there is no cross-line window here to hold a line back waiting for
-    /// the rest of a secret to arrive — that would conflict with the
-    /// journal-first liveness reasoning in `runner.rs` (see the comment
-    /// above `tee`) and its bounded drain deadline, trading a documented,
-    /// minor gap (a secret split by a line break in the *middle* of one of
-    /// its lines can't be caught) for a new class of lost-record bugs.
-    ///
-    /// Segments under `MIN_LEN` are dropped silently here (`exec.rs` is
-    /// responsible for warning about them — it's the only caller with the
-    /// param name to name in the warning).
+    /// Test-only convenience constructor for callers with no need to know
+    /// which (if any) secrets produced no maskable segment at all — every
+    /// test in this module, plus `journal.rs`'s and `runner.rs`'s. The one
+    /// production caller, `exec.rs`'s `build_masker`, needs the unmaskable
+    /// list (that's the whole point of #7's review finding 1) and calls
+    /// [`Masker::from_named`] directly; delegating to it here too keeps the
+    /// one algorithm that decides what's maskable in exactly one place —
+    /// unnamed secrets here just can't be named in the (discarded)
+    /// unmaskable list.
+    #[cfg(test)]
     pub fn new(secrets: impl IntoIterator<Item = String>) -> Masker {
+        Self::from_named(secrets.into_iter().map(|v| (String::new(), v))).0
+    }
+
+    /// Build a masker from **named** secret values, returning alongside it
+    /// the name of every secret that produced no maskable segment at all —
+    /// the one place that decides both what gets masked and what a caller
+    /// should warn about, so those two decisions can't drift apart (they
+    /// used to: `exec.rs`'s warning independently checked a whole value's
+    /// *byte* length, which is a different rule from what this function
+    /// actually does — a multi-line value whose every individual line was
+    /// too short, e.g. `"ab\ncd\nef"`, passed that separate check at 8 bytes
+    /// while this function masked nothing, so the warning never fired for
+    /// the one case it exists for).
+    ///
+    /// Each value is split on `\n` first — a multi-line secret (a PEM body,
+    /// say) is masked line by line rather than as one contiguous span, the
+    /// same way GitHub Actions masks multi-line secrets. This is a
+    /// construction-time decision, not a buffering one: `tee` and
+    /// `Journal::append_locked` each see one already-decoded chunk of text
+    /// at a time and must decide on the spot, so there is no cross-line
+    /// window here to hold a line back waiting for the rest of a secret to
+    /// arrive — that would conflict with the journal-first liveness
+    /// reasoning in `runner.rs` (see the comment above `tee`) and its
+    /// bounded drain deadline, trading a documented, minor gap (a secret
+    /// split by a line break in the *middle* of one of its lines can't be
+    /// caught) for a new class of lost-record bugs. A wholly empty value
+    /// produces no needles but is also never reported unmaskable — there is
+    /// nothing in it to leak, so warning about it would be noise on any
+    /// optional secret a caller left unset.
+    pub fn from_named(
+        secrets: impl IntoIterator<Item = (String, String)>,
+    ) -> (Masker, Vec<String>) {
         let mut needles: Vec<Vec<u8>> = Vec::new();
-        for secret in secrets {
+        let mut unmaskable = Vec::new();
+        for (name, secret) in secrets {
+            if secret.is_empty() {
+                continue;
+            }
+            let mut any = false;
             for line in secret.split('\n') {
-                if line.len() >= MIN_LEN {
+                if line.chars().count() >= MIN_LEN {
                     needles.push(line.as_bytes().to_vec());
+                    any = true;
                 }
+            }
+            if !any {
+                unmaskable.push(name);
             }
         }
         // Longest-first, and length alone isn't enough to dedupe on: two
@@ -91,7 +133,7 @@ impl Masker {
         // that happened to sort next to each other.
         needles.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         needles.dedup();
-        Masker(Arc::new(Inner { needles }))
+        (Masker(Arc::new(Inner { needles })), unmaskable)
     }
 
     /// Mask `s`, returning it unchanged (`Cow::Borrowed`) when nothing
@@ -257,6 +299,45 @@ mod tests {
         expected.extend_from_slice(MARKER.as_bytes());
         expected.push(0xFEu8);
         assert_eq!(masked.into_owned(), expected);
+    }
+
+    /// #7 review finding 1: a multi-line secret whose every individual line
+    /// is under `MIN_LEN`, even though the whole (joined-with-`\n`) value
+    /// isn't. `exec.rs`'s warning used to check the whole value's length —
+    /// a different rule from what construction actually splits and filters
+    /// per line — so this case (8 bytes total, but each of "ab"/"cd"/"ef" is
+    /// only 2 characters) used to mask nothing while warning nothing.
+    /// `from_named` must report the param unmaskable here, and genuinely
+    /// mask nothing.
+    #[test]
+    fn multiline_value_whose_every_line_is_individually_too_short_is_unmaskable() {
+        let (masker, unmaskable) =
+            Masker::from_named([("token".to_string(), "ab\ncd\nef".to_string())]);
+        assert_eq!(unmaskable, vec!["token".to_string()]);
+        assert_eq!(
+            masker.apply("ab cd ef"),
+            Cow::Borrowed("ab cd ef"),
+            "no individual line meets MIN_LEN, so nothing should be masked"
+        );
+    }
+
+    /// #7 review finding 2: the floor is a **character** count, not a byte
+    /// count. `"パス"` is 2 characters but 6 UTF-8 bytes — under the old
+    /// byte-counting rule it would cross `MIN_LEN` and get masked, shredding
+    /// every unrelated occurrence of those two characters in child output
+    /// (exactly the failure the floor exists to prevent), with no warning
+    /// either since the byte length also looked long enough.
+    #[test]
+    fn short_non_ascii_value_is_not_masked_despite_being_six_bytes() {
+        let secret = "パス".to_string();
+        assert_eq!(secret.chars().count(), 2);
+        assert_eq!(secret.len(), 6, "sanity: 2 characters, 6 UTF-8 bytes");
+        let (masker, unmaskable) = Masker::from_named([("token".to_string(), secret)]);
+        assert_eq!(unmaskable, vec!["token".to_string()]);
+        assert_eq!(
+            masker.apply("パスワード忘れた"),
+            Cow::Borrowed("パスワード忘れた")
+        );
     }
 
     /// Two equal-length needles ("bbbbbb", "aaaaaa") separated by a

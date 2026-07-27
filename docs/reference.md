@@ -122,20 +122,26 @@ zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-eas
   **What journaling masks, and what it doesn't.** Journaling is on by
   default for a non-interactive, non-ephemeral run (see `pult runs list`/
   `pult runs tail`) and also masks a secret's value wherever a *child*
-  prints it back — in the retained `events.jsonl` for that run, and in the
-  copy forwarded to your terminal. The guarantee is bounded, not complete:
-  an exact occurrence of a secret value **6 characters or longer** is
-  replaced with the literal `<redacted>`, with each line of a multi-line
-  value matched separately. Not recognized: the value base64-encoded,
-  hex-encoded, URL-encoded, case-changed, or reassembled a piece at a time
-  across separate lines. A value under 6 characters is never masked (pult
-  warns at start when one is). Output pult never sees at all — an
-  interactive command's stdio, or any run journaled as `MetaOnly`/not
-  journaled at all — is never masked, because there is nothing for pult to
-  mask. Treat this as scrubbing of verbatim reflections, **not a security
-  boundary**: a script that transforms a secret before printing it (encodes
-  it, echoes half of it, wraps it in other text a character at a time)
-  still leaks it.
+  prints it back — in the retained `events.jsonl` for that run (including
+  `meta.json`'s own audit record, if the same value shows up in an
+  unrelated, non-secret param), and in the copy forwarded to your terminal.
+  The guarantee is bounded, not complete: an exact occurrence of a secret
+  value **6 characters or longer** is replaced with the literal
+  `<redacted>`, with each line of a multi-line value matched separately.
+  Not recognized: the value base64-encoded, hex-encoded, URL-encoded,
+  case-changed, or reassembled a piece at a time across separate lines. A
+  value under 6 characters is never masked (pult warns at start, on a run
+  where masking would otherwise apply, when one is). Never masked, because
+  pult never sees the output to mask it: an interactive command's stdio, a
+  run journaled as `MetaOnly` or not journaled at all, and — even on an
+  otherwise-fully-journaled run — anything a child writes over
+  `PULT_EVENTS` when a parent process already owns that channel (pult's
+  documented passthrough case: the child's `progress`/`status` lines go
+  straight to the ancestor that owns the fd, so pult's masking never runs
+  on them). Treat this as scrubbing of verbatim reflections, **not a
+  security boundary**: a script that transforms a secret before printing it
+  (encodes it, echoes half of it, wraps it in other text a character at a
+  time) still leaks it.
 
 ### `<step>`
 
