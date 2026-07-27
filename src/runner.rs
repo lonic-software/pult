@@ -5,7 +5,9 @@ use std::process::Command;
 use anyhow::Context;
 use anyhow::Result;
 
+use crate::events::Event;
 use crate::journal::Journal;
+use crate::mask::Masker;
 
 /// How a run relates to the run journal (see journal.rs / the run-journal
 /// spec). Decided by the caller (exec.rs), not here:
@@ -18,18 +20,26 @@ use crate::journal::Journal;
 ///   so pult can't see output to journal it. Same inherited-stdio
 ///   execution as `Off`; the journal records meta + the final exit only.
 /// - `Full` — non-interactive commands: the child's stdout/stderr become
-///   pipes pult tees through itself (bytes forwarded unchanged, each line
-///   journaled), and pult claims the `PULT_EVENTS` channel whenever it's
-///   free — even with no terminal attached, which is new: the journal is
-///   now a consumer of step/progress/status regardless of who's watching.
-///   The tradeoff, documented rather than hidden: the child sees a pipe,
-///   not a tty, so tools that sniff `isatty` drop color/live-progress
-///   output. `interactive: true` remains the escape hatch for anything
-///   that genuinely needs the terminal.
+///   pipes pult tees through itself (bytes forwarded unchanged unless a
+///   secret param's value appears, in which case both the forwarded and
+///   journaled copies mask it — see `mask.rs`), and pult claims the
+///   `PULT_EVENTS` channel whenever it's free — even with no terminal
+///   attached, which is new: the journal is now a consumer of
+///   step/progress/status regardless of who's watching. The tradeoff,
+///   documented rather than hidden: the child sees a pipe, not a tty, so
+///   tools that sniff `isatty` drop color/live-progress output.
+///   `interactive: true` remains the escape hatch for anything that
+///   genuinely needs the terminal.
 pub enum Journaling {
     Off,
     MetaOnly(Journal),
-    Full(Journal),
+    /// The `Masker` alongside the journal is the same instance `exec.rs`
+    /// already handed to the journal itself (see `journal::StartInfo`) —
+    /// `Full` needs its own clone because `tee` and the events-reader
+    /// closure mask their own copies of a child's output before forwarding
+    /// or rendering it, a step the journal's own masking (at
+    /// `Journal::append_locked`) can't reach into.
+    Full(Journal, Masker),
 }
 
 /// Run a plain command line via `sh -c`. Interactive sessions (e.g. `aws
@@ -78,16 +88,18 @@ fn execute(command: &mut Command, what: &str, journaling: Journaling) -> Result<
                 }
             }
         }
-        Journaling::Full(journal) => match journaled::execute(command, what, &journal) {
-            Ok((code, stopped)) => {
-                journal.finish(Some(code), stopped);
-                Ok(code)
+        Journaling::Full(journal, masker) => {
+            match journaled::execute(command, what, &journal, &masker) {
+                Ok((code, stopped)) => {
+                    journal.finish(Some(code), stopped);
+                    Ok(code)
+                }
+                Err(e) => {
+                    journal.finish(None, false);
+                    Err(e)
+                }
             }
-            Err(e) => {
-                journal.finish(None, false);
-                Err(e)
-            }
-        },
+        }
     }
 }
 
@@ -120,11 +132,13 @@ mod journaled {
     use anyhow::{Context, Result};
 
     use crate::journal::Journal;
+    use crate::mask::Masker;
 
     pub(super) fn execute(
         command: &mut Command,
         what: &str,
         journal: &Journal,
+        masker: &Masker,
     ) -> Result<(i32, bool)> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -138,7 +152,8 @@ mod journaled {
         #[cfg(unix)]
         super::events_unix::install_stop_flag();
         #[cfg(unix)]
-        let events = super::events_unix::claim_events_channel(command, journal.clone());
+        let events =
+            super::events_unix::claim_events_channel(command, journal.clone(), masker.clone());
 
         let spawn_result = command.spawn();
         #[cfg(unix)]
@@ -166,15 +181,21 @@ mod journaled {
         let err_done = Arc::new(AtomicBool::new(false));
         if let Some(stdout) = child.stdout.take() {
             let journal = journal.clone();
+            let masker = masker.clone();
             let done = Arc::clone(&out_done);
-            std::thread::spawn(move || tee(stdout, std::io::stdout(), journal, "stdout", done));
+            std::thread::spawn(move || {
+                tee(stdout, std::io::stdout(), journal, &masker, "stdout", done)
+            });
         } else {
             out_done.store(true, Ordering::Relaxed);
         }
         if let Some(stderr) = child.stderr.take() {
             let journal = journal.clone();
+            let masker = masker.clone();
             let done = Arc::clone(&err_done);
-            std::thread::spawn(move || tee(stderr, std::io::stderr(), journal, "stderr", done));
+            std::thread::spawn(move || {
+                tee(stderr, std::io::stderr(), journal, &masker, "stderr", done)
+            });
         } else {
             err_done.store(true, Ordering::Relaxed);
         }
@@ -229,10 +250,21 @@ mod journaled {
     /// pass, `finish` would latch, and that line would never be journaled
     /// even though the run recorded a clean exit. Journaling first means
     /// the record is safe before a blocked `out` can do any damage.
+    ///
+    /// The mask runs here, inside `tee` itself, on `buf` — not at a call
+    /// site — deliberately: `tee`'s own tests drive it directly, so masking
+    /// at the call site would leave those tests silently stale-green if the
+    /// masking were ever removed. Both the journaled copy and the forwarded
+    /// copy come from the *same* masked result, so a secret can't leak
+    /// through one while the other is clean. Only rewritten when a match
+    /// exists — `Masker::apply_bytes` returns the original bytes unchanged
+    /// otherwise, so a line with no secret in it forwards byte-identical,
+    /// invalid UTF-8 and bare `\r` included.
     fn tee(
         reader: impl Read,
         mut out: impl Write,
         journal: Journal,
+        masker: &Masker,
         stream: &'static str,
         done: Arc<AtomicBool>,
     ) {
@@ -243,9 +275,10 @@ mod journaled {
             match reader.read_until(b'\n', &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    let text = String::from_utf8_lossy(&buf);
+                    let masked = masker.apply_bytes(&buf);
+                    let text = String::from_utf8_lossy(&masked);
                     journal.line(stream, text.trim_end_matches(['\n', '\r']));
-                    let _ = out.write_all(&buf);
+                    let _ = out.write_all(&masked);
                     let _ = out.flush();
                 }
             }
@@ -258,6 +291,7 @@ mod journaled {
         use super::*;
         use crate::journal::{StartInfo, repo_key};
         use indexmap::IndexMap;
+        use std::sync::Mutex;
         use std::time::Instant;
 
         // M2 (the events reader thread's done flag, wired through
@@ -332,6 +366,7 @@ mod journaled {
                     params: IndexMap::new(),
                     interactive: false,
                     run_id: None,
+                    masker: Masker::new(std::iter::empty::<String>()),
                 },
             )
             .unwrap();
@@ -339,8 +374,16 @@ mod journaled {
             let (reader, mut writer) = std::io::pipe().unwrap();
             let done = Arc::new(AtomicBool::new(false));
             let journal_thread = journal.clone();
+            let masker = Masker::new(std::iter::empty::<String>());
             std::thread::spawn(move || {
-                tee(reader, BlockingWriter, journal_thread, "stdout", done);
+                tee(
+                    reader,
+                    BlockingWriter,
+                    journal_thread,
+                    &masker,
+                    "stdout",
+                    done,
+                );
             });
             writer.write_all(b"straggler line\n").unwrap();
             // `writer` stays alive (not dropped) for the rest of the test —
@@ -379,6 +422,146 @@ mod journaled {
             );
         }
 
+        /// A `Write` that appends every call's bytes into a shared buffer —
+        /// stands in for the forwarding side of `tee` so a test can inspect
+        /// exactly what reached "the terminal" (never the child's real
+        /// stdout/stderr in a unit test).
+        #[derive(Clone)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// #7's tee falsifier: a secret written by the child must be masked
+        /// in *both* copies `tee` produces — the journaled line and the
+        /// forwarded bytes — not just one of them. Goes red if the
+        /// `masker.apply_bytes` call in `tee` is removed: the plaintext
+        /// would show up in `events.jsonl`, in `forwarded`, or both.
+        #[test]
+        fn tee_masks_secret_in_both_journaled_and_forwarded_copies() {
+            const SECRET: &str = "sekrit-value-0007";
+            let state = tempfile::tempdir().unwrap();
+            let repo = tempfile::tempdir().unwrap();
+            let manifest = repo.path().join("pult.yaml");
+            let masker = Masker::new([SECRET.to_string()]);
+            let journal = Journal::start_at(
+                state.path(),
+                StartInfo {
+                    repo_dir: repo.path(),
+                    manifest: &manifest,
+                    command_id: "deploy",
+                    command_title: "Deploy",
+                    params: IndexMap::new(),
+                    interactive: false,
+                    run_id: None,
+                    masker: masker.clone(),
+                },
+            )
+            .unwrap();
+
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            let forwarded = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+            let forwarded_out = forwarded.clone();
+            let done = Arc::new(AtomicBool::new(false));
+            let handle = std::thread::spawn(move || {
+                tee(reader, forwarded_out, journal, &masker, "stdout", done);
+            });
+            writer
+                .write_all(format!("leaking {SECRET} here\n").as_bytes())
+                .unwrap();
+            drop(writer); // EOF — lets the tee thread's loop exit.
+            handle.join().unwrap();
+
+            let forwarded_bytes = forwarded.0.lock().unwrap().clone();
+            let forwarded_text = String::from_utf8_lossy(&forwarded_bytes);
+            assert!(
+                !forwarded_text.contains(SECRET),
+                "secret leaked into forwarded output: {forwarded_text}"
+            );
+            assert!(
+                forwarded_text.contains("<redacted>"),
+                "expected the marker in forwarded output: {forwarded_text}"
+            );
+
+            let canonical = std::fs::canonicalize(repo.path()).unwrap();
+            let run_dir = std::fs::read_dir(
+                state
+                    .path()
+                    .join("repos")
+                    .join(repo_key(&canonical))
+                    .join("runs"),
+            )
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+            let events = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
+            assert!(
+                !events.contains(SECRET),
+                "secret leaked into journal: {events}"
+            );
+            assert!(
+                events.contains("<redacted>"),
+                "expected the marker in journal: {events}"
+            );
+        }
+
+        /// The fidelity pin: when no secret is present, `tee` must forward
+        /// bytes completely unchanged — including a byte that isn't valid
+        /// UTF-8 and a bare `\r` with no following `\n`. This is the
+        /// contract `Masker::apply_bytes` promises (`Cow::Borrowed` on no
+        /// match) and `tee` must not break it by re-encoding through a
+        /// lossy `String` before forwarding.
+        #[test]
+        fn tee_forwards_byte_identical_when_no_secret_matches() {
+            let state = tempfile::tempdir().unwrap();
+            let repo = tempfile::tempdir().unwrap();
+            let manifest = repo.path().join("pult.yaml");
+            let masker = Masker::new(["some-other-secret".to_string()]);
+            let journal = Journal::start_at(
+                state.path(),
+                StartInfo {
+                    repo_dir: repo.path(),
+                    manifest: &manifest,
+                    command_id: "deploy",
+                    command_title: "Deploy",
+                    params: IndexMap::new(),
+                    interactive: false,
+                    run_id: None,
+                    masker: masker.clone(),
+                },
+            )
+            .unwrap();
+
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            let forwarded = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+            let forwarded_out = forwarded.clone();
+            let done = Arc::new(AtomicBool::new(false));
+            let handle = std::thread::spawn(move || {
+                tee(reader, forwarded_out, journal, &masker, "stdout", done);
+            });
+            // `a`, an invalid-UTF-8 byte, `b`, a bare `\r` (no `\n` after
+            // it), `c`, then the line-terminating `\n`.
+            let input: Vec<u8> = vec![b'a', 0xFF, b'b', b'\r', b'c', b'\n'];
+            writer.write_all(&input).unwrap();
+            drop(writer);
+            handle.join().unwrap();
+
+            assert_eq!(
+                *forwarded.0.lock().unwrap(),
+                input,
+                "byte-identical passthrough required when no secret is present"
+            );
+        }
+
         /// M2, real (non-adversarial) coverage: an actual child emits a
         /// `step` event over `PULT_EVENTS` and exits immediately after —
         /// through the genuine `execute` (real pipes, real threads, the
@@ -401,6 +584,7 @@ mod journaled {
                     params: IndexMap::new(),
                     interactive: false,
                     run_id: None,
+                    masker: Masker::new(std::iter::empty::<String>()),
                 },
             )
             .unwrap();
@@ -409,7 +593,8 @@ mod journaled {
             command
                 .arg("-c")
                 .arg(r#"echo "step 1/1 done" >&$PULT_EVENTS"#);
-            let (code, stopped) = execute(&mut command, "test", &journal).unwrap();
+            let masker = Masker::new(std::iter::empty::<String>());
+            let (code, stopped) = execute(&mut command, "test", &journal, &masker).unwrap();
             assert_eq!(code, 0);
             assert!(!stopped);
 
@@ -449,6 +634,7 @@ mod events_unix {
 
     use crate::events;
     use crate::journal::Journal;
+    use crate::mask::Masker;
 
     // Rust 2024 requires FFI declarations inside `unsafe extern` blocks. No
     // new dependency: the binary already links the system libc on unix, this
@@ -596,7 +782,11 @@ mod events_unix {
     /// terminal. When a parent already owns a (valid) `PULT_EVENTS`, its
     /// claim wins and the journal simply won't carry step/progress/status
     /// for this run — the spec's documented passthrough tradeoff.
-    pub(super) fn claim_events_channel(command: &mut Command, journal: Journal) -> EventsClaim {
+    pub(super) fn claim_events_channel(
+        command: &mut Command,
+        journal: Journal,
+        masker: Masker,
+    ) -> EventsClaim {
         if let Some(val) = std::env::var_os("PULT_EVENTS") {
             let val = val.to_string_lossy().into_owned();
             if is_valid_events_fd(&val) {
@@ -621,10 +811,20 @@ mod events_unix {
         std::thread::spawn(move || {
             let mut renderer = events::Renderer::new();
             read_events(reader, |event| {
-                journal.event(event);
+                // Masked once, here, before either consumer sees it: the
+                // journal's own masking (`Journal::append_locked`) still
+                // runs on top of this (harmlessly — the marker contains no
+                // secret to re-match), but the terminal render has no
+                // masking layer of its own, so this is the only place a
+                // secret written over `PULT_EVENTS` (`status connecting
+                // with $TOKEN`, the documented progress idiom — see #7's
+                // scope-correcting comment) gets caught before reaching a
+                // live terminal.
+                let event = super::mask_event(&masker, event);
+                journal.event(&event);
                 if render {
                     let mut stderr = std::io::stderr();
-                    if renderer.handle(event, &mut stderr) {
+                    if renderer.handle(&event, &mut stderr) {
                         reader_rendered.store(true, Ordering::Relaxed);
                     }
                 }
@@ -770,6 +970,34 @@ mod events_unix {
     }
 }
 
+/// Mask every text-carrying field of an `Event` — the third surface #7's
+/// scope-correcting comment identifies: the events-reader closure inside
+/// `claim_events_channel` renders `Status`/`Progress` text to the terminal,
+/// a copy `Journal::append_locked`'s masking can't reach (it only ever sees
+/// what's already been appended). Extracted into a named function, rather
+/// than inlined at its one call site, so it has a seam a unit test can drive
+/// directly — see `mask_event_masks_every_text_field` below and the residual
+/// coverage note next to it for what that test can and can't prove.
+// Only called from `events_unix::claim_events_channel`, which (like the rest
+// of that module) is unix-only — see journal.rs's `Journal::start` (M4).
+// `allow` here only, never lifted more broadly: this function itself has no
+// unix-specific content and should stay linted everywhere once #8 lands.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn mask_event(masker: &Masker, event: &Event) -> Event {
+    match event {
+        Event::Progress { pct, text } => Event::Progress {
+            pct: *pct,
+            text: text.as_deref().map(|t| masker.apply(t).into_owned()),
+        },
+        Event::Status(text) => Event::Status(masker.apply(text).into_owned()),
+        Event::Step { k, n, name } => Event::Step {
+            k: *k,
+            n: *n,
+            name: masker.apply(name).into_owned(),
+        },
+    }
+}
+
 #[cfg(unix)]
 fn exit_code(status: std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
@@ -782,6 +1010,90 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 #[cfg(not(unix))]
 fn exit_code(status: std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(1)
+}
+
+#[cfg(test)]
+mod mask_event_tests {
+    use super::*;
+
+    /// Drives `mask_event` directly, covering the logic itself (unlike the
+    /// one call site inside `claim_events_channel`, which this can't reach —
+    /// see the residual-coverage note below).
+    ///
+    /// **What this does and doesn't prove.** The OSC render copy this
+    /// function protects only runs when `stderr().is_terminal()` (see
+    /// `claim_events_channel`'s `render` flag) — false in CI, so "rendered
+    /// progress text is masked end to end" can never go red here no matter
+    /// how the wiring regresses. And because `Journal::append_locked`'s
+    /// masking is (correctly, per #7) the real guarantee for the journaled
+    /// copy, removing `claim_events_channel`'s `mask_event` call entirely
+    /// would leave every journal-reading test in this codebase green — the
+    /// event still reaches `journal.event` unmasked, and gets masked there
+    /// instead. So the render wiring is structurally unfalsifiable through
+    /// the journal, and this unit test is what actually exists: it pins
+    /// `mask_event`'s logic, not the single call site that wires it in
+    /// before `renderer.handle`. That one line is pinned by review only. A
+    /// PTY harness to drive a real terminal render is overkill for one call
+    /// site and deliberately not built here.
+    #[test]
+    fn mask_event_masks_every_text_field() {
+        const SECRET: &str = "sekrit-value-0007";
+        let masker = Masker::new([SECRET.to_string()]);
+
+        let status = mask_event(&masker, &Event::Status(format!("connecting with {SECRET}")));
+        assert_eq!(
+            status,
+            Event::Status("connecting with <redacted>".to_string())
+        );
+
+        let progress = mask_event(
+            &masker,
+            &Event::Progress {
+                pct: Some(50),
+                text: Some(format!("uploading {SECRET}")),
+            },
+        );
+        assert_eq!(
+            progress,
+            Event::Progress {
+                pct: Some(50),
+                text: Some("uploading <redacted>".to_string()),
+            }
+        );
+
+        let step = mask_event(
+            &masker,
+            &Event::Step {
+                k: 1,
+                n: 2,
+                name: format!("deploy {SECRET}"),
+            },
+        );
+        assert_eq!(
+            step,
+            Event::Step {
+                k: 1,
+                n: 2,
+                name: "deploy <redacted>".to_string(),
+            }
+        );
+
+        // No pct/text at all: masking must not invent one.
+        let indeterminate = mask_event(
+            &masker,
+            &Event::Progress {
+                pct: None,
+                text: None,
+            },
+        );
+        assert_eq!(
+            indeterminate,
+            Event::Progress {
+                pct: None,
+                text: None
+            }
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

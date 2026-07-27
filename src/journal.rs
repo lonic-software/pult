@@ -29,6 +29,14 @@
 //!   later appends (a straggler grandchild's output draining after the
 //!   child exited) are dropped, so readers can treat `exit` as the last
 //!   record of a completed run.
+//! - **Secret values are masked, not absent.** A `secret: true` param's
+//!   value can appear in child-derived text (a `line`, or `event`'s
+//!   `Progress`/`Status`/`Step` text) if the child prints it back — masking
+//!   happens once, at `append_locked`, for every writer (see its comment).
+//!   A masked record's `text` (or `Step.name`) may therefore contain the
+//!   literal `"<redacted>"` in place of the original substring. `meta.json`
+//!   is a second durable file outside that choke point (see `Meta.params`'
+//!   doc comment) — its values are masked once, at `start_at`.
 
 // M4: journaling is off entirely on non-unix targets (`Journal::start`'s
 // `#[cfg(not(unix))]` arm always returns `None`), so on those targets
@@ -39,6 +47,7 @@
 // once journaling reaches Windows (issue #8).
 #![cfg_attr(not(unix), allow(dead_code))]
 
+use std::borrow::Cow;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -51,6 +60,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::events::Event;
+use crate::mask::Masker;
 
 /// Journal protocol schema — additive-only, same discipline as `--list`'s.
 const SCHEMA: u32 = 1;
@@ -68,8 +78,21 @@ pub struct Meta {
     pub manifest: PathBuf,
     pub command_id: String,
     pub command_title: String,
-    /// Pre-redacted by the caller: secret params arrive here as the literal
-    /// `"<redacted>"` — the value itself must never reach this module.
+    /// Pre-redacted by the caller for params *declared* `secret: true`:
+    /// those arrive here as the literal `"<redacted>"` — `exec.rs`'s audit
+    /// record of *what pult itself was asked to run*. That alone doesn't
+    /// close every leak, though: a secret's value can still show up in a
+    /// *different*, non-secret param's value (`--token=X --url=.../X`), so
+    /// `start_at` additionally runs every value here through the run's
+    /// `Masker` before this struct is ever serialized — the same masking
+    /// `append_locked` applies to `events.jsonl`, applied here once, at
+    /// construction, to this second durable file. Values reach this module
+    /// only sealed inside a `Masker`, which can replace an occurrence in
+    /// text but never expose it: it isn't `Serialize`, its `Debug` never
+    /// prints a value, and nothing in `Inner` outside it holds a secret. So
+    /// the invariant is: the caller pre-redacts what it *declares* about
+    /// itself, and this module masks what ends up here regardless — and can
+    /// only ever do that through `Masker::apply`/`apply_bytes`.
     pub params: IndexMap<String, String>,
     /// `"cli"`, `"desktop"`, … — informational in schema 1 (`PULT_ORIGIN`
     /// env, set by wrapping surfaces; defaults to `"cli"`).
@@ -123,6 +146,12 @@ pub struct StartInfo<'a> {
     /// Caller-supplied id (`--run-id`, e.g. from the desktop app); a
     /// UUIDv7 is generated when absent so directory names sort by time.
     pub run_id: Option<&'a str>,
+    /// Built by `exec.rs` from post-`fill` param values (so an interactively
+    /// prompted secret is covered too) — held for `append_locked` to mask
+    /// every appended record's string values with, and cloned out to the
+    /// runner (`tee`, the events-reader closure) so the journaled and
+    /// forwarded/rendered copies mask the same set.
+    pub masker: Masker,
 }
 
 /// A live journal. Cheap to clone (tee/reader threads each hold one);
@@ -138,6 +167,8 @@ struct Inner {
     done: bool,
     /// One warning per journal, not one per failed write.
     warned: bool,
+    /// See `append_locked` — the only place this is read.
+    masker: Masker,
 }
 
 impl Journal {
@@ -216,7 +247,7 @@ impl Journal {
         fs::create_dir(&run_dir)
             .with_context(|| format!("failed to create run dir {}", run_dir.display()))?;
 
-        let meta = Meta {
+        let mut meta = Meta {
             schema: SCHEMA,
             run_id,
             repo_dir,
@@ -234,6 +265,16 @@ impl Journal {
             exit_code: None,
             ended_at: None,
         };
+        // `journal_params` (exec.rs) only pre-redacts params *declared*
+        // `secret: true` — a secret value copy-pasted into a different,
+        // non-secret param (`--token=X --url=https://svc/X`) would
+        // otherwise sit in `meta.json` in plaintext for the whole retention
+        // window, a second durable file entirely outside `append_locked`'s
+        // choke point. Masking here, once, at construction, closes that:
+        // `finish` only ever rewrites this same `Meta` (mutating `status`/
+        // `exit_code`/`ended_at`, never `params`), so there is no second
+        // place `params` needs re-masking.
+        mask_params(&info.masker, &mut meta.params);
 
         let meta_path = run_dir.join("meta.json");
         write_meta(&meta_path, &meta)?;
@@ -249,6 +290,7 @@ impl Journal {
             meta_path,
             done: false,
             warned: false,
+            masker: info.masker,
         }))))
     }
 
@@ -309,7 +351,23 @@ impl Journal {
         Self::append_locked(&mut inner, doc);
     }
 
-    fn append_locked(inner: &mut Inner, doc: serde_json::Value) {
+    // The mask lives here, not at `line`/`event`, deliberately: `inner.events`
+    // is written at exactly the one `writeln!` below, inside this function,
+    // whose only callers are `append` (reached from `line` and `event`) and
+    // `finish` — and `Inner` is private to this module. So every writer is
+    // closed by construction, not by enumeration of today's call sites (the
+    // gap #7 was originally filed against: masking only the tee missed the
+    // `PULT_EVENTS` → `Journal::event` path, a second writer into the same
+    // file the tee-only scope never enumerated).
+    //
+    // Masking happens on the decoded `serde_json::Value`, before
+    // serialization — never on the serialized line string. `serde_json`
+    // escapes `"`, `\`, and control characters, so a secret containing any
+    // of those would appear escaped in the serialized text and never
+    // byte-match there; matching has to happen against the plain decoded
+    // string it came from.
+    fn append_locked(inner: &mut Inner, mut doc: serde_json::Value) {
+        mask_value_strings(&inner.masker, &mut doc);
         // Compact one-line JSON + newline, flushed per record — a reader
         // may see a torn *final* line after a crash (spec: treat as "not
         // yet written"), never a torn earlier one.
@@ -323,6 +381,53 @@ impl Journal {
         if !inner.warned {
             inner.warned = true;
             eprintln!("pult: warning: run journal write failed: {e:#}");
+        }
+    }
+}
+
+/// Mask every string *value* in `value` (recursively, in case a future
+/// record nests one), leaving keys alone. Masking a key is pointless (keys
+/// are fixed vocabulary: `"kind"`, `"stream"`, `"status"`, …) and risks
+/// corrupting a reader's ability to parse the record's shape at all. Every
+/// string value, on the other hand, is either child-derived text (`text`,
+/// and `Step`'s `name` — also child-controlled, via `step <k>/<n> <name>`)
+/// or itself fixed vocabulary the mask can't match against (a real secret is
+/// never literally `"stdout"`) — except for the one pathological case where
+/// a secret *does* happen to equal a schema word, in which case that
+/// record's self-description gets rewritten too. Accepted and documented,
+/// not fixed: such a "secret" is dictionary English, and a reader already
+/// has to skip records it can't parse.
+fn mask_value_strings(masker: &Masker, value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Cow::Owned(masked) = masker.apply(s) {
+                *s = masked;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                mask_value_strings(masker, item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                mask_value_strings(masker, v);
+            }
+        }
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {}
+    }
+}
+
+/// Mask every value in `params` in place — the `Meta.params` counterpart to
+/// `mask_value_strings`. `journal_params` (`exec.rs`) only pre-redacts
+/// params *declared* `secret: true`; this catches the same secret value
+/// showing up in a *different*, non-secret param's value before `meta.json`
+/// (a second durable file, entirely outside `append_locked`'s choke point)
+/// is ever written.
+fn mask_params(masker: &Masker, params: &mut IndexMap<String, String>) {
+    for v in params.values_mut() {
+        if let Cow::Owned(masked) = masker.apply(v) {
+            *v = masked;
         }
     }
 }
@@ -539,7 +644,126 @@ mod tests {
             params: IndexMap::new(),
             interactive: false,
             run_id: None,
+            masker: Masker::new(std::iter::empty::<String>()),
         }
+    }
+
+    /// Read one run's `events.jsonl` back from disk (state dir + repo dir as
+    /// set up by `info`/`start_at`) — the same lookup `start_line_finish_...`
+    /// below uses, factored out for the masking test.
+    fn read_events_jsonl(state: &Path, repo: &Path) -> String {
+        let canonical = fs::canonicalize(repo).unwrap();
+        let runs_root = state.join("repos").join(repo_key(&canonical)).join("runs");
+        let run_dir = fs::read_dir(&runs_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::read_to_string(run_dir.join("events.jsonl")).unwrap()
+    }
+
+    /// The choke-point falsifier for #7 (and its scope-correcting comment):
+    /// a secret embedded in a `line` and in every `Event` variant's text
+    /// must come out of `events.jsonl` as `<redacted>`, never plaintext —
+    /// proven by reading the file back from disk, not by inspecting an
+    /// in-memory value. Drives `journal.line`/`journal.event` directly
+    /// (bypassing `tee`'s and `mask_event`'s own masking) so this pins
+    /// `append_locked` specifically: the one seam that closes every writer
+    /// by construction. Goes red the instant the `mask_value_strings` call
+    /// is removed from `append_locked`.
+    #[test]
+    fn append_locked_masks_secrets_in_every_record_kind() {
+        const SECRET: &str = "sekrit-value-0007";
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let manifest = repo.path().join("pult.yaml");
+        let mut i = info(repo.path(), &manifest);
+        i.masker = Masker::new([SECRET.to_string()]);
+        let journal = Journal::start_at(state.path(), i).unwrap();
+
+        journal.line("stdout", &format!("token is {SECRET} there"));
+        journal.event(&Event::Status(format!("connecting with {SECRET}")));
+        journal.event(&Event::Progress {
+            pct: Some(50),
+            text: Some(format!("uploading {SECRET} now")),
+        });
+        journal.event(&Event::Step {
+            k: 1,
+            n: 2,
+            name: format!("deploy {SECRET}"),
+        });
+        journal.finish(Some(0), false);
+
+        let events = read_events_jsonl(state.path(), repo.path());
+        assert!(
+            !events.contains(SECRET),
+            "plaintext secret leaked: {events}"
+        );
+        let lines: Vec<serde_json::Value> = events
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[0]["kind"], "line");
+        assert!(lines[0]["text"].as_str().unwrap().contains("<redacted>"));
+        assert_eq!(lines[1]["kind"], "status");
+        assert!(lines[1]["text"].as_str().unwrap().contains("<redacted>"));
+        assert_eq!(lines[2]["kind"], "progress");
+        assert!(lines[2]["text"].as_str().unwrap().contains("<redacted>"));
+        assert_eq!(lines[3]["kind"], "step");
+        assert!(lines[3]["name"].as_str().unwrap().contains("<redacted>"));
+    }
+
+    /// #7 review finding 3: `meta.json` is a second durable file entirely
+    /// outside `append_locked`'s choke point, and `journal_params`
+    /// (`exec.rs`) only pre-redacts params *declared* `secret: true` — so a
+    /// secret value copy-pasted into a *different*, non-secret param (e.g.
+    /// `--token=X --url=https://svc/X`) used to sit in `meta.json` in
+    /// plaintext for the whole retention window even though `token` itself
+    /// came in pre-redacted. Read back from disk, like the choke-point test
+    /// above. Goes red if the `mask_params` call is removed from `start_at`.
+    #[test]
+    fn meta_json_masks_a_secret_leaked_into_a_different_non_secret_param() {
+        const SECRET: &str = "s3cret-value-x";
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let manifest = repo.path().join("pult.yaml");
+        let mut i = info(repo.path(), &manifest);
+        i.masker = Masker::new([SECRET.to_string()]);
+        let mut params = IndexMap::new();
+        // `token` is the declared secret: pre-redacted by the caller
+        // already, same as `journal_params` would produce.
+        params.insert("token".to_string(), "<redacted>".to_string());
+        // `url` is a plain, non-secret param whose value happens to embed
+        // the same secret — the leak `journal_params`'s declared-secret-only
+        // check can't catch, and `mask_params` must.
+        params.insert("url".to_string(), format!("https://svc/{SECRET}"));
+        i.params = params;
+        let journal = Journal::start_at(state.path(), i).unwrap();
+        journal.finish(Some(0), false);
+
+        let canonical = fs::canonicalize(repo.path()).unwrap();
+        let run_dir = fs::read_dir(
+            state
+                .path()
+                .join("repos")
+                .join(repo_key(&canonical))
+                .join("runs"),
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+        let meta_json = fs::read_to_string(run_dir.join("meta.json")).unwrap();
+        assert!(
+            !meta_json.contains(SECRET),
+            "plaintext secret leaked into meta.json via a non-secret param: {meta_json}"
+        );
+        assert!(
+            meta_json.contains("<redacted>"),
+            "expected the marker in meta.json: {meta_json}"
+        );
     }
 
     #[test]

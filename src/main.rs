@@ -11,6 +11,7 @@ mod interp;
 mod journal;
 mod label;
 mod manifest;
+mod mask;
 mod options;
 mod prompt;
 mod resolver;
