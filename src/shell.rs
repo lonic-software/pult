@@ -101,6 +101,32 @@ fn system_shadow_component(path: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether `dir` (one `env::split_paths` entry, rendered as a string) is
+/// usable as a search directory at all: non-empty and rooted — a drive
+/// letter plus separator (`C:\` / `C:/`) or a UNC prefix (`\\server\share`
+/// / `//server/share`). `env::split_paths` yields an *empty* `PathBuf` for
+/// a trailing (or doubled) `;` in `PATH` — extremely common on Windows —
+/// rather than skipping it; joining a candidate filename onto that empty
+/// path and calling `exists()` resolves it against pult's own current
+/// directory instead of any real search path. That's the exact "wrong
+/// binary silently wins" failure this module exists to close, made worse
+/// by the fact that a stray `bash.exe` checked into a repo never passes
+/// the trust gate the way manifest code does. A bare drive letter with no
+/// trailing separator (`C:`) is drive-*relative* in Windows path semantics
+/// (relative to that drive's current directory), not a directory pult can
+/// search, so it's rejected too.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_absolute_dir_entry(dir: &str) -> bool {
+    if dir.starts_with("\\\\") || dir.starts_with("//") {
+        return true;
+    }
+    let bytes = dir.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
 /// Derive the Git for Windows install root from `git --exec-path`'s
 /// (already-trimmed) output. The exec path is
 /// `<root>/mingw64/libexec/git-core` (or `mingw32/...`); dropping the last
@@ -108,6 +134,25 @@ fn system_shadow_component(path: &str) -> Option<&'static str> {
 /// — never `Path::parent()` — specifically so it can be exercised with
 /// both slash conventions on any host OS: Git for Windows itself prints
 /// forward slashes, but nothing here assumes that.
+///
+/// Two shapes need help beyond naive splitting, both because a bare
+/// `.filter(!is_empty())` erases information a plain path-segment list
+/// doesn't carry on its own:
+///
+/// - **UNC roots** (`\\server\share\Git\...`): the leading `\\`/`//` marker
+///   splits into two *empty* segments, which the empty-segment filter would
+///   silently drop — turning the root into the relative `server\share\Git`.
+///   The marker is split off first and reattached untouched.
+/// - **A drive-letter-only root** (`C:/mingw64/...`, i.e. Git installed
+///   directly at a drive root): joining a single `"C:"` component with
+///   nothing after it leaves no separator following the colon, and
+///   `Path::new("C:").join("bin")` is the drive-*relative* `C:bin`, not
+///   `C:\bin`. Rooted explicitly by appending the separator in that one
+///   case.
+///
+/// Both failure shapes only cost a missed resolution (falling through to
+/// step 3), never a wrong one — `root_comps` failing to reconstruct a
+/// sensible path just means the two `exists()` checks after it miss.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn root_from_exec_path(exec_path: &str) -> Option<String> {
     let trimmed = exec_path.trim();
@@ -116,15 +161,25 @@ fn root_from_exec_path(exec_path: &str) -> Option<String> {
     } else {
         "/"
     };
-    let comps: Vec<&str> = trimmed
-        .split(['\\', '/'])
-        .filter(|s| !s.is_empty())
-        .collect();
+
+    let (unc_prefix, rest) = if let Some(r) = trimmed.strip_prefix("\\\\") {
+        ("\\\\", r)
+    } else if let Some(r) = trimmed.strip_prefix("//") {
+        ("//", r)
+    } else {
+        ("", trimmed)
+    };
+
+    let comps: Vec<&str> = rest.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
     if comps.len() < 4 {
         return None;
     }
     let root_comps = &comps[..comps.len() - 3];
-    Some(root_comps.join(sep))
+    let mut root = format!("{unc_prefix}{}", root_comps.join(sep));
+    if unc_prefix.is_empty() && root_comps.len() == 1 && root.ends_with(':') {
+        root.push_str(sep);
+    }
+    Some(root)
 }
 
 // ---------------------------------------------------------------------
@@ -161,7 +216,8 @@ fn resolved_path(which: &str) -> Result<PathBuf> {
 ///    second Git install) and keeps the shell coming from the same
 ///    installation as `git` itself (`fetch.rs`'s `git()` also resolves via
 ///    PATH) — filtered to drop anything under a [`SYSTEM_SHADOW_DIRS`]
-///    component.
+///    component, and to skip any entry [`is_absolute_dir_entry`] rejects
+///    (empty or drive-relative — see its doc for why that matters).
 /// 2. **`git --exec-path`-derived.** The workhorse for the common case: a
 ///    default install launched from PowerShell, where PATH has only
 ///    `Git\cmd` (so step 1 finds nothing) but `git` itself still resolves.
@@ -179,6 +235,11 @@ fn resolve_windows(which: &str) -> Result<PathBuf> {
     match env::var_os("PATH") {
         Some(path_var) => {
             for dir in env::split_paths(&path_var) {
+                if !is_absolute_dir_entry(&dir.to_string_lossy()) {
+                    // Empty (trailing/doubled `;`) or drive-relative entry —
+                    // never join a filename onto it, see `is_absolute_dir_entry`.
+                    continue;
+                }
                 let candidate = dir.join(&exe);
                 if !candidate.exists() {
                     continue;
@@ -440,6 +501,27 @@ mod pure_logic_tests {
     }
 
     #[test]
+    fn accepts_absolute_drive_and_unc_dir_entries() {
+        assert!(is_absolute_dir_entry(r"C:\Program Files\Git\bin"));
+        assert!(is_absolute_dir_entry("C:/Program Files/Git/bin"));
+        assert!(is_absolute_dir_entry(r"\\server\share\Git\bin"));
+        assert!(is_absolute_dir_entry("//server/share/Git/bin"));
+    }
+
+    /// `PATH` ending (or doubling up) in `;` — extremely common on Windows —
+    /// makes `env::split_paths` yield an empty entry rather than skipping
+    /// it; joining a filename onto that resolves against pult's own current
+    /// directory instead of any real search path. Empty, and a bare
+    /// drive-relative `C:` with nothing after it, must both be rejected.
+    #[test]
+    fn rejects_empty_and_drive_relative_dir_entries() {
+        assert!(!is_absolute_dir_entry(""));
+        assert!(!is_absolute_dir_entry("C:"));
+        assert!(!is_absolute_dir_entry("Git\\cmd"));
+        assert!(!is_absolute_dir_entry("."));
+    }
+
+    #[test]
     fn exec_path_root_derivation_mingw64_forward_slash() {
         assert_eq!(
             root_from_exec_path("C:/Program Files/Git/mingw64/libexec/git-core"),
@@ -478,6 +560,44 @@ mod pure_logic_tests {
     #[test]
     fn exec_path_too_shallow_to_derive_a_root_is_none() {
         assert_eq!(root_from_exec_path("mingw64/libexec/git-core"), None);
+    }
+
+    /// A naive `.filter(!is_empty())` would erase a UNC root's leading
+    /// `\\`/`//` marker (it splits into two empty segments), turning
+    /// `\\server\share\Git` into the relative `server\share\Git`.
+    #[test]
+    fn exec_path_root_derivation_unc_backslash() {
+        assert_eq!(
+            root_from_exec_path(r"\\server\share\Git\mingw64\libexec\git-core"),
+            Some(r"\\server\share\Git".to_string())
+        );
+    }
+
+    #[test]
+    fn exec_path_root_derivation_unc_forward_slash() {
+        assert_eq!(
+            root_from_exec_path("//server/share/Git/mingw64/libexec/git-core"),
+            Some("//server/share/Git".to_string())
+        );
+    }
+
+    /// Git installed directly at a drive root: the derived root is a bare
+    /// `"C:"` unless a separator is appended, and `Path::new("C:")` is
+    /// drive-relative rather than drive-rooted.
+    #[test]
+    fn exec_path_root_derivation_drive_root_back_slash() {
+        assert_eq!(
+            root_from_exec_path(r"C:\mingw64\libexec\git-core"),
+            Some(r"C:\".to_string())
+        );
+    }
+
+    #[test]
+    fn exec_path_root_derivation_drive_root_forward_slash() {
+        assert_eq!(
+            root_from_exec_path("C:/mingw64/libexec/git-core"),
+            Some("C:/".to_string())
+        );
     }
 }
 
