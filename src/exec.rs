@@ -252,7 +252,30 @@ fn fill(
             // Preview: show the slot instead of prompting or shelling out.
             (None, _) if run_dir.is_none() => format!("<{name}>"),
             (None, ParamKind::Pick(pick)) => {
-                let opts = options::resolve_pick(pick, &values, run_dir.unwrap())?;
+                // A throwaway `Redaction`, rebuilt from just the values
+                // answered so far (never the run's own masker — there isn't
+                // one yet: `build_masker` runs post-`fill`, in `execute`
+                // above, but `resolve_pick` runs *inside* `fill`, before that
+                // point exists). By the ordering rule a `from:` can only
+                // reference params declared earlier, so "answered so far" is
+                // exactly the complete needle set for this one `from:` —
+                // nothing it could reference is missing. Both `redact` and
+                // `build_masker` already tolerate a partial map (they look
+                // values up by name and skip absent ones), so this is safe
+                // per-call, not just at the end of `fill`.
+                let display_values = redact(cmd, &values);
+                let (masker, _unmaskable) = build_masker(cmd, &values);
+                // Discarding `unmaskable` here (rather than warning) is
+                // deliberate: warning on every pick resolution would be
+                // noise, and the real run-level warning already fires later,
+                // from the run's own masker built in `execute` above — gated
+                // on `Journaling::Full`, which is where masking actually
+                // matters.
+                let redaction = options::Redaction {
+                    display_values: &display_values,
+                    masker: &masker,
+                };
+                let opts = options::resolve_pick(pick, &values, &redaction, run_dir.unwrap())?;
                 let w = label::width();
                 let labels: Vec<String> = opts.iter().map(|o| label::option_label(o, w)).collect();
                 let i = prompt::select_index(&format!("{name}?"), labels)?;
@@ -439,6 +462,44 @@ mod tests {
         assert!(!display.contains("hunter2"), "leaked: {display}");
         assert!(display.contains("••••••"), "got: {display}");
         assert!(display.contains("--region us"), "got: {display}");
+    }
+
+    /// Issue #12's own reproduction, run through `fill` (not `resolve_pick`
+    /// directly) — a unit test that hand-builds a `Redaction` and calls
+    /// `resolve_pick` only proves `resolve_pick` honors its argument; it
+    /// stays green if `fill` passed the real map for *both* fields, which is
+    /// exactly the one-line call-site bug that would fully restore the leak.
+    /// This goes through the real call site (`fill`'s `ParamKind::Pick` arm)
+    /// so a regression there reddens it.
+    ///
+    /// `format!("{err:#}")` matters: `:#` is anyhow's "full chain" rendering,
+    /// which is what `main.rs`'s `eprintln!("pult: error: {e:#}")` actually
+    /// prints, and it's the only rendering that includes the `with_context`
+    /// wrapper at `options.rs`'s spawn-failure site (a plain `{err}` shows
+    /// only the outermost frame and would miss a regression there).
+    #[test]
+    fn fill_never_leaks_a_secret_through_a_failing_pick_from() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            "version: 1\ncommands:\n  - id: deploy\n    title: Deploy\n    params:\n      \
+             token: { input: { secret: true } }\n      \
+             target: { pick: { from: \"echo tok={token} >&2; exit 1\" } }\n    \
+             run: \"echo {target}\"\n",
+        )
+        .unwrap();
+        let resolved =
+            resolver::resolve(manifest::load(&dir.path().join("pult.yaml")).unwrap()).unwrap();
+        let cmd = &resolved.commands[0];
+
+        let secret = "hunter2-super-secret";
+        let provided: HashMap<_, _> = [("token".to_string(), secret.to_string())].into();
+        let err = fill(cmd, &provided, Some(dir.path())).unwrap_err();
+        let rendered = format!("{err:#}");
+
+        assert!(!rendered.contains(secret), "leaked: {rendered}");
+        assert!(rendered.contains("••••••"), "got: {rendered}");
+        assert!(rendered.contains("<redacted>"), "got: {rendered}");
     }
 
     /// #7 review finding 1, pinned at the site it was filed against
