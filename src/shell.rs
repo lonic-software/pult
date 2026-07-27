@@ -31,14 +31,13 @@
 //! nothing legitimate is found — a fallback would just silently reproduce
 //! the defect it exists to catch.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Result;
 
 #[cfg(windows)]
 use std::env;
-#[cfg(windows)]
-use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::sync::OnceLock;
 
@@ -125,6 +124,66 @@ fn is_absolute_dir_entry(dir: &str) -> bool {
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// The PATH-scan step of shell resolution, extracted specifically so the
+/// `System32`-family rejection can be *falsified* by a synthetic PATH and
+/// filesystem on any host OS. The Windows behavioral tests below cannot
+/// serve as this filter's revert-check: issue #9's own evidence
+/// (`where.exe bash`) shows Git's `bash.exe` precedes `System32` **in PATH
+/// order** on the CI runner, so the scan reaches Git's entry first with or
+/// without the filter — removing `system_shadow_component`'s use here
+/// changes nothing the behavioral tests can observe. Only a PATH where a
+/// system directory comes *first* exercises the filter, which is exactly
+/// the input a real runner's own PATH can't produce.
+///
+/// `dirs` is the already-split PATH directory list (e.g.
+/// `env::split_paths`'s output); `exe` the filename to look for in each
+/// (`bash.exe`/`sh.exe`); `exists` an injected existence predicate so
+/// tests never touch a real filesystem. Applies, per directory in order,
+/// [`is_absolute_dir_entry`] then [`system_shadow_component`]; rejections
+/// from the latter are recorded in `trail` (for the eventual fail-loud
+/// error) and scanning continues. Returns the first accepted candidate,
+/// *before* the `bin`-over-`usr/bin` normalization
+/// ([`prefer_bin_over_usr_bin`]) — that step stays windows-only rather
+/// than being folded in here: it resolves via `Path::parent()`/
+/// `file_name()`, which (like `system_shadow_component`'s own doc note)
+/// only understands `\` as a separator on an actual Windows host, so
+/// including it in this seam would either misreport on the ubuntu leg or
+/// need its own rewrite — out of scope for what this extraction is fixing.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn first_acceptable_on_path(
+    dirs: impl Iterator<Item = PathBuf>,
+    exe: &str,
+    exists: impl Fn(&Path) -> bool,
+    trail: &mut Vec<String>,
+) -> Option<PathBuf> {
+    for dir in dirs {
+        if !is_absolute_dir_entry(&dir.to_string_lossy()) {
+            // Empty (trailing/doubled `;`) or drive-relative entry — never
+            // join a filename onto it, see `is_absolute_dir_entry`.
+            continue;
+        }
+        let candidate = dir.join(exe);
+        if !exists(&candidate) {
+            continue;
+        }
+        if let Some(shadow) = system_shadow_component(&candidate.to_string_lossy()) {
+            let what = if shadow == "WindowsApps" {
+                "an app-execution-alias stub"
+            } else {
+                "the WSL launcher stub"
+            };
+            trail.push(format!(
+                "rejected: {} is under Windows' own {shadow}, where {exe} is {what}, \
+                 not a real shell",
+                candidate.display()
+            ));
+            continue;
+        }
+        return Some(candidate);
+    }
+    None
 }
 
 /// Derive the Git for Windows install root from `git --exec-path`'s
@@ -231,32 +290,18 @@ fn resolve_windows(which: &str) -> Result<PathBuf> {
     let exe = format!("{which}.exe");
     let mut trail: Vec<String> = Vec::new();
 
-    // 1. PATH scan.
+    // 1. PATH scan — the System32-family filtering itself lives in
+    // `first_acceptable_on_path` (see its doc for why that's a separate,
+    // unit-tested function rather than inlined here).
     match env::var_os("PATH") {
         Some(path_var) => {
-            for dir in env::split_paths(&path_var) {
-                if !is_absolute_dir_entry(&dir.to_string_lossy()) {
-                    // Empty (trailing/doubled `;`) or drive-relative entry —
-                    // never join a filename onto it, see `is_absolute_dir_entry`.
-                    continue;
-                }
-                let candidate = dir.join(&exe);
-                if !candidate.exists() {
-                    continue;
-                }
-                if let Some(shadow) = system_shadow_component(&candidate.to_string_lossy()) {
-                    let what = if shadow == "WindowsApps" {
-                        "an app-execution-alias stub"
-                    } else {
-                        "the WSL launcher stub"
-                    };
-                    trail.push(format!(
-                        "rejected: {} is under Windows' own {shadow}, where {exe} is {what}, \
-                         not a real shell",
-                        candidate.display()
-                    ));
-                    continue;
-                }
+            let found = first_acceptable_on_path(
+                env::split_paths(&path_var),
+                &exe,
+                |p| p.exists(),
+                &mut trail,
+            );
+            if let Some(candidate) = found {
                 return Ok(prefer_bin_over_usr_bin(&candidate, &exe));
             }
         }
@@ -519,6 +564,57 @@ mod pure_logic_tests {
         assert!(!is_absolute_dir_entry("C:"));
         assert!(!is_absolute_dir_entry("Git\\cmd"));
         assert!(!is_absolute_dir_entry("."));
+    }
+
+    /// The falsifying test for the System32 filter: a synthetic PATH with
+    /// `System32` listed *first* and Git's own `bin` second, both
+    /// "existing" per the injected predicate. This is exactly the input
+    /// shape issue #9's own evidence shows CI's real PATH never produces
+    /// (Git's `bash.exe` precedes `System32` there) — which is why the
+    /// Windows behavioral tests can't catch a removed filter, and why this
+    /// one, run on every leg with no OS interaction, has to exist. Goes red
+    /// the moment `system_shadow_component`'s use is dropped from
+    /// `first_acceptable_on_path`: without it, the scan would just accept
+    /// the first (System32) hit.
+    #[test]
+    fn path_scan_prefers_git_over_a_leading_system32_entry() {
+        let system32 = PathBuf::from(r"C:\Windows\System32");
+        let git_bin = PathBuf::from(r"C:\Program Files\Git\bin");
+        let system32_bash = system32.join("bash.exe");
+        let git_bash = git_bin.join("bash.exe");
+        let mut trail = Vec::new();
+
+        let found = first_acceptable_on_path(
+            vec![system32, git_bin].into_iter(),
+            "bash.exe",
+            |p| p == system32_bash || p == git_bash,
+            &mut trail,
+        );
+
+        assert_eq!(found, Some(git_bash));
+        assert!(
+            trail.iter().any(|line| line.contains("System32")),
+            "the rejected System32 candidate should be named in the trail: {trail:?}"
+        );
+    }
+
+    /// Mirror case: when a system directory is the *only* PATH entry that
+    /// exists, the scan must yield `None` — falling through to step 2 —
+    /// rather than accepting the stub because nothing else was on offer.
+    #[test]
+    fn path_scan_yields_none_when_only_a_system32_entry_is_present() {
+        let system32 = PathBuf::from(r"C:\Windows\System32");
+        let system32_bash = system32.join("bash.exe");
+        let mut trail = Vec::new();
+
+        let found = first_acceptable_on_path(
+            std::iter::once(system32),
+            "bash.exe",
+            |p| p == system32_bash,
+            &mut trail,
+        );
+
+        assert_eq!(found, None);
     }
 
     #[test]
