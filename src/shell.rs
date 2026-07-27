@@ -10,10 +10,20 @@
 //! error message to stdout (mojibake to anything expecting UTF-8); with a
 //! distro installed, the compiled step script silently executes inside a
 //! Linux VM with a different filesystem. Either way every compiled
-//! step-list command (`run_bash`) is broken. `sh` is unaffected — there is
-//! no `sh.exe` in `System32` — but it's resolved through this module too,
-//! both for symmetry and so the claim is measured rather than assumed (see
-//! the Windows behavioral tests below).
+//! step-list command (`run_bash`) is broken.
+//!
+//! `sh` has a different (and independent) reason to route through here.
+//! There's believed to be no `sh.exe` in `System32` — that's never actually
+//! measured, just the absence of a counter-example — so `sh` doesn't share
+//! `bash`'s wrong-binary failure mode. But a **default** Git for Windows
+//! install puts only `Git\cmd` on `PATH`, not `Git\bin` or `Git\usr\bin`;
+//! GitHub-hosted runners add those extra entries, real user machines don't.
+//! So on a default install launched from PowerShell, bare `sh` isn't the
+//! *wrong* binary, it's *absent* — string-form `run:`, every `check:`, and
+//! every dynamic pick fail with a plain "program not found" instead of
+//! reaching Git's actual `sh.exe`. That failure mode doesn't depend on
+//! `System32`'s contents at all, which is why `sh` is resolved by the same
+//! PATH-scan/exec-path/fixed-path search as `bash`, not a narrower one.
 //!
 //! The fix: resolve an absolute path ourselves on Windows, filtering out
 //! anything that resolves under `System32`/`SysWOW64`/`Sysnative`/
@@ -174,8 +184,14 @@ fn resolve_windows(which: &str) -> Result<PathBuf> {
                     continue;
                 }
                 if let Some(shadow) = system_shadow_component(&candidate.to_string_lossy()) {
+                    let what = if shadow == "WindowsApps" {
+                        "an app-execution-alias stub"
+                    } else {
+                        "the WSL launcher stub"
+                    };
                     trail.push(format!(
-                        "rejected: {shadow} launcher stub at {}",
+                        "rejected: {} is under Windows' own {shadow}, where {exe} is {what}, \
+                         not a real shell",
                         candidate.display()
                     ));
                     continue;
@@ -289,24 +305,30 @@ fn git_exec_path() -> Result<String> {
 // Tests
 // ---------------------------------------------------------------------
 
-/// (a) Source-lint tripwire, cross-platform: no other file under `src/` may
-/// spawn a shell by bare name. Every real call site must go through
-/// [`sh()`]/[`bash()`] instead. Deliberately lives in this file — its own
-/// source necessarily contains the needle strings (the unix impls above),
-/// and this file is the one exclusion the walk makes.
+/// (a) Source-lint tripwire, cross-platform: a literal `Command::new("sh")`
+/// or `Command::new("bash")` must not reappear outside this file — the
+/// exact form this fix removed from every call site. This is a tripwire
+/// against *that* literal regressing, not a proof that no file spawns a
+/// shell some other way: `Command::new("bash.exe")`, a `const`/variable
+/// holding `"bash"`, or a re-export would all slip past a plain substring
+/// match and this test would stay green. Narrow on purpose rather than
+/// naming — or claiming — a broader guarantee this check doesn't make.
+/// Deliberately lives in this file — its own source necessarily contains
+/// the needle strings (the unix impls above), and this file is the one
+/// exclusion the walk makes.
 #[cfg(test)]
 mod source_lint {
     use std::fs;
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn no_bare_shell_spawn_outside_shell_rs() {
+    fn no_literal_bare_shell_spawn_outside_shell_rs() {
         let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();
         walk(&src_dir, &mut offenders);
         assert!(
             offenders.is_empty(),
-            "bare `Command::new(\"sh\")` / `Command::new(\"bash\")` found outside shell.rs — \
+            "literal `Command::new(\"sh\")` / `Command::new(\"bash\")` found outside shell.rs — \
              route through shell::sh()/shell::bash() instead:\n{}",
             offenders.join("\n")
         );
@@ -519,11 +541,13 @@ mod windows_behavioral_tests {
         assert_eq!(stdout, "1", "pipefail should surface false's exit code");
     }
 
-    /// Measures (rather than assumes) that `sh` resolves to a real shell
-    /// too, mirroring the two `bash` assertions above. `sh` was never
-    /// reasoned to be affected by the System32 stub (there is no
-    /// `sh.exe` there), but this closes that as an observation instead of
-    /// leaving it as an assumption.
+    /// Confirms `sh` resolves through this module to a real, working shell
+    /// too, mirroring the two `bash` assertions above. This does *not*
+    /// measure whether `System32` truly lacks an `sh.exe` — that stays a
+    /// belief, not something checked here or anywhere else — it only
+    /// measures that whatever `sh` resolves to is clean and runs, which is
+    /// what `sh`'s independent reason for routing through this module (see
+    /// the module doc) actually depends on.
     #[test]
     fn resolved_sh_exists_has_no_system32_component_and_runs() {
         let path = resolved_path("sh").expect("sh should resolve on the Windows CI runner");
