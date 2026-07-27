@@ -19,11 +19,12 @@ pub struct Redaction<'a> {
     /// that every error string in this module embeds.
     pub display_values: &'a IndexMap<String, String>,
     /// The run's throwaway `Masker`, built from the same values (see
-    /// `exec.rs:255`'s call site for why it's throwaway and per-call).
-    /// Applied only to the child's raw stderr — a `from:` source can echo a
-    /// secret by a route the interpolated command never takes, and that text
-    /// isn't a template, so name-based `redact` can't touch it; only
-    /// value-matching can.
+    /// `exec.rs`'s `fill` call site for why it's throwaway and per-call).
+    /// Applied to both `display` (on top of `redact` — catches a secret's
+    /// value surfacing through a *different*, non-secret param that
+    /// name-based `redact` can't see) and the child's raw stderr (the only
+    /// pass that applies there at all — stderr isn't a template, so `redact`
+    /// has nothing to substitute into).
     pub masker: &'a Masker,
 }
 
@@ -58,14 +59,24 @@ pub fn resolve_pick(
         .as_ref()
         .context("pick has neither options nor from (should be caught at load)")?;
     // Interpolate twice: `cmd` (real values) is what actually runs; `display`
-    // (secrets rendered as `••••••` via `redact`) is what every error string
-    // below embeds instead. `redact` clones the values map, so `values` and
+    // is what every error string below embeds instead, and gets both of this
+    // module's redaction passes — `redact` first (by name: a secret in its
+    // own declared slot becomes `••••••`, no length floor, but it only ever
+    // looks at params flagged `secret:` and only in their own placeholder),
+    // then `redaction.masker` on top (by value: catches that same secret's
+    // raw value resurfacing through a *different*, non-secret param — e.g. a
+    // URL built from it — which `redact` structurally cannot see, being
+    // name-based). Neither pass alone covers both leak shapes, so both run.
+    // `redact` clones the values map, so `values` and
     // `redaction.display_values` have identical key sets, and STRICT-mode
     // `interpolate`'s only error (`unknown parameter`) embeds the raw
     // template, never a value — so this second interpolation can't fail
     // differently from the first, and its own error text can't leak either.
     let cmd = interp::interpolate(from, values)?;
-    let display = interp::interpolate(from, redaction.display_values)?;
+    let display = redaction
+        .masker
+        .apply(&interp::interpolate(from, redaction.display_values)?)
+        .into_owned();
     let output = crate::shell::sh()?
         .arg("-c")
         .arg(&cmd)
@@ -73,15 +84,21 @@ pub fn resolve_pick(
         .output()
         .with_context(|| format!("failed to run option source `{display}`"))?;
     if !output.status.success() {
-        // Two layers meet in one string here, by design (see mask.rs's doc
-        // comments): `display` shows secrets as `••••••` (name-based,
-        // human-facing), the stderr text is masked as `<redacted>`
-        // (value-matching, machine-recognizable). Don't unify them — `redact`
-        // has no length floor (name-based, so it always applies) while the
-        // `Masker` does (`MIN_LEN`), so a secret under that floor still leaks
-        // via the *stderr* route but never via the *command* route. That
-        // asymmetry is intentional; fix it by adding a floor to `redact` or
-        // removing one from `Masker`, not by masking `display` here instead.
+        // `display` above already carries both of this module's passes. The
+        // child's stderr is arbitrary text, not a template, so only the
+        // value-based pass applies to it — there is no placeholder for
+        // `redact` to substitute into. Two markers can legitimately appear
+        // in one rendered string: `••••••` (`redact`, name-based, no length
+        // floor) inside `display`, and `<redacted>` (`masker`, value-based,
+        // `MIN_LEN` floor — see mask.rs's doc for why that floor exists) in
+        // either half. That's the existing two-layer doctrine (see mask.rs's
+        // doc comments) working as designed — don't unify them into one
+        // marker or one pass. The one residual gap this leaves: a secret
+        // under `MIN_LEN`, cross-leaked into a differently-named param,
+        // isn't caught by either pass (`redact` doesn't recognize it by
+        // name there; `masker` won't touch anything that short). That's
+        // `Masker`'s documented floor, not something to "fix" by giving
+        // `redact` one too or removing `masker`'s.
         let raw_stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = redaction.masker.apply(raw_stderr.trim_end());
         bail!(

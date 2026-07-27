@@ -111,9 +111,13 @@ zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-eas
 - `use` — must reference an existing named param, which must itself be
   concrete (a named param cannot be another `use:`).
 - `input.secret` — prompted masked (no echo into scrollback) and redacted
-  wherever the composed command line is *displayed*: the `running:` banner,
-  `--print`, and the ephemeral trust prompt show `••••••` / `<name>` instead
-  of the value. A `default:` is rejected for secrets — that would commit a
+  wherever a value pult renders itself: the `running:` banner, `--print`,
+  the ephemeral trust prompt, a `pick.from` source's own error text (both
+  the interpolated command it shows and the child's stderr, on a discovery
+  failure), and a dynamic picker's rendered options (a `from:` source can
+  echo a secret back as one of its own option values, e.g. an argv-echoing
+  CLI) — none of these ever show the value itself, only `••••••` / `<name>`
+  / `<redacted>`. A `default:` is rejected for secrets — that would commit a
   credential to the manifest. The value still reaches the child process argv
   as usual; a value passed as a CLI argument also lands in your shell history
   — prefer the prompt for anything truly sensitive, or `--params-json` (below)
@@ -130,18 +134,24 @@ zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-eas
   `<redacted>`, with each line of a multi-line value matched separately.
   Not recognized: the value base64-encoded, hex-encoded, URL-encoded,
   case-changed, or reassembled a piece at a time across separate lines. A
-  value under 6 characters is never masked (pult warns at start, on a run
-  where masking would otherwise apply, when one is). Never masked, because
-  pult never sees the output to mask it: an interactive command's stdio, a
-  run journaled as `MetaOnly` or not journaled at all, and — even on an
-  otherwise-fully-journaled run — anything a child writes over
-  `PULT_EVENTS` when a parent process already owns that channel (pult's
-  documented passthrough case: the child's `progress`/`status` lines go
-  straight to the ancestor that owns the fd, so pult's masking never runs
-  on them). Treat this as scrubbing of verbatim reflections, **not a
-  security boundary**: a script that transforms a secret before printing it
-  (encodes it, echoes half of it, wraps it in other text a character at a
-  time) still leaks it.
+  value under 6 characters is never masked (pult warns at the start of
+  every non-preview run, for each secret it finds too short to mask). Never
+  masked *by the journal*, because pult never sees the output to mask it:
+  an interactive command's stdio, a run journaled as `MetaOnly` or not
+  journaled at all, and — even on an otherwise-fully-journaled run —
+  anything a child writes over `PULT_EVENTS` when a parent process already
+  owns that channel (pult's documented passthrough case: the child's
+  `progress`/`status` lines go straight to the ancestor that owns the fd, so
+  pult's masking never runs on them). One exception, independent of
+  journaling entirely: the `running:` banner, a `pick.from` source's own
+  error text, and a dynamic picker's rendered options (all listed above) are
+  masked on *every* live run regardless of journaling state — interactive,
+  ephemeral, `PULT_JOURNAL=0`, or not journaled for any other reason —
+  because that masking happens where the value is filled in, before a
+  journal (if any) ever opens. Treat the rest of this as scrubbing of
+  verbatim reflections, **not a security boundary**: a script that
+  transforms a secret before printing it (encodes it, echoes half of it,
+  wraps it in other text a character at a time) still leaks it.
 
 ### `<step>`
 
