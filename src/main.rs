@@ -17,6 +17,7 @@ mod resolver;
 mod runner;
 mod runs;
 mod selfupdate;
+mod shell;
 mod trust;
 mod verify;
 mod x;

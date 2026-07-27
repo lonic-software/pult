@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
@@ -37,7 +36,7 @@ pub fn resolve_pick(
         .as_ref()
         .context("pick has neither options nor from (should be caught at load)")?;
     let cmd = interp::interpolate(from, values)?;
-    let output = Command::new("sh")
+    let output = crate::shell::sh()?
         .arg("-c")
         .arg(&cmd)
         .current_dir(dir)

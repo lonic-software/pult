@@ -1,4 +1,4 @@
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -44,7 +44,7 @@ fn probe_all(resolved: &Resolved) -> Result<Vec<Probe<'_>>> {
             let exit_code = match &cmd.check {
                 None => None,
                 Some(check) => {
-                    let status = Command::new("sh")
+                    let status = crate::shell::sh()?
                         .arg("-c")
                         .arg(check)
                         .current_dir(&resolved.run_dir)
