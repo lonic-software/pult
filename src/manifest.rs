@@ -122,8 +122,9 @@ pub struct CommandDef {
     pub description: Option<String>,
 }
 
-/// A param is a picker, free input, or a reference to a named param; exactly
-/// one of the three must be set (validated at load, so `kind()` is infallible).
+/// A param is a picker, free input, a reference to a named param, or a
+/// runtime-discovered set; exactly one of the four must be set (validated at
+/// load, so `kind()` is infallible).
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -134,21 +135,29 @@ pub struct ParamDef {
     pub input: Option<InputDef>,
     #[serde(default, rename = "use")]
     pub use_: Option<String>,
+    /// `dynamic-inputs` is the manifest's first hyphenated field — future
+    /// multiword fields follow the same precedent. schemars honors the
+    /// rename (proven already by `use_` above), so the committed schema
+    /// emits the hyphenated key, not `dynamic_inputs`.
+    #[serde(default, rename = "dynamic-inputs")]
+    pub dynamic_inputs: Option<DynamicInputsDef>,
 }
 
 pub enum ParamKind<'a> {
     Pick(&'a PickDef),
     Input(&'a InputDef),
     Use(&'a str),
+    DynamicInputs(&'a DynamicInputsDef),
 }
 
 impl ParamDef {
     pub fn kind(&self) -> ParamKind<'_> {
-        match (&self.pick, &self.input, &self.use_) {
-            (Some(pick), None, None) => ParamKind::Pick(pick),
-            (None, Some(input), None) => ParamKind::Input(input),
-            (None, None, Some(name)) => ParamKind::Use(name),
-            _ => unreachable!("validated at load: exactly one of pick/input/use"),
+        match (&self.pick, &self.input, &self.use_, &self.dynamic_inputs) {
+            (Some(pick), None, None, None) => ParamKind::Pick(pick),
+            (None, Some(input), None, None) => ParamKind::Input(input),
+            (None, None, Some(name), None) => ParamKind::Use(name),
+            (None, None, None, Some(di)) => ParamKind::DynamicInputs(di),
+            _ => unreachable!("validated at load: exactly one of pick/input/use/dynamic-inputs"),
         }
     }
 }
@@ -267,6 +276,39 @@ pub struct InputDef {
     /// default would be a credential committed to the manifest.
     #[serde(default)]
     pub secret: bool,
+}
+
+/// A parameter *set* discovered at run time: `from:`'s stdout lines become
+/// `key=value` pairs (parsed the same as `pick.from`, via
+/// `parse_dynamic_line`), each becoming its own runtime param under a key the
+/// manifest never names — the author declares only that the set exists, not
+/// which keys it has. Nothing consumes this yet; the resolver and executor
+/// wire it up in a later change.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct DynamicInputsDef {
+    /// Shell command whose stdout lines become the discovered keys. May
+    /// interpolate `{param}` for params declared *earlier* in the same
+    /// command — the resolver's dependent-ordering check covers this field
+    /// too, the same rule `pick.from` follows.
+    pub from: String,
+    /// Whether every discovered value is a credential: masked wherever an
+    /// interpolated command line is displayed, prompted without echo, and
+    /// journaled as `<redacted>`. Defaults to **`true`** — the opposite of
+    /// `input.secret`'s default. An `input:` author declares one known value
+    /// and can judge whether it's a secret; a `dynamic-inputs` author cannot
+    /// enumerate what discovery may someday return, so fail-safe is the only
+    /// defensible default: forgetting `secret: false` costs an
+    /// over-redacted-but-harmless journal, while forgetting `secret: true`
+    /// would echo credentials into scrollback and a durable journal. Do not
+    /// "fix" this asymmetry with `input:`'s default — it's deliberate.
+    #[serde(default = "default_true")]
+    pub secret: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A step: a plain script string, or a script with a declared contract.
@@ -487,9 +529,14 @@ fn validate_param(name: &str, def: &ParamDef) -> Result<()> {
     if !is_valid_name(name) {
         bail!("invalid param name `{name}`");
     }
-    let set = [def.pick.is_some(), def.input.is_some(), def.use_.is_some()];
+    let set = [
+        def.pick.is_some(),
+        def.input.is_some(),
+        def.use_.is_some(),
+        def.dynamic_inputs.is_some(),
+    ];
     if set.iter().filter(|b| **b).count() != 1 {
-        bail!("param `{name}`: needs exactly one of `pick`, `input`, or `use`");
+        bail!("param `{name}`: needs exactly one of `pick`, `input`, `use`, or `dynamic-inputs`");
     }
     if let Some(pick) = &def.pick {
         match (&pick.options, &pick.from) {
@@ -524,6 +571,16 @@ fn validate_param(name: &str, def: &ParamDef) -> Result<()> {
         bail!(
             "param `{name}`: a secret input can't have a `default` — that would commit a credential to the manifest"
         );
+    }
+    if let Some(dynamic_inputs) = &def.dynamic_inputs
+        && dynamic_inputs.from.trim().is_empty()
+    {
+        // Same predicate `pick`'s options use (`opt.value().trim().is_empty()`
+        // above) and their accessor mirrors (`OptionDef::description`'s
+        // comment) — a whitespace-only source is exactly as useless as an
+        // absent one, so it's rejected at load rather than surfacing as an
+        // opaque shell error at run time.
+        bail!("param `{name}`: `dynamic-inputs.from` must not be empty");
     }
     Ok(())
 }
@@ -675,6 +732,135 @@ commands:
         );
         let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("not both"), "got: {err}");
+    }
+
+    // ── dynamic-inputs (§2, design/dynamic-inputs.md) ──
+
+    /// The one-of-four check, zero-of-four direction. *Red:* change the
+    /// comparison from `!= 1` to `> 1` — an empty `{}` param (`count() == 0`)
+    /// would then pass validation and panic later at `kind()`'s
+    /// `unreachable!()` instead of failing loudly here.
+    #[test]
+    fn param_needs_one_of_four_kinds_rejects_zero() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      a: {}\n    run: \"echo {a}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("exactly one of"), "got: {err}");
+        assert!(err.contains("dynamic-inputs"), "got: {err}");
+    }
+
+    /// The one-of-four check, two-of-four direction, specifically the new
+    /// field paired with an old one — `pick`+`use`/`pick`+`input` were
+    /// already covered before this feature. *Red:* drop
+    /// `def.dynamic_inputs.is_some()` from the `set` array entirely (not
+    /// just relax the comparison) — a param declaring both `pick` and
+    /// `dynamic-inputs` would then read as count()==1 (only `pick` counted)
+    /// and load clean.
+    #[test]
+    fn param_needs_one_of_four_kinds_rejects_pick_and_dynamic_inputs() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      \
+             a: { pick: { options: [1] }, dynamic-inputs: { from: \"ls\" } }\n    run: \"echo {a}\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("exactly one of"), "got: {err}");
+    }
+
+    /// The hyphenated key round-trips: `dynamic-inputs:` parses into
+    /// `ParamDef.dynamic_inputs`, and `kind()` reports it honestly rather
+    /// than hitting the `unreachable!()` arm. *Red:* drop the
+    /// `rename = "dynamic-inputs"` attribute — `serde` would then require
+    /// (and only accept) the Rust field name `dynamic_inputs:` in YAML, and
+    /// this manifest (which spells it with a hyphen) would fail to parse
+    /// with an "unknown field" error instead.
+    #[test]
+    fn hyphenated_dynamic_inputs_key_parses() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      \
+             secrets: { dynamic-inputs: { from: \"./discover\" } }\n    run: \"true\"\n",
+        );
+        let loaded = load(&path).unwrap();
+        let def = &loaded.manifest.commands[0].params["secrets"];
+        assert!(matches!(def.kind(), ParamKind::DynamicInputs(di) if di.from == "./discover"));
+    }
+
+    /// The underscored spelling is rejected by `deny_unknown_fields` — the
+    /// hyphen is the only spelling the schema recognizes, matching `use`
+    /// (whose Rust field is `use_` but the YAML key is `use`, never `use_`).
+    /// *Red:* add `alias = "dynamic_inputs"` to the field (or otherwise
+    /// accept the underscored spelling) — this manifest would then parse
+    /// instead of failing with "unknown field".
+    #[test]
+    fn underscored_dynamic_inputs_key_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      \
+             secrets: { dynamic_inputs: { from: \"./discover\" } }\n    run: \"true\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("unknown field"), "got: {err}");
+    }
+
+    /// `secret` defaults to `true` when omitted — the opposite of
+    /// `input.secret`'s default (§6.4). *Red:* change
+    /// `#[serde(default = "default_true")]` to plain `#[serde(default)]` —
+    /// the omitted field would then deserialize to `bool::default()`
+    /// (`false`), flipping this assertion.
+    #[test]
+    fn dynamic_inputs_secret_defaults_to_true() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      \
+             secrets: { dynamic-inputs: { from: \"./discover\" } }\n    run: \"true\"\n",
+        );
+        let loaded = load(&path).unwrap();
+        let ParamKind::DynamicInputs(di) = loaded.manifest.commands[0].params["secrets"].kind()
+        else {
+            panic!("expected dynamic-inputs");
+        };
+        assert!(di.secret);
+    }
+
+    /// `secret: false` is honored when given explicitly. *Red:* hardcode
+    /// `secret: true` in `kind()`/ignore the parsed field — this would then
+    /// read `true` regardless of what the manifest says.
+    #[test]
+    fn dynamic_inputs_secret_false_is_honored() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      \
+             secrets: { dynamic-inputs: { from: \"./discover\", secret: false } }\n    run: \"true\"\n",
+        );
+        let loaded = load(&path).unwrap();
+        let ParamKind::DynamicInputs(di) = loaded.manifest.commands[0].params["secrets"].kind()
+        else {
+            panic!("expected dynamic-inputs");
+        };
+        assert!(!di.secret);
+    }
+
+    /// An empty `from` is rejected at load, matching the `trim().is_empty()`
+    /// predicate `pick`'s option values use. *Red:* drop the
+    /// `dynamic_inputs.from.trim().is_empty()` check from `validate_param`.
+    #[test]
+    fn empty_dynamic_inputs_from_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      \
+             secrets: { dynamic-inputs: { from: \"\" } }\n    run: \"true\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("must not be empty"), "got: {err}");
+    }
+
+    /// A whitespace-only `from` is rejected the same way — the predicate is
+    /// `trim().is_empty()`, not `is_empty()`. *Red:* use bare `is_empty()`
+    /// instead of `trim().is_empty()` in the check.
+    #[test]
+    fn whitespace_only_dynamic_inputs_from_is_rejected() {
+        let (_d, path) = write_manifest(
+            "version: 1\ncommands:\n  - id: x\n    title: X\n    params:\n      \
+             secrets: { dynamic-inputs: { from: \"   \" } }\n    run: \"true\"\n",
+        );
+        let err = format!("{:#}", load(&path).unwrap_err());
+        assert!(err.contains("must not be empty"), "got: {err}");
     }
 
     #[test]

@@ -698,6 +698,28 @@ fn resolve_command(
         params.insert(name.clone(), concrete);
     }
 
+    // `interactive: true` + a `dynamic-inputs` param is refused here, after
+    // `use:` inlining, not in `validate_param` at load: `validate_param`
+    // takes `(name, def)` and never sees `cmd.interactive`, and a
+    // `dynamic-inputs` param can arrive via `use:` from a named param (see
+    // the inlining loop above) — so the command's true param set doesn't
+    // exist until this point. A load-time check would pass a command that
+    // only *acquires* the param by reference. The rationale: delivery hands
+    // the payload over the child's stdin (see the design doc), and a
+    // payload-bearing stdin can't also be a controlling terminal — once the
+    // glue drains it there's no way back to a tty.
+    if cmd.interactive
+        && let Some(name) = params
+            .iter()
+            .find_map(|(name, def)| def.dynamic_inputs.is_some().then_some(name))
+    {
+        bail!(
+            "{}: `interactive: true` can't be combined with param `{name}`'s `dynamic-inputs` — \
+             a payload-bearing stdin can't also be a controlling terminal",
+            ctx()
+        );
+    }
+
     // Dependent-picker ordering: a `from:` may reference only earlier params.
     let mut seen: HashSet<&str> = HashSet::new();
     for (name, def) in &params {
@@ -1431,6 +1453,64 @@ commands:
         let import = resolved.commands.iter().find(|c| c.id == "import").unwrap();
         assert!(!import.interactive);
         assert_eq!(import.check.as_deref(), Some("command -v psql"));
+    }
+
+    /// Falsifier 17, direct declaration. *Red:* comment out the
+    /// `cmd.interactive && …` block in `resolve_command` — this test alone
+    /// would then stay green if the check were (wrongly) relocated to
+    /// `validate_param`, since a direct declaration is visible at load time
+    /// too. See the `_via_use` sibling below for the load-bearing half.
+    #[test]
+    fn interactive_and_dynamic_inputs_direct_declaration_is_rejected() {
+        let (_d, resolved) = setup(
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    interactive: true\n    params:\n      \
+             secrets: { dynamic-inputs: { from: \"./discover\" } }\n    run: \"true\"\n",
+            &[],
+        );
+        let err = format!("{:#}", resolved.unwrap_err());
+        assert!(err.contains("controlling terminal"), "got: {err}");
+    }
+
+    /// Falsifier 17, the load-bearing half. `secrets` is declared only in
+    /// top-level `params:` and pulled into the command via `use:` — never
+    /// written inline in the command's own `params:` block. Reddening input:
+    /// remove the `cmd.interactive` check from `resolve_command` (post-`use:`
+    /// inlining) and put an equivalent check in `manifest::validate_param`
+    /// instead (the "at load" placement the design doc's own §2/§4.3 said
+    /// before being corrected). `validate_param` runs per-param, before
+    /// inlining, on a `def` whose `kind()` is `Use("secrets")` here, not
+    /// `DynamicInputs` — so a load-time check has no `dynamic-inputs` to see
+    /// and cannot fire; `resolve_command`'s inlining loop above is what turns
+    /// this into a concrete `dynamic-inputs` def, and only after that point
+    /// does the command's true param set exist. This input is producible
+    /// here because top-level `params:` + `use:` is exactly the reuse
+    /// mechanism named params exist for (see `parses_blocks_and_run_lists`
+    /// in manifest.rs), and this manifest is otherwise ordinary — no CI/
+    /// platform property stands between this input and the check.
+    #[test]
+    fn interactive_and_dynamic_inputs_via_use_is_rejected() {
+        let (_d, resolved) = setup(
+            "version: 1\nparams:\n  secrets: { dynamic-inputs: { from: \"./discover\" } }\n\
+             commands:\n  - id: c\n    title: C\n    interactive: true\n    params:\n      \
+             site_secrets: { use: secrets }\n    run: \"true\"\n",
+            &[],
+        );
+        let err = format!("{:#}", resolved.unwrap_err());
+        assert!(err.contains("controlling terminal"), "got: {err}");
+        assert!(err.contains("site_secrets"), "got: {err}");
+    }
+
+    /// A `dynamic-inputs` param with `interactive` unset (default false)
+    /// resolves clean — the refusal is specific to the combination, not to
+    /// declaring the kind at all.
+    #[test]
+    fn dynamic_inputs_without_interactive_resolves_clean() {
+        let (_d, resolved) = setup(
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    params:\n      \
+             secrets: { dynamic-inputs: { from: \"./discover\" } }\n    run: \"true\"\n",
+            &[],
+        );
+        assert!(resolved.is_ok(), "got: {:?}", resolved.err());
     }
 
     #[test]

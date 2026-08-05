@@ -202,7 +202,20 @@ fn run() -> Result<i32> {
         Some((id, sub)) => {
             let cmd = resolve_manifest_command(&resolved.commands, id)?;
             let mut provided = HashMap::new();
-            for name in cmd.params.keys() {
+            for (name, def) in &cmd.params {
+                // `build_cli` gives a `dynamic-inputs` param no positional
+                // `Arg` at all (see its own comment) — asking `sub` for an
+                // id it never registered panics under debug assertions
+                // (`clap_builder::parser::error::MatchesError::unwrap`,
+                // verified against this repo's own `clap_builder` 4.6.0:
+                // `get_one` → `try_get_one` → `verify_arg`, which errors
+                // `UnknownArgument` for any id outside `valid_args` whenever
+                // `cfg(debug_assertions)` holds, i.e. every `cargo
+                // test`/dev-profile run). Filter here rather than let `fill`
+                // catch it — this loop runs before `fill` is ever called.
+                if matches!(def.kind(), ParamKind::DynamicInputs(_)) {
+                    continue;
+                }
                 if let Some(v) = sub.get_one::<String>(name.as_str()) {
                     provided.insert(name.clone(), v.clone());
                 }
@@ -496,12 +509,26 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
         if let Some(description) = &cmd.description {
             sub = sub.long_about(format!("{}\n\n{description}", cmd.title));
         }
-        for (index, (name, def)) in cmd.params.iter().enumerate() {
+        // A separate counter for positional indices, incremented only for a
+        // param that actually gets an `Arg` — not `cmd.params`' own
+        // `enumerate()`. `dynamic-inputs` gets no positional at all (there's
+        // no single scalar to bind: the whole point is a set of keys
+        // unknown until run time), and clap positionals must be gapless —
+        // `.index()` on a later `Arg` with nothing at a lower index panics —
+        // so skipping the param without a compensating counter would leave
+        // a hole the moment a `dynamic-inputs` param isn't declared last.
+        let mut position = 0;
+        for (name, def) in cmd.params.iter() {
+            let kind = def.kind();
+            if matches!(kind, ParamKind::DynamicInputs(_)) {
+                continue;
+            }
+            position += 1;
             let mut arg = Arg::new(name.clone())
-                .index(index + 1)
+                .index(position)
                 .required(false)
                 .value_name(name.to_uppercase());
-            arg = match def.kind() {
+            arg = match kind {
                 ParamKind::Pick(pick) => match &pick.options {
                     Some(opts) => {
                         let values: Vec<&str> = opts.iter().map(OptionDef::value).collect();
@@ -514,6 +541,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 }
                 ParamKind::Input(_) => arg.help("free text; prompted if omitted"),
                 ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
+                ParamKind::DynamicInputs(_) => unreachable!("skipped by the `continue` above"),
             };
             sub = sub.arg(arg);
         }
@@ -602,6 +630,24 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                             // UIs render secret inputs as password fields and
                             // must never echo or persist their values.
                             "secret": input.secret,
+                        })
+                    }
+                    // Mirrors the dynamic-pick shape immediately above
+                    // (`(None, Some(from))`), per the design doc's §9: no key
+                    // list (the source is never run here, same
+                    // never-run-sources guarantee as everywhere else in
+                    // `--list --json`), but `source`/`depends_on` so a caller
+                    // can tell what to resolve and in what order, plus
+                    // `secret` since it's author-declared and static (unlike
+                    // a discovered pair's secrecy, which is set-level and
+                    // doesn't exist until run time).
+                    ParamKind::DynamicInputs(di) => {
+                        json!({
+                            "name": name,
+                            "kind": "dynamic-inputs",
+                            "source": di.from,
+                            "depends_on": interp::placeholders(&di.from).unwrap_or_default(),
+                            "secret": di.secret,
                         })
                     }
                     ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
@@ -822,6 +868,85 @@ commands:
         assert_eq!(
             deploy["steps"],
             serde_json::json!(["restore-db", "run-migrations", "echo done"])
+        );
+    }
+
+    /// §9: a `dynamic-inputs` param gets an additive kind object mirroring
+    /// the dynamic-pick shape — no key list (the source is never run here),
+    /// `source`/`depends_on` so a caller knows what to resolve and in what
+    /// order, and `secret` since it's static and author-declared for this
+    /// kind (unlike a discovered pair's set-level secrecy, which doesn't
+    /// exist until run time). *Reddening input:* a `dynamic-inputs` param
+    /// whose `from:` interpolates an earlier param, so `depends_on` has
+    /// something to be wrong about. *Red:* reshape any field (drop
+    /// `depends_on`, rename `source`, or emit a key list) — the shape below
+    /// wouldn't match.
+    #[test]
+    fn list_json_dynamic_inputs_kind_object() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            "version: 1\ncommands:\n  - id: go\n    title: Go\n    params:\n      \
+             env: { pick: { options: [dev] } }\n      \
+             secrets: { dynamic-inputs: { from: \"./discover --env {env}\", secret: false } }\n    \
+             run: \"true\"\n",
+        )
+        .unwrap();
+        let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
+        let resolved = resolver::resolve(loaded).unwrap();
+        let doc = list_json(&resolved, false, Scope::Repo);
+
+        let params = doc["commands"][0]["params"].as_array().unwrap();
+        let di = &params[1];
+        assert_eq!(di["name"], "secrets");
+        assert_eq!(di["kind"], "dynamic-inputs");
+        assert_eq!(di["source"], "./discover --env {env}");
+        assert_eq!(di["depends_on"], serde_json::json!(["env"]));
+        assert_eq!(di["secret"], false);
+        assert!(di.get("keys").is_none(), "source must never run here");
+    }
+
+    /// The load-bearing positional test for §8/§15 step 7's early arrival:
+    /// `build_cli` gives `dynamic-inputs` no positional `Arg`, so it needs
+    /// its own counter (not `cmd.params`'s own `enumerate()`) or a later
+    /// param inherits a gapped index. The dynamic param sits in the
+    /// *middle* deliberately — declaring it last would pass vacuously,
+    /// since nothing downstream would ever need an index past it. *Red:*
+    /// revert to `.enumerate()` supplying `index + 1` directly (dropping
+    /// the separate `position` counter) — `env` gets index 1 as before,
+    /// but `region` (declared third) keeps the enumerate-derived index 3
+    /// while only two `Arg`s exist, so clap's own positional-index
+    /// validation rejects the command at `build_cli` time — a build
+    /// failure, not a silent misbind, but still not the well-formed CLI
+    /// falsifier 24 requires; verified by actually running the mutation
+    /// below rather than asserted from documentation.
+    #[test]
+    fn dynamic_inputs_param_leaves_later_positionals_gapless() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            "version: 1\ncommands:\n  - id: go\n    title: Go\n    params:\n      \
+             env: { pick: { options: [dev, prod] } }\n      \
+             site_secrets: { dynamic-inputs: { from: \"./discover\" } }\n      \
+             region: { pick: { options: [eu, us] } }\n    run: \"true\"\n",
+        )
+        .unwrap();
+        let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
+        let resolved = resolver::resolve(loaded).unwrap();
+
+        let cli = build_cli(&resolved, Scope::Repo);
+        let matches = cli
+            .try_get_matches_from(["pult", "go", "dev", "eu"])
+            .expect("two positionals must bind cleanly with the dynamic param skipped");
+        let (_, sub) = matches.subcommand().unwrap();
+        assert_eq!(
+            sub.get_one::<String>("env").map(String::as_str),
+            Some("dev")
+        );
+        assert_eq!(
+            sub.get_one::<String>("region").map(String::as_str),
+            Some("eu"),
+            "region (the second real positional) must bind to the second CLI value"
         );
     }
 

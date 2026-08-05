@@ -359,6 +359,21 @@ fn fill(
             (None, ParamKind::Input(input)) => {
                 prompt::text(&format!("{name}?"), input.default.as_deref())?
             }
+            // Not wired up yet (#6 lands it over several PRs — see the
+            // design doc's §15). Placed after the `(None, _) if
+            // run_dir.is_none()` preview arm above, deliberately: preview
+            // (`--print`, the ephemeral trust prompt) keeps showing `<name>`
+            // for this kind exactly like every other unresolved param,
+            // never erroring — only a *live* fill (this arm, reached when
+            // `run_dir` is `Some`) refuses, since that's the point nothing
+            // downstream can act on it yet. A provided value doesn't grant
+            // an escape hatch either: there's no scalar interpretation of a
+            // `dynamic-inputs` param's "value" for this arm to accept, so
+            // `Some` bails here too (in both preview and live). One line to
+            // delete once real discovery lands.
+            (_, ParamKind::DynamicInputs(_)) => {
+                bail!("param `{name}`: `dynamic-inputs` is not implemented yet")
+            }
             (_, ParamKind::Use(_)) => unreachable!("resolver inlines every use: param"),
         };
         values.insert(name.clone(), value);
@@ -751,5 +766,89 @@ mod tests {
         .collect();
         let (_masker, unmaskable) = build_masker(cmd, &values);
         assert_eq!(unmaskable, vec!["token".to_string()]);
+    }
+
+    fn dynamic_inputs_cmd() -> (tempfile::TempDir, crate::resolver::Resolved) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pult.yaml"),
+            "version: 1\ncommands:\n  - id: go\n    title: Go\n    params:\n      \
+             secrets: { dynamic-inputs: { from: \"./discover\" } }\n    run: \"true\"\n",
+        )
+        .unwrap();
+        let resolved =
+            resolver::resolve(manifest::load(&dir.path().join("pult.yaml")).unwrap()).unwrap();
+        (dir, resolved)
+    }
+
+    /// Nothing consumes `dynamic-inputs` yet (issue #6 lands it over several
+    /// PRs), so `fill`'s live path — reached once `run_dir` is `Some`, i.e.
+    /// after trust, for a real run — refuses it outright rather than
+    /// silently doing nothing with it. Covers the "not provided" half;
+    /// see the `_when_provided` sibling for the other. *Reddening input:* a
+    /// resolved command declaring `dynamic-inputs` and no value for it,
+    /// filled with a real `run_dir` — producible directly, no TTY or
+    /// platform property involved. *Red:* delete the
+    /// `(_, ParamKind::DynamicInputs(_))` arm — verified to fail to
+    /// *compile* (non-exhaustive match), not merely misbehave at runtime,
+    /// which is a stronger gate than this test alone — or misplace it
+    /// before the `(None, _) if run_dir.is_none()` preview arm, which
+    /// wouldn't redden *this* test (both still error) but would break the
+    /// `_previews_as_a_placeholder` sibling below instead.
+    #[test]
+    fn dynamic_inputs_param_is_refused_at_live_fill_when_not_provided() {
+        let (dir, resolved) = dynamic_inputs_cmd();
+        let cmd = &resolved.commands[0];
+        let err = fill(cmd, &HashMap::new(), Some(dir.path())).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not implemented yet"),
+            "got: {err:#}"
+        );
+    }
+
+    /// The other half of "cover both `Some(_)` and `None`": providing a
+    /// value for the param doesn't grant an escape hatch, since there's no
+    /// scalar interpretation of a `dynamic-inputs` param's value for `fill`
+    /// to accept. *Reddening input:* the same command, but with a value
+    /// supplied for `secrets` — a case the sibling test above cannot reach,
+    /// since it never provides one; narrowing the arm's pattern from
+    /// `(_, ParamKind::DynamicInputs(_))` to `(None, ParamKind::DynamicInputs(_))`
+    /// leaves this exact case, `(Some(_), DynamicInputs(_))`, uncovered.
+    /// *Red:* that narrowing doesn't produce a wrong answer here — it fails
+    /// to *compile* (non-exhaustive match), which is its own gate, stronger
+    /// than a runtime assertion; the reachable runtime red for this test is
+    /// dropping the arm entirely, same as the sibling above, which this
+    /// test independently also catches.
+    #[test]
+    fn dynamic_inputs_param_is_refused_at_live_fill_even_when_provided() {
+        let (dir, resolved) = dynamic_inputs_cmd();
+        let cmd = &resolved.commands[0];
+        let provided: HashMap<_, _> = [("secrets".to_string(), "whatever".to_string())].into();
+        let err = fill(cmd, &provided, Some(dir.path())).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not implemented yet"),
+            "got: {err:#}"
+        );
+    }
+
+    /// Pairs with `resolver::tests::dynamic_inputs_without_interactive_resolves_clean`
+    /// — resolution genuinely succeeds for this command (nothing about the
+    /// kind is rejected at load or resolve time); it's specifically the
+    /// *live-fill* path that refuses, not resolution. Preview (`run_dir:
+    /// None`, what `--print` and the ephemeral trust prompt use) keeps
+    /// showing `<name>` for this kind exactly like every other unresolved
+    /// param — never erroring — which is what makes the live-fill arm "one
+    /// line to delete" later rather than something that also has to unpick
+    /// preview's behavior. *Reddening input:* the same resolved command,
+    /// filled with `run_dir: None`. *Red:* move the
+    /// `(_, ParamKind::DynamicInputs(_))` arm above the
+    /// `(None, _) if run_dir.is_none()` arm — this test would then get the
+    /// "not implemented yet" error instead of the placeholder.
+    #[test]
+    fn dynamic_inputs_param_previews_as_a_placeholder_not_an_error() {
+        let (_dir, resolved) = dynamic_inputs_cmd();
+        let cmd = &resolved.commands[0];
+        let values = fill(cmd, &HashMap::new(), None).unwrap();
+        assert_eq!(values["secrets"], "<secrets>");
     }
 }
