@@ -11,7 +11,7 @@ use crate::manifest::{ParamDef, ParamKind};
 use crate::mask::{self, Masker};
 use crate::resolver::{Resolved, ResolvedCommand, ResolvedRun};
 use crate::runner::Journaling;
-use crate::{compile, interp, options, prompt, runner, shell, trust};
+use crate::{compile, events, interp, options, prompt, runner, shell, trust};
 
 /// Execute one command: fill its params (from provided values or interactive
 /// prompts, in declared order — which is what makes dependent `from:` sources
@@ -166,8 +166,11 @@ pub fn execute(
                 journaling,
             )
         }
+        // A channel inherited from upstream belongs to whoever set it, and
+        // only a channel's owner emits `step`: inject the guards only when
+        // pult may own the channel itself.
         ResolvedRun::Steps(_) => runner::run_bash(
-            &compile::compile(cmd, &values, true)?,
+            &compile::compile(cmd, &values, !events::inherited_channel())?,
             &cmd.id,
             &resolved.run_dir,
             journaling,

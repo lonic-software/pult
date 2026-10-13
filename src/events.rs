@@ -11,13 +11,15 @@
 //! This is load-bearing for forward compatibility: a script or surface built
 //! against a later vocabulary must never break an older pult, and vice versa.
 
-// This module's only callers are the journal (`journal.rs`'s `Event` import)
-// and the unix-only events channel (`runner.rs`'s `events_unix`) — both
-// gated off on non-unix by M4 (journaling disabled entirely there, see
-// `Journal::start`). So on a non-unix target every item below is compiled
-// but unreachable; `allow` only there, never on unix (where this module is
-// live and dead-code detection should stay fully armed). Expected to become
-// vestigial once journaling reaches Windows (issue #8).
+// Apart from `inherited_channel` (which `exec.rs` asks on every target
+// before compiling a step list), this module's callers are the journal
+// (`journal.rs`'s `Event` import) and the unix-only events channel
+// (`runner.rs`'s `events_unix`) — both gated off on non-unix by M4
+// (journaling disabled entirely there, see `Journal::start`). So on a
+// non-unix target most items below are compiled but unreachable; `allow`
+// only there, never on unix (where this module is live and dead-code
+// detection should stay fully armed). Expected to become vestigial once
+// journaling reaches Windows (issue #8).
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use std::io::Write;
@@ -101,14 +103,50 @@ fn split_first(s: &str) -> (&str, &str) {
     }
 }
 
+/// Whether `s` is a value `PULT_EVENTS` could legitimately hold: a bare
+/// decimal fd number, no sign or surrounding whitespace, small enough to
+/// be a real descriptor. Anything else (a path, `""`, `-1`, ` 3`, a
+/// number too large to be a real fd) is rejected: bash's `>&word` redirects
+/// to a *file* named `word` when `word` isn't a bare number, so an inherited
+/// `PULT_EVENTS=events.log` would make every injected `step` guard truncate a
+/// file by that name instead of writing to a channel.
+pub fn is_valid_events_fd(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && s.parse::<u32>().is_ok_and(|n| n <= 4096)
+}
+
+/// Whether this process inherited a `PULT_EVENTS` channel that someone
+/// upstream owns — a valid value already in pult's own environment. Such a
+/// channel is passed through to the child untouched, and pult injects no
+/// `step` lines onto it: only a channel's owner emits `step`, and a parent
+/// that set the variable is that owner. Decided before compiling, from the
+/// same rule the runner applies when it later chooses passthrough, so the
+/// two cannot disagree.
+pub fn inherited_channel() -> bool {
+    std::env::var_os("PULT_EVENTS").is_some_and(|v| v.to_str().is_some_and(is_valid_events_fd))
+}
+
+/// A `progress` percentage mapped onto the whole run: the band of the step
+/// it arrived in, `((k-1)*100 + pct) / n`. A child reports `progress` as
+/// 0–100 of its own work, which is 0–100 of the step that launched it; with
+/// no step seen yet the run is one band and the value passes through. With
+/// `pct` 0 this is also where step `k` begins, the value a `step` event
+/// draws.
+pub fn run_pct(step: Option<(u32, u32)>, pct: u8) -> u8 {
+    match step {
+        Some((k, n)) => ((u64::from(k - 1) * 100 + u64::from(pct)) / u64::from(n)) as u8,
+        None => pct,
+    }
+}
+
 /// Renders parsed events as OSC 9;4 progress sequences (the ConEmu/Windows
 /// Terminal/WezTerm/Ghostty progress protocol) to a writer — stderr, in the
-/// plain CLI. Tracks whether an explicit `progress` has arrived so `step`
-/// milestones stop driving the percentage once one has (explicit beats
-/// derived — see `handle`).
+/// plain CLI. Tracks the current step so a `progress` value is drawn within
+/// that step's band (see `run_pct`), and every `step` keeps moving the bar.
 #[derive(Default)]
 pub struct Renderer {
-    explicit_progress_seen: bool,
+    step: Option<(u32, u32)>,
 }
 
 impl Renderer {
@@ -124,27 +162,19 @@ impl Renderer {
     pub fn handle(&mut self, event: &Event, out: &mut impl Write) -> bool {
         match event {
             Event::Progress { pct: Some(p), .. } => {
-                self.explicit_progress_seen = true;
-                write_osc(out, 1, *p);
+                write_osc(out, 1, run_pct(self.step, *p));
                 true
             }
             Event::Progress { pct: None, .. } => {
-                self.explicit_progress_seen = true;
                 write_osc(out, 3, 0);
                 true
             }
             // Consumed, not rendered — `status` exists for richer surfaces.
             Event::Status(_) => false,
             Event::Step { k, n, .. } => {
-                // Coarse progress from milestones — only until a real
-                // `progress` event takes over.
-                if !self.explicit_progress_seen {
-                    let pct = ((*k - 1) as u64 * 100 / *n as u64) as u8;
-                    write_osc(out, 1, pct);
-                    true
-                } else {
-                    false
-                }
+                self.step = Some((*k, *n));
+                write_osc(out, 1, run_pct(self.step, 0));
+                true
             }
         }
     }
@@ -293,27 +323,28 @@ mod tests {
         assert_eq!(parse("frobnicate 42"), None);
     }
 
+    fn osc(buf: &[u8]) -> String {
+        String::from_utf8_lossy(buf).into_owned()
+    }
+
     #[test]
-    fn step_derived_pct_yields_to_explicit_progress() {
+    fn progress_is_drawn_within_its_steps_band() {
         let mut renderer = Renderer::new();
         let mut buf = Vec::new();
 
-        // First a milestone: derived pct = (2-1)*100/4 = 25 → state 1;25.
+        // Step 2 of 3 begins at (2-1)*100/3 = 33.
         renderer.handle(
             &Event::Step {
                 k: 2,
-                n: 4,
+                n: 3,
                 name: "x".to_string(),
             },
             &mut buf,
         );
-        assert!(
-            String::from_utf8_lossy(&buf).contains("9;4;1;25"),
-            "got: {:?}",
-            buf
-        );
+        assert_eq!(osc(&buf), "\x1b]9;4;1;33\x1b\\");
 
-        // Then an explicit progress — drives the percent from here on.
+        // A child's 60% of step 2 is (100+60)/3 = 53 of the run — not the raw
+        // 60, the step's start 33, or the unscaled 33+60 = 93.
         buf.clear();
         renderer.handle(
             &Event::Progress {
@@ -322,11 +353,25 @@ mod tests {
             },
             &mut buf,
         );
-        assert!(String::from_utf8_lossy(&buf).contains("9;4;1;60"));
+        assert_eq!(osc(&buf), "\x1b]9;4;1;53\x1b\\");
+    }
 
-        // A further step milestone must NOT override the explicit percent.
-        buf.clear();
+    #[test]
+    fn a_step_after_progress_still_moves_the_bar() {
+        let mut renderer = Renderer::new();
+        let mut buf = Vec::new();
         renderer.handle(
+            &Event::Progress {
+                pct: Some(90),
+                text: None,
+            },
+            &mut buf,
+        );
+
+        // Explicit progress no longer silences milestones: step 3 of 4
+        // draws its start, 50.
+        buf.clear();
+        let wrote = renderer.handle(
             &Event::Step {
                 k: 3,
                 n: 4,
@@ -334,11 +379,32 @@ mod tests {
             },
             &mut buf,
         );
-        assert!(
-            buf.is_empty(),
-            "step must yield once explicit progress was seen, got: {:?}",
-            buf
+        assert!(wrote);
+        assert_eq!(osc(&buf), "\x1b]9;4;1;50\x1b\\");
+    }
+
+    #[test]
+    fn progress_before_any_step_spans_the_whole_run() {
+        let mut renderer = Renderer::new();
+        let mut buf = Vec::new();
+        renderer.handle(
+            &Event::Progress {
+                pct: Some(42),
+                text: None,
+            },
+            &mut buf,
         );
+        assert_eq!(osc(&buf), "\x1b]9;4;1;42\x1b\\");
+    }
+
+    #[test]
+    fn run_pct_bands() {
+        assert_eq!(run_pct(None, 42), 42);
+        assert_eq!(run_pct(Some((1, 1)), 42), 42);
+        assert_eq!(run_pct(Some((2, 3)), 60), 53);
+        assert_eq!(run_pct(Some((1, 4)), 100), 25);
+        assert_eq!(run_pct(Some((4, 4)), 100), 100);
+        assert_eq!(run_pct(Some((3, 4)), 0), 50);
     }
 
     #[test]

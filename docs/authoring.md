@@ -129,7 +129,9 @@ behaves identically whether or not anything is listening:
 You don't have to write this yourself to get milestones: structure the
 command as a step list (below) and pult injects `step k/n <name>` emissions
 for you at compile time, one per step name. `progress` is for refining
-*within* a step, when you have a real percentage to report. Either way,
+*within* a step, when you have a real percentage to report: report 0–100 of
+the step's own work, and pult draws it inside that step's share of the run.
+Leave `step` lines to pult. Either way,
 events are entirely optional and a pult-less run (or one piped, non-tty) is
 completely unaffected — see [reference.md](reference.md#events-protocol--pult_events)
 for the full vocabulary and OSC 9;4 rendering.

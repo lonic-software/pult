@@ -689,7 +689,9 @@ mod events_unix {
     pub(super) fn execute(command: &mut Command, what: &str) -> Result<i32> {
         // 1. Passthrough: a parent (e.g. the desktop app, pre-journal) owns
         // the channel — its env var and fd inherit through on their own.
-        // pult must not create its own pipe or translate anything.
+        // pult must not create its own pipe or translate anything, and
+        // `exec.rs` already compiled a step list without its `step` guards
+        // (`events::inherited_channel`, the same validity rule as here).
         //
         // But only honor a value that could plausibly be an fd: bash's
         // `>&word` redirects to a *file* named `word` when `word` isn't a
@@ -701,7 +703,7 @@ mod events_unix {
         // value, which is always valid).
         if let Some(val) = std::env::var_os("PULT_EVENTS") {
             let val = val.to_string_lossy().into_owned();
-            if is_valid_events_fd(&val) {
+            if events::is_valid_events_fd(&val) {
                 return run_plain(command, what);
             }
             eprintln!("pult: ignoring invalid PULT_EVENTS={val}");
@@ -757,17 +759,6 @@ mod events_unix {
         Ok(code)
     }
 
-    /// Whether `s` is a value `PULT_EVENTS` could legitimately hold: a bare
-    /// decimal fd number, no sign or surrounding whitespace, small enough to
-    /// be a real descriptor. Anything else (a path, `""`, `-1`, ` 3`, a
-    /// number too large to be a real fd) is rejected — see the passthrough
-    /// comment in `execute` for why this matters under bash's `>&word`.
-    pub(super) fn is_valid_events_fd(s: &str) -> bool {
-        !s.is_empty()
-            && s.bytes().all(|b| b.is_ascii_digit())
-            && s.parse::<u32>().is_ok_and(|n| n <= 4096)
-    }
-
     fn run_plain(command: &mut Command, what: &str) -> Result<i32> {
         let status = command
             .status()
@@ -789,7 +780,7 @@ mod events_unix {
     ) -> EventsClaim {
         if let Some(val) = std::env::var_os("PULT_EVENTS") {
             let val = val.to_string_lossy().into_owned();
-            if is_valid_events_fd(&val) {
+            if events::is_valid_events_fd(&val) {
                 return EventsClaim::Passthrough;
             }
             eprintln!("pult: ignoring invalid PULT_EVENTS={val}");
@@ -1098,7 +1089,7 @@ mod mask_event_tests {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::events_unix::is_valid_events_fd;
+    use crate::events::is_valid_events_fd;
 
     #[test]
     fn accepts_plain_fd_numbers() {
