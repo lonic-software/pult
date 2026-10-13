@@ -198,7 +198,7 @@ already have (ssh keys, credential helpers) — there is nothing to log into.
 - **"--trust=… does not match"** → the manifest's trust hash is not the one
   you named: it changed since that hash was reviewed, or the hash is wrong.
   Review the manifest as it is now and pin the hash the message names.
-- **"invalid value … for '--trust'"** → the value is not a full trust hash
+- **"invalid value … for '--trust[=<HASH>]'"** → the value is not a full trust hash
   (64 hex characters); copy it from the prompt, the refusal, or
   `pult --list --json`.
 - **"no pult.yaml found"** → you're not inside a repo that has one (it
