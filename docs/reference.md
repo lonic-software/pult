@@ -308,7 +308,8 @@ run one command, the trust prompt shows the **composed command about to run**
 while you read the actual script; the preview never executes module code
 (dynamic option sources stay unresolved), so it's safe before trust. `--print`
 is the same preview with no prompt and nothing recorded — a trust-free dry run;
-`--trust` records trust up front for CI. Use it to *try* a command set;
+`--trust=<hash>` and a bare `--trust` work as they do for a manifest (see Trust
+model). Use it to *try* a command set;
 `pult includes add` to *keep* one. Intercepted before manifest discovery, so it
 works where no `pult.yaml` exists.
 
@@ -329,8 +330,24 @@ command the manifest declares, not the single one you invoked. (The exception is
 also shows the composed command about to run — see below.) Stored per user in
 `<config>/pult/trust.json` (macOS: `~/Library/Application Support/pult/`,
 Linux: `~/.config/pult/`, Windows: `%APPDATA%\pult\`); override with
-`PULT_TRUST_STORE`. Non-TTY + untrusted = refusal; `--trust` accepts
-explicitly and records immediately, even for non-executing invocations.
+`PULT_TRUST_STORE`.
+
+The trust hash is the value a grant names. The prompt shows it in full under
+**First contact** or **CHANGED** (with the hash that was trusted before), and
+so does the refusal. Without a terminal, an untrusted manifest is refused with
+`trust_changed`; under `--json` the error document's `details` carries the
+hash (see Error documents), and `pult --list --json` reports it as
+`trust_hash` without needing trust.
+
+- `--trust=<hash>` accepts the manifest only at exactly that hash, and records
+  it immediately, even for a non-executing invocation (`pult --trust=<hash>
+  --list`). Any other hash is refused (`what_changed: "unexpected"`) and
+  records nothing — even when the manifest is already trusted at its current
+  hash, so a pinned hash in CI fails the moment the manifest moves. The `=` is
+  required.
+- A bare `--trust` accepts whatever is current when it runs, binding to
+  nothing anyone reviewed. It stays for CI and existing callers, and when it
+  records a hash it warns on stderr, naming that hash so you can pin it.
 
 ## Module cache
 
@@ -354,7 +371,8 @@ pult <command> --print        print the composed script instead of running
 pult <command> --params-json  read this command's param values from stdin as a JSON
                                 object (positional args still work; keeps them out of
                                 pult's argv and shell history — see caveat below)
-pult --trust …                trust this manifest without prompting (records immediately)
+pult --trust=<hash> …         trust this manifest at exactly that hash (records immediately)
+pult --trust …                trust it at whatever is current (warns with the hash recorded)
 pult x <SOURCE> [COMMAND]     run a command from a module source, no manifest (npx-style)
      [values…] [--var N=V]      --trust / --print as elsewhere; a bare source takes the latest tag
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
@@ -385,6 +403,7 @@ keep their meaning), breaking changes bump `schema`.
   "run_dir": "/repo",
   "scope": "repo",
   "trusted": false,
+  "trust_hash": "7f3c1e0a9b2d4c6e8f0a1b3c5d7e9f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e",
   "includes": [
     { "source": "./tools", "kind": "local", "name": null },
     { "source": "github.com/opskit/aws-common@v1.4.2", "kind": "git",
@@ -422,6 +441,10 @@ Field notes:
   hash**. `false` means invoking a command will prompt interactively (or be
   refused non-interactively without `--trust`) — tooling should surface that
   to a human rather than pass `--trust` itself.
+- `trust_hash` — the manifest's current trust hash (64 hex characters): the
+  value `--trust=<hash>` names to accept it. Show it to the human who decides,
+  then pass the hash they saw, so a manifest that changes in between is
+  refused rather than trusted.
 - `origin` — the include source a command came from; `null` = declared in the
   root manifest.
 - `includes[].name` — that include's declared `name:` (var-substituted), or
@@ -503,8 +526,16 @@ Lonic tool:
   (for an argument-parsing failure, the parser's description of what failed).
 - `command` is `"list"`, `"doctor"`, `"runs list"` or `"runs tail"`, or `null`
   when the command line names none of them (or could not be parsed that far).
-- `error.details` is present only where a code defines it: a `usage` error from
-  argument parsing carries the parser's full text as `details.usage`.
+- `error.details` is present only where a code defines it:
+  - a `usage` error from argument parsing carries the parser's full text as
+    `details.usage`;
+  - a `trust_changed` refusal carries `{subject, current, previous?,
+    what_changed}`: `subject` is the trust identity (the manifest path, or a
+    `pult x` source), `current` its trust hash now, `previous` the hash trusted
+    before (absent when there was none), and `what_changed` is `first_contact`,
+    `changed`, or `unexpected` (`--trust=<hash>` named a hash that is not
+    `current`). Pass `current` back as `--trust=<hash>` once a human has
+    reviewed it.
 - Classify by `error.code`, never by the exit status. Codes are stable within
   a `schema`; new ones may be added, so treat an unknown code as `generic`.
 - JSON mode is a bare `--json` argument before any `--`. Help and version
@@ -518,7 +549,7 @@ Lonic tool:
 | `usage` | 2 | the command line could not be parsed, or names no known subcommand |
 | `no_manifest` | 1 | no manifest found from the current directory upward, and no user manifest |
 | `invalid_manifest` | 1 | the manifest, or something it includes, is unreadable, invalid or does not resolve |
-| `trust_changed` | 1 | the manifest is not trusted at its current content, and nothing granted it |
+| `trust_changed` | 1 | the manifest is not trusted at its current content and nothing granted it, or `--trust=<hash>` named another hash |
 | `fetch_failed` | 1 | a git module could not be fetched |
 | `cancelled` | 130 | the user cancelled one of pult's own prompts |
 | `generic` | 1 | any other failure |

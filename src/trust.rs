@@ -6,6 +6,90 @@ use anyhow::{Context, Result};
 
 use crate::prompt;
 
+/// What an invocation grants through `--trust`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Grant {
+    /// No `--trust`: a manifest not trusted at its current hash is asked
+    /// about, or refused without a terminal.
+    Ask,
+    /// A bare `--trust`: accepts whatever is current when it runs, and warns
+    /// with the hash it recorded. Kept for CI and pult-desktop's trust button;
+    /// it binds to nothing a human reviewed.
+    Current,
+    /// `--trust=<hash>`: accepts the manifest only at exactly this hash, and
+    /// refuses at any other — even one already trusted.
+    Hash(String),
+}
+
+impl Grant {
+    /// The grant the `--trust` argument from [`arg`] carries.
+    pub fn from_matches(matches: &clap::ArgMatches) -> Grant {
+        match matches.get_one::<String>("trust") {
+            Some(hash) => Grant::Hash(hash.clone()),
+            None if matches.contains_id("trust") => Grant::Current,
+            None => Grant::Ask,
+        }
+    }
+}
+
+/// The `--trust[=<hash>]` argument, shared by `pult` and `pult x`. The value
+/// needs `=`, so a bare `--trust` never swallows the word after it.
+pub fn arg(subject: &str) -> clap::Arg {
+    clap::Arg::new("trust")
+        .long("trust")
+        .value_name("HASH")
+        .num_args(0..=1)
+        .require_equals(true)
+        .value_parser(clap::builder::NonEmptyStringValueParser::new())
+        .help(format!(
+            "Trust {subject} without prompting: --trust=<HASH> only at that trust hash; \
+             a bare --trust at whatever it is now (for CI; warns)"
+        ))
+}
+
+/// Why trust is being asked for, or was refused — the error document's
+/// `details.what_changed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhatChanged {
+    /// Nothing was ever trusted under this subject.
+    FirstContact,
+    /// A different hash was trusted under this subject.
+    Changed,
+    /// `--trust=<hash>` named a hash that is not the current one.
+    Unexpected,
+}
+
+impl WhatChanged {
+    fn as_str(self) -> &'static str {
+        match self {
+            WhatChanged::FirstContact => "first_contact",
+            WhatChanged::Changed => "changed",
+            WhatChanged::Unexpected => "unexpected",
+        }
+    }
+}
+
+/// A `trust_changed` refusal, carrying the hash a later `--trust=<hash>` can
+/// name: `{subject, current, previous?, what_changed}`.
+fn refusal(
+    subject: &str,
+    current: &str,
+    previous: Option<&str>,
+    what_changed: WhatChanged,
+    message: String,
+) -> anyhow::Error {
+    let mut details = serde_json::json!({ "subject": subject, "current": current });
+    if let Some(previous) = previous {
+        details["previous"] = previous.into();
+    }
+    details["what_changed"] = what_changed.as_str().into();
+    crate::machine::coded_with_details(
+        crate::machine::ErrorCode::TrustChanged,
+        details,
+        anyhow::anyhow!(message),
+    )
+}
+
 /// Trust-on-first-use for discovered manifests (see spec §7): a pult.yaml is a
 /// list of things to *execute*, so the first time we see one — and any time it
 /// or anything it includes changes — the user must approve it before anything
@@ -14,61 +98,109 @@ pub fn ensure_trusted(
     path: &Path,
     resolved_hash: &str,
     includes: &[String],
-    assume_yes: bool,
+    grant: &Grant,
     about_to_run: Option<&str>,
 ) -> Result<()> {
     let store_path = store_path()?;
     let mut store = load_store(&store_path)?;
     let key = path.to_string_lossy().into_owned();
+    let previous = store.get(&key).cloned();
 
-    let previous = store.get(&key);
-    if previous.map(String::as_str) == Some(resolved_hash) {
-        return Ok(());
-    }
-    if assume_yes {
-        store.insert(key, resolved_hash.to_string());
-        return save_store(&store_path, &store);
-    }
-    if !std::io::stdin().is_terminal() {
-        return Err(crate::machine::coded(
-            crate::machine::ErrorCode::TrustChanged,
-            anyhow::anyhow!(
-                "manifest {} is not trusted; run `pult` interactively once to review it, or pass --trust",
+    if let Grant::Hash(named) = grant
+        && named != resolved_hash
+    {
+        return Err(refusal(
+            &key,
+            resolved_hash,
+            previous.as_deref(),
+            WhatChanged::Unexpected,
+            format!(
+                "--trust={named} does not match manifest {}: its trust hash is now {resolved_hash}; \
+                 review it again before trusting that",
                 path.display()
             ),
         ));
     }
-
-    let question = build_question(path, previous.is_some(), includes, about_to_run);
-    let yes = prompt::confirm(&question)?;
-    if !yes {
-        return Err(crate::machine::coded(
-            crate::machine::ErrorCode::TrustChanged,
-            anyhow::anyhow!("manifest not trusted — nothing was run"),
-        ));
+    if previous.as_deref() == Some(resolved_hash) {
+        return Ok(());
+    }
+    let what_changed = if previous.is_some() {
+        WhatChanged::Changed
+    } else {
+        WhatChanged::FirstContact
+    };
+    match grant {
+        Grant::Hash(_) => {}
+        Grant::Current => eprintln!(
+            "pult: warning: a bare --trust accepted manifest {} at whatever it is now; \
+             recorded trust hash {resolved_hash}. Pass --trust={resolved_hash} to accept \
+             only the content you reviewed.",
+            path.display()
+        ),
+        Grant::Ask => {
+            if !std::io::stdin().is_terminal() {
+                let state = match what_changed {
+                    WhatChanged::Changed => "it has CHANGED since you trusted it",
+                    _ => "first contact",
+                };
+                return Err(refusal(
+                    &key,
+                    resolved_hash,
+                    previous.as_deref(),
+                    what_changed,
+                    format!(
+                        "manifest {} is not trusted ({state}); its trust hash is {resolved_hash}. \
+                         Run `pult` interactively once to review it, or pass \
+                         --trust={resolved_hash} once you have reviewed it",
+                        path.display()
+                    ),
+                ));
+            }
+            let question = build_question(
+                path,
+                resolved_hash,
+                previous.as_deref(),
+                includes,
+                about_to_run,
+            );
+            if !prompt::confirm(&question)? {
+                return Err(refusal(
+                    &key,
+                    resolved_hash,
+                    previous.as_deref(),
+                    what_changed,
+                    "manifest not trusted — nothing was run".to_string(),
+                ));
+            }
+        }
     }
     store.insert(key, resolved_hash.to_string());
     save_store(&store_path, &store)
 }
 
 /// The trust question shown before anything runs. It always names what changed
-/// (or that this is first contact) and every include; when a command is about
-/// to run, it also shows the **composed script** so trust is granted while
+/// (or that this is first contact), the full trust hash being accepted — the
+/// value a later `--trust=<hash>` names — and every include; when a command is
+/// about to run, it also shows the **composed script** so trust is granted while
 /// looking at the actual command, not just a source name. Pure so the exact
 /// wording is testable without a TTY.
 fn build_question(
     path: &Path,
-    changed: bool,
+    current: &str,
+    previous: Option<&str>,
     includes: &[String],
     about_to_run: Option<&str>,
 ) -> String {
-    let mut question = if changed {
-        format!(
-            "The manifest {} (or something it includes) has CHANGED since you trusted it.",
+    let mut question = match previous {
+        Some(previous) => format!(
+            "The manifest {} (or something it includes) has CHANGED since you trusted it.\n  \
+             Trust hash: {current}\n  Was:        {previous}",
             path.display()
-        )
-    } else {
-        format!("Trust the manifest {}?", path.display())
+        ),
+        None => format!(
+            "First contact: the manifest {} is not trusted yet.\n  Trust hash: {current}",
+            path.display()
+        ),
     };
     if !includes.is_empty() {
         question.push_str("\n  It includes:");
@@ -125,6 +257,11 @@ fn save_store(path: &Path, store: &HashMap<String, String>) -> Result<()> {
 mod tests {
     use super::*;
 
+    // Full-length hashes, distinct from each other: the question must show
+    // every character of the one being accepted, never a prefix.
+    const CURRENT: &str = "7f3c1e0a9b2d4c6e8f0a1b3c5d7e9f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e";
+    const PREVIOUS: &str = "0d8c6b4a2f1e9d7c5b3a1f0e8d6c4b2a1f9e7d5c3b1a0f8e6c4d2b9a0e1c3f7a";
+
     #[test]
     fn store_round_trips() {
         let dir = tempfile::tempdir().unwrap();
@@ -147,11 +284,17 @@ mod tests {
     fn question_shows_the_command_about_to_run() {
         let q = build_question(
             Path::new("github.com/lonic/forklift@v1.2.0"),
-            false,
+            CURRENT,
+            None,
             &[],
             Some("./bin/install '<flavor>'"),
         );
-        assert!(q.contains("Trust the manifest github.com/lonic/forklift@v1.2.0?"));
+        assert!(q.contains("First contact: the manifest github.com/lonic/forklift@v1.2.0"));
+        assert!(q.contains(&format!("Trust hash: {CURRENT}")), "got: {q}");
+        assert!(
+            !q.contains("Was:"),
+            "first contact has no previous hash: {q}"
+        );
         assert!(q.contains("About to run:"), "got: {q}");
         assert!(q.contains("./bin/install '<flavor>'"), "got: {q}");
         assert!(q.contains("Trust?"));
@@ -161,11 +304,14 @@ mod tests {
     fn question_lists_includes_and_flags_a_change() {
         let q = build_question(
             Path::new("/repo/pult.yaml"),
-            true,
+            CURRENT,
+            Some(PREVIOUS),
             &["github.com/opskit/aws-common@v1.4.2 (commit 8a6e6fd4a4)".to_string()],
             None,
         );
         assert!(q.contains("has CHANGED"), "got: {q}");
+        assert!(q.contains(&format!("Trust hash: {CURRENT}")), "got: {q}");
+        assert!(q.contains(&format!("Was:        {PREVIOUS}")), "got: {q}");
         assert!(q.contains("It includes:"), "got: {q}");
         assert!(q.contains("aws-common@v1.4.2"), "got: {q}");
         assert!(!q.contains("About to run:"), "no command → no preview: {q}");

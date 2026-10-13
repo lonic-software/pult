@@ -76,6 +76,9 @@ impl ErrorCode {
 #[derive(Debug)]
 pub struct Coded {
     code: ErrorCode,
+    /// The error document's `details`, when the failure has structured facts
+    /// a consumer acts on (a trust refusal's hashes).
+    details: Option<serde_json::Value>,
     inner: anyhow::Error,
 }
 
@@ -98,11 +101,31 @@ impl std::error::Error for Coded {
 /// An error that already carries a code is returned as it is, so a prompt's
 /// sentinel stays reachable by `downcast_ref` at the top of the error.
 pub fn coded(code: ErrorCode, err: impl Into<anyhow::Error>) -> anyhow::Error {
-    let inner = err.into();
+    attach(code, None, err.into())
+}
+
+/// [`coded`], with the `details` the error document carries under `--json`.
+pub fn coded_with_details(
+    code: ErrorCode,
+    details: serde_json::Value,
+    err: impl Into<anyhow::Error>,
+) -> anyhow::Error {
+    attach(code, Some(details), err.into())
+}
+
+fn attach(
+    code: ErrorCode,
+    details: Option<serde_json::Value>,
+    inner: anyhow::Error,
+) -> anyhow::Error {
     if existing_code(&inner).is_some() {
         return inner;
     }
-    anyhow::Error::new(Coded { code, inner })
+    anyhow::Error::new(Coded {
+        code,
+        details,
+        inner,
+    })
 }
 
 /// The code an error already carries: a prompt's own cancellation sentinel,
@@ -115,6 +138,13 @@ fn existing_code(err: &anyhow::Error) -> Option<ErrorCode> {
             e.downcast_ref::<Coded>().map(|c| c.code)
         }
     })
+}
+
+/// The `details` attached with the error's code, if any.
+fn details(err: &anyhow::Error) -> Option<serde_json::Value> {
+    err.chain()
+        .find_map(|e| e.downcast_ref::<Coded>())
+        .and_then(|c| c.details.clone())
 }
 
 /// How a failure is classified: its attached code, else `generic`.
@@ -242,7 +272,7 @@ pub fn report(err: &anyhow::Error) -> i32 {
         ErrorCode::Usage => eprintln!("{message}"),
         _ => eprintln!("pult: error: {message}"),
     }
-    emit(code, &message, None);
+    emit(code, &message, details(err));
     code.exit_code()
 }
 

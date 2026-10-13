@@ -10,12 +10,12 @@ use crate::trust;
 /// anything is executed for real. Checks are manifest code, so the trust gate
 /// applies exactly as it does for `run:`. Output is suppressed (a check
 /// signals by exit code); exit 1 if any declared check failed.
-pub fn run(resolved: &Resolved, assume_trusted: bool, json: bool) -> Result<i32> {
+pub fn run(resolved: &Resolved, grant: &trust::Grant, json: bool) -> Result<i32> {
     trust::ensure_trusted(
         &resolved.path,
         &resolved.trust_hash,
         &resolved.include_summary,
-        assume_trusted,
+        grant,
         None,
     )?;
     report(resolved, json)
