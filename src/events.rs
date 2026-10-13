@@ -11,8 +11,9 @@
 //! This is load-bearing for forward compatibility: a script or surface built
 //! against a later vocabulary must never break an older pult, and vice versa.
 
-// Apart from `inherited_channel` (which `exec.rs` asks on every target
-// before compiling a step list), this module's callers are the journal
+// Apart from `inherited_channel` (which `exec.rs` asks once per run, on
+// every target, and whose answer decides both the compiled step guards and
+// the runner's channel handling), this module's callers are the journal
 // (`journal.rs`'s `Event` import) and the unix-only events channel
 // (`runner.rs`'s `events_unix`) — both gated off on non-unix by M4
 // (journaling disabled entirely there, see `Journal::start`). So on a

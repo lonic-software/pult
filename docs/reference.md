@@ -625,8 +625,8 @@ compiles them in, unless it inherited the channel (see passthrough below).
 The same labels are exposed as `"steps"` in `--list --json` (below), so a
 surface can render milestones without parsing the script.
 
-**`PULT_EVENTS` passthrough**: if `PULT_EVENTS` is already set in pult's own
-environment when it runs a command, pult does nothing — no pipe, no
+**`PULT_EVENTS` passthrough**: if a valid `PULT_EVENTS` is already set in
+pult's own environment when it runs a command, pult does nothing — no pipe, no
 translation, and no `step` lines of its own: a step list is compiled without
 its guards, because only a channel's owner emits `step`. The var and its fd
 inherit through to the child as-is. This is for a parent process (another
