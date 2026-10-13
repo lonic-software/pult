@@ -498,9 +498,8 @@ pub fn parse(raw: &str, origin: &Path) -> Result<Manifest> {
         Some(v) if v < 1 => bail!("{} has invalid manifest version {v}", origin.display()),
         Some(_) => {}
     }
-    let manifest: Manifest = serde_yaml::from_str(raw)
+    let mut manifest: Manifest = serde_yaml::from_str(raw)
         .with_context(|| format!("failed to parse {}", origin.display()))?;
-    let mut manifest = manifest;
     validate_file(&manifest).with_context(|| format!("invalid manifest {}", origin.display()))?;
     default_flag_args(&mut manifest);
     Ok(manifest)

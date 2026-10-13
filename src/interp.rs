@@ -1,11 +1,13 @@
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
 
+use crate::value::Words;
+
 /// Substitute `{name}` placeholders with `words` — each value already
 /// rendered as shell text (see `value::words`), inserted as is. STRICT mode,
 /// for single-line templates (plain `run:` strings, `pick.from` sources):
 /// unknown placeholders and unclosed braces are errors; `{{`/`}}` escape.
-pub fn interpolate(template: &str, words: &IndexMap<String, String>) -> Result<String> {
+pub fn interpolate(template: &str, words: &Words) -> Result<String> {
     let mut out = String::with_capacity(template.len());
     walk(template, |part| {
         match part {
@@ -112,7 +114,7 @@ fn scan_script(script: &str, mut f: impl FnMut(&str, usize, usize)) {
 /// substitutes `{name}` with its rendered `words` entry only when `name` is a
 /// known value; everything else — `${TASK+x}`, `awk '{print $1}'`, unmatched
 /// braces — passes through untouched. Never errors.
-pub fn interpolate_lenient(script: &str, words: &IndexMap<String, String>) -> String {
+pub fn interpolate_lenient(script: &str, words: &Words) -> String {
     let mut out = String::with_capacity(script.len());
     let mut last = 0;
     scan_script(script, |name, start, end| {
@@ -201,13 +203,7 @@ pub fn shell_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Text values rendered the way `value::words` renders them.
-    fn words(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), shell_quote(v)))
-            .collect()
-    }
+    use crate::value::text_words as words;
 
     fn vals(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
         pairs

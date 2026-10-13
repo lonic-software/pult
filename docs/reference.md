@@ -424,10 +424,11 @@ pult <command> --params-json  read this command's param values from stdin as a J
                                 pult's argv and shell history — see caveat below)
 pult --trust=<hash> …         trust this manifest at exactly that hash (records immediately)
 pult --trust …                trust it at whatever is current (warns with the hash recorded)
-pult x <SOURCE> [COMMAND]     run a command from a module source, no manifest (npx-style)
-     [args…] [--var N=V]        the command's args as for `pult <command>`; --var before the
-                                command; --trust / --print as elsewhere, but trust records only
-                                on a run; a bare source takes the latest tag
+pult x [--var N=V] <SOURCE>   run a command from a module source, no manifest (npx-style)
+     [COMMAND] [args…]          the command's args as for `pult <command>`, `--` and --help
+                                included; --var only before the command; --trust / --print as
+                                elsewhere, but trust records only on a run; a bare source
+                                takes the latest tag
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)

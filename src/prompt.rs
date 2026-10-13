@@ -35,7 +35,7 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
-fn require_tty(what: &str) -> Result<()> {
+pub fn require_tty(what: &str) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!("{what}, and stdin is not a terminal — pass all values on the command line");
     }

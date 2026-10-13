@@ -19,19 +19,10 @@ use crate::{exec, flow};
 /// "unseen code". Intercepted before discovery (like `init`/`update`) because
 /// the whole point is running where no local manifest exists yet.
 pub fn run_cli(rest: &[String]) -> Result<i32> {
-    let mut cli = clap::Command::new("pult x")
+    let (head, tail) = split_at_command(rest);
+    let cli = clap::Command::new("pult x")
         .bin_name("pult x")
         .about("Run a command from a module source without adding it to a manifest")
-        // `--help` after the command is that command's help, so phase one
-        // only notes it.
-        .disable_help_flag(true)
-        .arg(
-            Arg::new("help")
-                .short('h')
-                .long("help")
-                .action(ArgAction::SetTrue)
-                .help("Print help; after a command, that command's help"),
-        )
         .arg(Arg::new("source").required(true).value_name("SOURCE").help(
             "./path, host.tld/org/repo[//sub][@pin], or git::<url>[//sub][@pin] — \
                      a git source without a pin resolves to its latest version tag",
@@ -41,37 +32,21 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
                 .value_name("COMMAND")
                 .help("Which of the module's commands to run; omitted opens the guided menu"),
         )
-        // Phase one: the command's own arguments can't be parsed before its
-        // manifest is resolved, so they're kept raw here and bound by `bind`
-        // once it is — the same surface `pult <command>` has.
-        .arg(
-            Arg::new("args")
-                .value_name("ARGS")
-                .num_args(0..)
-                .trailing_var_arg(true)
-                .allow_hyphen_values(true)
-                .help("The command's arguments, exactly as `pult <command>` takes them"),
-        )
+        // Only documents the tail: `split_at_command` keeps it out of this
+        // parse, and `bind_tail` binds it once the command is resolved.
+        .arg(Arg::new("args").value_name("ARGS").num_args(0..).help(
+            "The command's arguments, exactly as `pult <command>` takes them; \
+                     `--help` here is the command's help",
+        ))
         .arg(var_arg())
         .args(own_args());
     let matches = crate::machine::get_matches(
-        cli.clone(),
-        std::iter::once("pult x".to_string()).chain(rest.iter().cloned()),
+        cli,
+        std::iter::once("pult x".to_string()).chain(head.iter().cloned()),
     );
 
     let source = matches.get_one::<String>("source").expect("required");
     let command = matches.get_one::<String>("command").map(String::as_str);
-    let mut tail: Vec<String> = matches
-        .get_many::<String>("args")
-        .map(|vs| vs.cloned().collect())
-        .unwrap_or_default();
-    if matches.get_flag("help") {
-        if command.is_none() {
-            cli.print_help()?;
-            return Ok(0);
-        }
-        tail.push("--help".to_string());
-    }
     let vars = parse_vars(&matches)?;
     let grant = crate::trust::Grant::from_matches(&matches);
     let print = matches.get_flag("print");
@@ -84,7 +59,7 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
     run(
         source,
         command,
-        &tail,
+        tail,
         &vars,
         &cwd,
         &grant,
@@ -100,6 +75,32 @@ fn var_arg() -> Arg {
         .value_name("NAME=VALUE")
         .action(ArgAction::Append)
         .help("Bind a module var (repeatable) — for modules that declare `vars:`")
+}
+
+/// Split `pult x`'s argv after its COMMAND, the second positional. Only what
+/// comes before goes through phase one; the rest stays raw, `--` and all, for
+/// `bind_tail` to bind exactly as `pult <command>` would. Phase one's options
+/// are `--var NAME=VALUE`, `--trust[=HASH]`, `--print` and `--help`; only
+/// `--var` takes a separate value.
+fn split_at_command(rest: &[String]) -> (&[String], &[String]) {
+    let mut positionals = 0;
+    let mut only_positionals = false;
+    let mut i = 0;
+    while i < rest.len() {
+        let arg = rest[i].as_str();
+        if only_positionals || arg == "-" || !arg.starts_with('-') {
+            positionals += 1;
+            if positionals == 2 {
+                return rest.split_at(i + 1);
+            }
+        } else if arg == "--" {
+            only_positionals = true;
+        } else if arg == "--var" {
+            i += 1;
+        }
+        i += 1;
+    }
+    (rest, &[])
 }
 
 /// `pult x`'s own switches that may also follow the command (`--var` binds
@@ -131,7 +132,7 @@ fn bind_tail(
         .arg(var_arg().hide(true))
         .args(own_args());
     let matches = crate::machine::get_matches(cli, tail.iter().cloned());
-    if matches.contains_id("var") && matches.get_many::<String>("var").is_some() {
+    if matches.get_many::<String>("var").is_some() {
         return Err(crate::machine::usage(format!(
             "--var must come before the command: pult x {source} --var NAME=VALUE {} …",
             cmd.id

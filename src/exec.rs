@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -175,7 +174,7 @@ pub fn execute(
             // and for two residual gaps in the value-based pass (the
             // `MIN_LEN` floor, and `shell_quote`'s quote-mangling) that
             // apply here identically, since this goes through the same
-            // `interp::interpolate` → `shell_quote` path.
+            // `value::words` → `shell_quote` path.
             let display = masker
                 .apply(&interp::interpolate(
                     template,
@@ -465,13 +464,11 @@ fn check_count(name: &str, repeat: &RepeatDef, count: usize) -> Result<()> {
 fn prompt_items(name: &str, repeat: &RepeatDef) -> Result<Vec<String>> {
     // Checked here rather than left to the first prompt, whose label would
     // name an item instead of the param.
-    if !std::io::stdin().is_terminal() {
-        bail!(
-            "`{name}` needs at least {} value(s), and stdin is not a terminal — \
-             pass them on the command line",
-            repeat.min
-        );
-    }
+    prompt::require_tty(&if repeat.min > 0 {
+        format!("`{name}` needs at least {} value(s)", repeat.min)
+    } else {
+        format!("`{name}` needs interactive input")
+    })?;
     let mut items = Vec::new();
     loop {
         if repeat.max.is_some_and(|max| items.len() >= max as usize) {

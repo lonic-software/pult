@@ -345,7 +345,27 @@ fn pult_x_binds_a_command_exactly_as_pult_does() {
         "{out:?}"
     );
 
+    // Wherever it falls among the command's arguments.
+    let out = env.pult(&["x", "./mod", "go", "--var", "a=b", "dev", "f1"]);
+    expect(&out, 2);
+    assert!(
+        stderr(&out).contains("--var must come before the command"),
+        "{out:?}"
+    );
+
+    // `--` reaches the command's binding, so a dash-led value binds the same.
+    let direct = env.pult(&["go", "--print", "--", "dev", "-f1"]);
+    expect(&direct, 0);
+    let out = env.pult(&["x", "./mod", "--print", "go", "--", "dev", "-f1"]);
+    expect(&out, 0);
+    assert_eq!(last_line(&out), stdout(&direct).trim());
+
     let out = env.pult(&["x", "./mod", "go", "--help"]);
     expect(&out, 0);
     assert!(stdout(&out).contains("--only <ONLY>"), "{out:?}");
+
+    // Before the command, `--help` is `pult x`'s own.
+    let out = env.pult(&["x", "--help"]);
+    expect(&out, 0);
+    assert!(stdout(&out).contains("<SOURCE>"), "{out:?}");
 }

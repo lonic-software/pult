@@ -39,14 +39,38 @@ impl Value {
     }
 }
 
+/// Each param's value rendered as the shell text its `{name}` placeholder
+/// becomes, which `interp` inserts verbatim. Only [`words`] builds one, so a
+/// raw value cannot reach a script unquoted.
+#[derive(Debug, Clone)]
+pub struct Words(IndexMap<String, String>);
+
+impl Words {
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+}
+
 /// Render every value as the shell text its `{name}` placeholder becomes
 /// (see [`render`]). A param missing from `params` renders as plain text,
 /// which is how a step's own rebinding reads.
-pub fn words(params: &IndexMap<String, ParamDef>, values: &Values) -> IndexMap<String, String> {
-    values
+pub fn words(params: &IndexMap<String, ParamDef>, values: &Values) -> Words {
+    Words(
+        values
+            .iter()
+            .map(|(name, value)| (name.clone(), render(params.get(name), value)))
+            .collect(),
+    )
+}
+
+/// Text values rendered as [`words`] renders them, for tests.
+#[cfg(test)]
+pub fn text_words(pairs: &[(&str, &str)]) -> Words {
+    let values: Values = pairs
         .iter()
-        .map(|(name, value)| (name.clone(), render(params.get(name), value)))
-        .collect()
+        .map(|(k, v)| (k.to_string(), Value::Text(v.to_string())))
+        .collect();
+    words(&IndexMap::new(), &values)
 }
 
 /// The shell text one value renders as: text is one quoted word; a set flag
