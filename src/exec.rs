@@ -177,10 +177,9 @@ pub fn execute(
             &compile::compile(
                 cmd,
                 &values,
-                if channel == InheritedChannel::Owned {
-                    Guards::Status
-                } else {
-                    Guards::Step
+                match channel {
+                    InheritedChannel::Owned => Guards::Status,
+                    InheritedChannel::Absent | InheritedChannel::Invalid(_) => Guards::Step,
                 },
             )?,
             &cmd.id,

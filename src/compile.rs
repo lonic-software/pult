@@ -29,10 +29,11 @@ pub fn compile(
     let total = entries.len();
 
     for (i, entry) in entries.iter().enumerate() {
+        let label = || step_label(i + 1, entry);
         match guards {
             Guards::None => {}
-            Guards::Step => body.push_str(&step_guard(i + 1, total, &step_label(entry))),
-            Guards::Status => body.push_str(&status_guard(&step_label(entry))),
+            Guards::Step => body.push_str(&guard(&format!("step {}/{total}", i + 1), &label())),
+            Guards::Status => body.push_str(&guard("status", &label())),
         }
         match entry {
             ResolvedEntry::Inline(s) => {
@@ -88,54 +89,68 @@ pub enum Guards {
     Step,
     /// `status <label>`: the channel was inherited, so pult is not its owner
     /// and may emit only `progress` and `status`. The status names each step
-    /// as it starts, which also marks where the step's own `progress`
-    /// restarts from zero.
+    /// as it starts, ahead of that step's own `progress`. It is not a step
+    /// boundary the owner can count on: a command may write `status` lines of
+    /// its own, and the channel carries no sender.
     Status,
 }
 
-/// A guarded, no-op-when-unwired emission of the `step k/n <label>` event —
-/// injected before every top-level entry under `Guards::Step`. The guard
-/// means the compiled script behaves identically whether or not anything is
-/// listening on `$PULT_EVENTS`.
-fn step_guard(k: usize, n: usize, label: &str) -> String {
+/// A guarded, no-op-when-unwired emission of `<prefix> <label>` (`step k/n`
+/// or `status`) — injected before every top-level entry. The guard means the
+/// compiled script behaves identically whether or not anything is listening
+/// on `$PULT_EVENTS`. `prefix` is generated glue and never needs quoting.
+fn guard(prefix: &str, label: &str) -> String {
     format!(
-        "[ -n \"${{PULT_EVENTS:-}}\" ] && printf 'step %d/%d %s\\n' {k} {n} {} >&\"$PULT_EVENTS\" || true\n",
+        "[ -n \"${{PULT_EVENTS:-}}\" ] && printf '{prefix} %s\\n' {} >&\"$PULT_EVENTS\" || true\n",
         interp::shell_quote(label)
     )
 }
 
-/// The same guard, emitting `status <label>` — injected before every
-/// top-level entry under `Guards::Status`.
-fn status_guard(label: &str) -> String {
-    format!(
-        "[ -n \"${{PULT_EVENTS:-}}\" ] && printf 'status %s\\n' {} >&\"$PULT_EVENTS\" || true\n",
-        interp::shell_quote(label)
-    )
-}
-
-/// The step-event label for one top-level entry: a `Call`'s step name (as
-/// the user knows it), or the first line of an `Inline`/`Pipe` fragment
-/// (joined with ` | ` for a pipe), truncated to 40 chars. Also the source of
-/// the `"steps"` field in `--list --json` (`main.rs`) — same labels there.
-pub fn step_label(entry: &ResolvedEntry) -> String {
-    match entry {
+/// The event label for the `k`th top-level entry: a `Call`'s step name (as
+/// the user knows it), or the first non-blank line of an `Inline`/`Pipe`
+/// fragment (joined with ` | ` for a pipe), truncated to 40 chars. Also the
+/// source of the `"steps"` field in `--list --json` (`main.rs`) — same
+/// labels there.
+///
+/// Never empty: the parser drops a `step` or `status` with no name, and a
+/// lost `step` would leave the next step's `progress` drawn in the previous
+/// step's band. An entry with no text to name it by is `step k`. Control
+/// characters become spaces, so a label is always one clean protocol line.
+pub fn step_label(k: usize, entry: &ResolvedEntry) -> String {
+    let raw = match entry {
         ResolvedEntry::Call(call) => call.name.clone(),
-        ResolvedEntry::Inline(s) => truncate40(first_line(s)),
-        ResolvedEntry::Pipe(segs) => {
-            let parts: Vec<&str> = segs
-                .iter()
-                .map(|seg| match seg {
-                    ResolvedSeg::Inline(s) => first_line(s),
-                    ResolvedSeg::Call { name, .. } => name.as_str(),
-                })
-                .collect();
-            truncate40(&parts.join(" | "))
-        }
+        ResolvedEntry::Inline(s) => first_text_line(s),
+        ResolvedEntry::Pipe(segs) => segs
+            .iter()
+            .map(|seg| match seg {
+                ResolvedSeg::Inline(s) => first_text_line(s),
+                ResolvedSeg::Call { name, .. } => name.clone(),
+            })
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" | "),
+    };
+    let label = truncate40(&raw);
+    if label.is_empty() {
+        format!("step {k}")
+    } else {
+        label
     }
 }
 
-fn first_line(s: &str) -> &str {
-    s.lines().next().unwrap_or("")
+/// The first line of `s` with any text in it, control characters replaced
+/// by spaces and surrounding whitespace trimmed; `""` if there is none.
+fn first_text_line(s: &str) -> String {
+    s.lines()
+        .map(|line| {
+            line.chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
 }
 
 fn truncate40(s: &str) -> String {
@@ -372,21 +387,21 @@ mod tests {
         let script = compile(&cmd, &vals(&[("env", "dev")]), Guards::Step).unwrap();
         assert!(
             script.contains(
-                "[ -n \"${PULT_EVENTS:-}\" ] && printf 'step %d/%d %s\\n' 1 2 aws:resolve-task >&\"$PULT_EVENTS\" || true"
+                "[ -n \"${PULT_EVENTS:-}\" ] && printf 'step 1/2 %s\\n' aws:resolve-task >&\"$PULT_EVENTS\" || true"
             ),
             "got: {script}"
         );
         assert!(
             script.contains(
-                "[ -n \"${PULT_EVENTS:-}\" ] && printf 'step %d/%d %s\\n' 2 2 'echo done' >&\"$PULT_EVENTS\" || true"
+                "[ -n \"${PULT_EVENTS:-}\" ] && printf 'step 2/2 %s\\n' 'echo done' >&\"$PULT_EVENTS\" || true"
             ),
             "got: {script}"
         );
         // guard for step 1 precedes the function call, guard for step 2
         // precedes the inline echo
-        let guard1 = script.find("step %d/%d %s\\n' 1 2").unwrap();
+        let guard1 = script.find("step 1/2 %s").unwrap();
         let call_pos = script.rfind("aws__resolve_task\n").unwrap();
-        let guard2 = script.find("step %d/%d %s\\n' 2 2").unwrap();
+        let guard2 = script.find("step 2/2 %s").unwrap();
         let echo_pos = script.find("echo done").unwrap();
         assert!(guard1 < call_pos && call_pos < guard2 && guard2 < echo_pos);
     }
@@ -402,9 +417,7 @@ mod tests {
         // is truncated.
         let expected_label = "a".repeat(40);
         assert!(
-            script.contains(&format!(
-                "printf 'step %d/%d %s\\n' 1 1 {expected_label} >&"
-            )),
+            script.contains(&format!("printf 'step 1/1 %s\\n' {expected_label} >&")),
             "got: {script}"
         );
         assert!(script.contains(&long), "full inline body must still run");
@@ -422,7 +435,52 @@ mod tests {
         ])]);
         let script = compile(&cmd, &vals(&[]), Guards::Step).unwrap();
         assert!(
-            script.contains("printf 'step %d/%d %s\\n' 1 1 'list | tr a-z A-Z'"),
+            script.contains("printf 'step 1/1 %s\\n' 'list | tr a-z A-Z'"),
+            "got: {script}"
+        );
+    }
+
+    /// A label is never empty, since the parser drops a `step` or `status`
+    /// with no name. Goes red if a blank first line, a blank pipe segment or
+    /// an all-blank fragment yields an empty label.
+    #[test]
+    fn labels_skip_blank_lines_and_fall_back_to_the_step_number() {
+        let inline = ResolvedEntry::Inline("\n   \n  make build  \nmake test".into());
+        assert_eq!(step_label(1, &inline), "make build");
+        let blank = ResolvedEntry::Inline(" \n\t\n".into());
+        assert_eq!(step_label(3, &blank), "step 3");
+        let pipe = ResolvedEntry::Pipe(vec![
+            ResolvedSeg::Inline("\n".into()),
+            ResolvedSeg::Inline("\nsort -u".into()),
+        ]);
+        assert_eq!(step_label(2, &pipe), "sort -u");
+    }
+
+    /// Control characters in a fragment become spaces, so a label can carry
+    /// no terminal escape or carriage return onto the channel. Goes red if
+    /// they pass through.
+    #[test]
+    fn labels_carry_no_control_characters() {
+        let entry = ResolvedEntry::Inline("echo \u{1b}[31mred\rover".into());
+        assert_eq!(step_label(1, &entry), "echo  [31mred over");
+    }
+
+    /// The compiled guard uses the fallback, so an entry with nothing to name
+    /// it by still moves the band. Goes red if the guard is built from the
+    /// raw (empty) first line.
+    #[test]
+    fn a_blank_entry_still_emits_a_named_step() {
+        let cmd = command(vec![
+            ResolvedEntry::Inline("\n  true".into()),
+            ResolvedEntry::Inline("  ".into()),
+        ]);
+        let script = compile(&cmd, &vals(&[]), Guards::Step).unwrap();
+        assert!(
+            script.contains("printf 'step 1/2 %s\\n' true >&"),
+            "got: {script}"
+        );
+        assert!(
+            script.contains("printf 'step 2/2 %s\\n' 'step 2' >&"),
             "got: {script}"
         );
     }
