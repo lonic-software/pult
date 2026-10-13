@@ -124,6 +124,25 @@
       },
       "additionalProperties": false
     },
+    "DynamicInputsDef": {
+      "description": "A parameter *set* discovered at run time: `from:`'s stdout lines become `key=value` pairs (parsed the same as `pick.from`, via `parse_dynamic_line`), each becoming its own runtime param under a key the manifest never names — the author declares only that the set exists, not which keys it has. Nothing consumes this yet; the resolver and executor wire it up in a later change.",
+      "type": "object",
+      "required": [
+        "from"
+      ],
+      "properties": {
+        "from": {
+          "description": "Shell command whose stdout lines become the discovered keys. May interpolate `{param}` for params declared *earlier* in the same command — the resolver's dependent-ordering check covers this field too, the same rule `pick.from` follows.",
+          "type": "string"
+        },
+        "secret": {
+          "description": "Whether every discovered value is a credential: masked wherever an interpolated command line is displayed, prompted without echo, and journaled as `<redacted>`. Defaults to **`true`** — the opposite of `input.secret`'s default. An `input:` author declares one known value and can judge whether it's a secret; a `dynamic-inputs` author cannot enumerate what discovery may someday return, so fail-safe is the only defensible default: forgetting `secret: false` costs an over-redacted-but-harmless journal, while forgetting `secret: true` would echo credentials into scrollback and a durable journal. Do not \"fix\" this asymmetry with `input:`'s default — it's deliberate.",
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "FullOption": {
       "type": "object",
       "required": [
@@ -227,9 +246,20 @@
       ]
     },
     "ParamDef": {
-      "description": "A param is a picker, free input, or a reference to a named param; exactly one of the three must be set (validated at load, so `kind()` is infallible).",
+      "description": "A param is a picker, free input, a reference to a named param, or a runtime-discovered set; exactly one of the four must be set (validated at load, so `kind()` is infallible).",
       "type": "object",
       "properties": {
+        "dynamic-inputs": {
+          "description": "`dynamic-inputs` is the manifest's first hyphenated field — future multiword fields follow the same precedent. schemars honors the rename (proven already by `use_` above), so the committed schema emits the hyphenated key, not `dynamic_inputs`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DynamicInputsDef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "input": {
           "anyOf": [
             {
