@@ -9,15 +9,18 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-/// Three top-level entries, so the compiled script has three `step` guards;
-/// the second entry reports 60% of its own work on the channel.
+/// Three top-level entries, so the compiled script has three guards; the
+/// second entry, a named step, reports 60% of its own work on the channel.
 const MANIFEST: &str = r#"version: 1
+steps:
+  halfway: |
+    [ -n "${PULT_EVENTS:-}" ] && printf "progress 60 half\n" >&"$PULT_EVENTS" || true
 commands:
   - id: build
     title: Build
     run:
       - "echo one"
-      - '[ -n "${PULT_EVENTS:-}" ] && printf "progress 60 half\n" >&"$PULT_EVENTS" || true'
+      - use: halfway
       - "echo three"
 "#;
 
@@ -104,11 +107,12 @@ fn journal_records(state: &Path) -> Vec<serde_json::Value> {
 }
 
 /// Under a parent that owns the channel, pult writes no `step` of its own
-/// onto it: the parent's file holds the child's `progress` line and nothing
-/// else. Goes red if `exec.rs` compiles with step guards regardless of an
-/// inherited channel (the file then starts with `step 1/3 echo one`).
+/// onto it: each step is named by a `status` line instead, ahead of the
+/// child's own `progress`. Goes red if `exec.rs` compiles step guards
+/// regardless of an inherited channel (the file then starts with
+/// `step 1/3 echo one`), or no guards at all (only the `progress` line).
 #[test]
-fn an_inherited_channel_gets_no_step_lines_from_pult() {
+fn an_inherited_channel_gets_status_lines_not_step_lines() {
     let state = tempfile::tempdir().unwrap();
     let trust = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
@@ -125,7 +129,7 @@ fn an_inherited_channel_gets_no_step_lines_from_pult() {
     // The child's own line arrived, so the channel was live and inherited.
     assert_eq!(
         std::fs::read_to_string(&events_file).unwrap(),
-        "progress 60 half\n"
+        "status echo one\nstatus halfway\nprogress 60 half\nstatus echo three\n"
     );
 }
 

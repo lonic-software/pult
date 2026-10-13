@@ -603,7 +603,13 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
             // `null` for a plain (string-form) `run:`, nothing to name.
             let steps = match &cmd.run {
                 ResolvedRun::Steps(entries) => {
-                    json!(entries.iter().map(compile::step_label).collect::<Vec<_>>())
+                    json!(
+                        entries
+                            .iter()
+                            .enumerate()
+                            .map(|(i, entry)| compile::step_label(i + 1, entry))
+                            .collect::<Vec<_>>()
+                    )
                 }
                 ResolvedRun::Script(_) => serde_json::Value::Null,
             };

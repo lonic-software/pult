@@ -446,9 +446,9 @@ Field notes:
   below), don't assume pult ran it. `interactive` — the command needs a
   controlling terminal; non-terminal surfaces should treat it as
   terminal-only rather than capturing its output.
-- `steps` — the labels a live run emits as `step k/n <name>` events (none
-  when the run inherited its `PULT_EVENTS` channel; see
-  [Events protocol](#events-protocol--pult_events) below); `null` for a
+- `steps` — the labels a live run emits as `step k/n <name>` events (as
+  `status <name>` instead when the run inherited its `PULT_EVENTS` channel;
+  see [Events protocol](#events-protocol--pult_events) below); `null` for a
   string-form `run:`, which has no steps to name.
 - `pult <id> <values…> --print` prints the composed script without running it —
   the natural dry-run step before an agent executes anything. It is fully
@@ -615,26 +615,34 @@ Richer surfaces get both scales: a journaled `progress` record keeps the
 reported value as `pct` and adds `run_pct`, the same banded value the
 terminal draws (`null` when `pct` is).
 
-**Compiled step lists emit `step` events automatically.** A list-form `run:`
+**Compiled step lists name their steps automatically.** A list-form `run:`
 (see [authoring.md](authoring.md#2--composing-commands-from-steps)) gets a
 guarded `step k/n <name>` emission injected before each top-level entry at
-compile time — structure a command as steps and you get milestones for
-free, no manifest changes required. `--print` shows the script without these
-guards (they'd clutter the dry-run output you're meant to read); a live run
-compiles them in, unless it inherited the channel (see passthrough below).
+compile time (a `status <name>` one on an inherited channel, below) —
+structure a command as steps and you get milestones for free, no manifest
+changes required. A step's name is its step name, or the first non-blank
+line of an inline entry (for a pipe, of each segment, joined with ` | `),
+trimmed, with control and invisible formatting characters turned into
+spaces, and cut to 40 characters; `step k` when the entry has no text to
+name it by. `--print` shows the script without these guards (they'd clutter
+the dry-run output you're meant to read); a live run compiles them in, as
+`status` guards if it inherited the channel (see passthrough below).
 The same labels are exposed as `"steps"` in `--list --json` (below), so a
 surface can render milestones without parsing the script.
 
 **`PULT_EVENTS` passthrough**: if a valid `PULT_EVENTS` is already set in
-pult's own environment when it runs a command, pult does nothing — no pipe, no
-translation, and no `step` lines of its own: a step list is compiled without
-its guards, because only a channel's owner emits `step`. The var and its fd
-inherit through to the child as-is. This is for a parent process (another
-pult, or any tool that reads events) that owns the channel itself and wants
-to render events its own way. The owner then sees the command's `progress`
-and `status` lines but no step framing from this pult: each step's tool
-reports 0–100 of its own work, so the values restart at every step, and the
-owner draws them inside whatever band it gave this whole run.
+pult's own environment when it runs a command, pult creates no pipe, does no
+translation and writes no `step` lines of its own, because only a channel's
+owner emits `step`. The var and its fd inherit through to the child as-is.
+This is for a parent process (another pult, or any tool that reads events)
+that owns the channel itself and wants to render events its own way. A step
+list is compiled with `status <name>` guards in place of `step` ones, so the
+owner sees each step named as it starts, ahead of that step's own `progress`
+and `status` lines. Each step's tool reports 0–100 of its own work, so the
+values restart at every step; the owner draws them inside whatever band it
+gave this whole run. Pult's `status` lines name the steps but are not a
+boundary an owner can count on: a command may write `status` lines of its
+own, and nothing on the channel says which are pult's.
 
 When nothing upstream claimed one, pult creates its own channel (unix only)
 for a run whose output it journals — the journal records events whether or

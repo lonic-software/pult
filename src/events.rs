@@ -124,7 +124,8 @@ pub enum InheritedChannel {
     Absent,
     /// A valid fd number: someone upstream owns the channel. It is passed
     /// through to the child untouched, and pult injects no `step` lines onto
-    /// it — only a channel's owner emits `step`.
+    /// it — only a channel's owner emits `step` — but names each step with a
+    /// `status` line instead.
     Owned,
     /// Set, but not a bare fd number. The runner strips it from the child's
     /// environment and warns; pult then behaves as if it were unset.

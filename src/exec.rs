@@ -5,6 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
+use crate::compile::Guards;
 use crate::events::{self, InheritedChannel};
 use crate::journal;
 use crate::label;
@@ -170,10 +171,17 @@ pub fn execute(
             )
         }
         // A channel inherited from upstream belongs to whoever set it, and
-        // only a channel's owner emits `step`: inject the guards only when
-        // pult may own the channel itself.
+        // only a channel's owner emits `step`: on someone else's channel
+        // each step is named by a `status` line instead.
         ResolvedRun::Steps(_) => runner::run_bash(
-            &compile::compile(cmd, &values, channel != InheritedChannel::Owned)?,
+            &compile::compile(
+                cmd,
+                &values,
+                match channel {
+                    InheritedChannel::Owned => Guards::Status,
+                    InheritedChannel::Absent | InheritedChannel::Invalid(_) => Guards::Step,
+                },
+            )?,
             &cmd.id,
             &resolved.run_dir,
             journaling,
@@ -426,7 +434,7 @@ fn pick_selection(opts: &[options::PickOption], i: usize) -> String {
 fn compose(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Result<String> {
     match &cmd.run {
         ResolvedRun::Script(template) => interp::interpolate(template, values),
-        ResolvedRun::Steps(_) => compile::compile(cmd, values, false),
+        ResolvedRun::Steps(_) => compile::compile(cmd, values, Guards::None),
     }
 }
 
