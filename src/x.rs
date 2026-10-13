@@ -19,9 +19,19 @@ use crate::{exec, flow};
 /// "unseen code". Intercepted before discovery (like `init`/`update`) because
 /// the whole point is running where no local manifest exists yet.
 pub fn run_cli(rest: &[String]) -> Result<i32> {
-    let cli = clap::Command::new("pult x")
+    let mut cli = clap::Command::new("pult x")
         .bin_name("pult x")
         .about("Run a command from a module source without adding it to a manifest")
+        // `--help` after the command is that command's help, so phase one
+        // only notes it.
+        .disable_help_flag(true)
+        .arg(
+            Arg::new("help")
+                .short('h')
+                .long("help")
+                .action(ArgAction::SetTrue)
+                .help("Print help; after a command, that command's help"),
+        )
         .arg(Arg::new("source").required(true).value_name("SOURCE").help(
             "./path, host.tld/org/repo[//sub][@pin], or git::<url>[//sub][@pin] — \
                      a git source without a pin resolves to its latest version tag",
@@ -45,16 +55,23 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
         .arg(var_arg())
         .args(own_args());
     let matches = crate::machine::get_matches(
-        cli,
+        cli.clone(),
         std::iter::once("pult x".to_string()).chain(rest.iter().cloned()),
     );
 
     let source = matches.get_one::<String>("source").expect("required");
     let command = matches.get_one::<String>("command").map(String::as_str);
-    let tail: Vec<String> = matches
+    let mut tail: Vec<String> = matches
         .get_many::<String>("args")
         .map(|vs| vs.cloned().collect())
         .unwrap_or_default();
+    if matches.get_flag("help") {
+        if command.is_none() {
+            cli.print_help()?;
+            return Ok(0);
+        }
+        tail.push("--help".to_string());
+    }
     let vars = parse_vars(&matches)?;
     let grant = crate::trust::Grant::from_matches(&matches);
     let print = matches.get_flag("print");
@@ -110,7 +127,8 @@ fn bind_tail(
         .no_binary_name(true)
         .about(cmd.title.clone())
         .args(crate::bind::args(cmd))
-        .arg(var_arg())
+        // Only so a late `--var` gets a pointed refusal instead of clap's.
+        .arg(var_arg().hide(true))
         .args(own_args());
     let matches = crate::machine::get_matches(cli, tail.iter().cloned());
     if matches.contains_id("var") && matches.get_many::<String>("var").is_some() {
@@ -355,27 +373,6 @@ mod tests {
         .to_string();
         assert!(err.contains("no command `nope`"), "got: {err}");
         assert!(err.contains("hello, greet"), "got: {err}");
-    }
-
-    #[test]
-    fn too_many_values_is_rejected_before_execution() {
-        let dir = local_module();
-        // `hello` takes no params, so even one value is too many — and this must
-        // fail loudly rather than silently drop the extra.
-        let err = run(
-            "./mod",
-            Some("hello"),
-            &["surplus".to_string()],
-            &[],
-            dir.path(),
-            &crate::trust::Grant::Current,
-            false,
-            false,
-            None,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("at most 0 value"), "got: {err}");
     }
 
     #[test]

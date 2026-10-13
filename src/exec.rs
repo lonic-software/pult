@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -463,6 +464,15 @@ fn check_count(name: &str, repeat: &RepeatDef, count: usize) -> Result<()> {
 /// item can only be given on the command line or in `--params-json`. A
 /// secret repeat's items are asked without echo.
 fn prompt_items(name: &str, repeat: &RepeatDef) -> Result<Vec<String>> {
+    // Checked here rather than left to the first prompt, whose label would
+    // name an item instead of the param.
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "`{name}` needs at least {} value(s), and stdin is not a terminal — \
+             pass them on the command line",
+            repeat.min
+        );
+    }
     let mut items = Vec::new();
     loop {
         if repeat.max.is_some_and(|max| items.len() >= max as usize) {
