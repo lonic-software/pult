@@ -288,7 +288,7 @@ fn clap_message(text: &str) -> String {
 
 /// A stdout writer that marks stdout committed on its first write, for
 /// streams that must not be followed by an error document.
-pub struct StreamStdout(std::io::Stdout);
+pub struct StreamStdout<W = std::io::Stdout>(W);
 
 impl StreamStdout {
     pub fn new() -> Self {
@@ -296,7 +296,7 @@ impl StreamStdout {
     }
 }
 
-impl std::io::Write for StreamStdout {
+impl<W: std::io::Write> std::io::Write for StreamStdout<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         commit_stdout();
         self.0.write(buf)
@@ -413,8 +413,8 @@ mod tests {
     fn writing_a_stream_line_commits_stdout() {
         use std::io::Write;
         assert!(!STDOUT_COMMITTED.load(Ordering::Relaxed));
-        let mut out = StreamStdout::new();
-        out.write_all(b"").unwrap();
+        let mut out = StreamStdout(Vec::new());
+        out.write_all(b"{}\n").unwrap();
         assert!(STDOUT_COMMITTED.load(Ordering::Relaxed));
     }
 
