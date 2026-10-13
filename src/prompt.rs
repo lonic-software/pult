@@ -78,6 +78,12 @@ pub fn password(message: &str) -> Result<String> {
     )
 }
 
+/// Ask a flag param: yes or no, defaulting to no.
+pub fn yes_no(message: &str) -> Result<bool> {
+    require_tty(&format!("`{message}` needs interactive input"))?;
+    map_inquire(Confirm::new(message).with_default(false).prompt())
+}
+
 pub fn confirm(message: &str) -> Result<bool> {
     require_tty("trusting a manifest needs interactive confirmation")?;
     map_inquire(Confirm::new(message).with_default(false).prompt())

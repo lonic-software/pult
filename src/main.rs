@@ -1,4 +1,5 @@
 mod add;
+mod bind;
 mod compile;
 mod discovery;
 mod doctor;
@@ -21,18 +22,17 @@ mod runs;
 mod selfupdate;
 mod shell;
 mod trust;
+mod value;
 mod verify;
 mod x;
 
-use std::collections::HashMap;
 use std::io::Read;
 
 use anyhow::{Context, Result, bail};
 use clap::{Arg, ArgAction};
-use indexmap::IndexMap;
 
 use discovery::Scope;
-use manifest::{OptionDef, ParamDef, ParamKind};
+use manifest::{OptionDef, ParamKind};
 use resolver::{PinInfo, Resolved, ResolvedRun};
 
 fn main() {
@@ -189,12 +189,7 @@ fn run(args: &[String]) -> Result<i32> {
         },
         Some((id, sub)) => {
             let cmd = resolve_manifest_command(&resolved.commands, id)?;
-            let mut provided = HashMap::new();
-            for name in cmd.params.keys() {
-                if let Some(v) = sub.get_one::<String>(name.as_str()) {
-                    provided.insert(name.clone(), v.clone());
-                }
-            }
+            let mut provided = bind::provided(cmd, sub);
             if params_json {
                 use std::io::IsTerminal;
                 if std::io::stdin().is_terminal() {
@@ -207,9 +202,17 @@ fn run(args: &[String]) -> Result<i32> {
                 std::io::stdin()
                     .read_to_string(&mut raw)
                     .context("failed to read stdin for --params-json")?;
-                merge_stdin_params(&raw, &cmd.params, &mut provided)?;
+                bind::merge_params_json(&raw, &cmd.params, &mut provided)?;
             }
-            exec::execute(&resolved, cmd, &provided, &grant, print, run_id)
+            exec::execute(
+                &resolved,
+                cmd,
+                &provided,
+                exec::Prompting::Direct,
+                &grant,
+                print,
+                run_id,
+            )
         }
         None => flow::run(&resolved, &grant, print, run_id),
     }
@@ -253,74 +256,10 @@ fn resolve_manifest_command<'a>(
     })
 }
 
-/// Name a JSON value's type for an error message, never its content.
-/// `--params-json` (below) is the mechanism `docs/reference.md` recommends
-/// specifically for passing a secret without putting it in argv — so a
-/// tooling bug that sends a non-string value (`{"token": ["hunter2-…"]}`, or
-/// a bare number) must not print that value back out on the very path
-/// chosen to avoid exposure. There's no name-based slot to redact by here
-/// (this runs before `provided` even exists as param values) and no masker
-/// yet either (that's built post-`fill`, and this rejects the input before
-/// `fill` ever runs) — the only fix available at this site is to never
-/// format the value at all.
-fn json_type_name(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "a boolean",
-        serde_json::Value::Number(_) => "a number",
-        serde_json::Value::String(_) => "a string",
-        serde_json::Value::Array(_) => "an array",
-        serde_json::Value::Object(_) => "an object",
-    }
-}
-
-/// Merge param values read from stdin (as a JSON object) into `provided`,
-/// which is already populated from positional args. Kept as a pure function so
-/// the parsing/merge rules are unit-testable without an actual stdin pipe.
-///
-/// Rules: stdin must be a JSON object whose values are all strings (anything
-/// else is a clear error); every key must be a param this command declares
-/// (typo safety — the error names the valid ones); and a param supplied both
-/// positionally and via JSON is a conflict, not a silent override.
-fn merge_stdin_params(
-    raw: &str,
-    declared: &IndexMap<String, ParamDef>,
-    provided: &mut HashMap<String, String>,
-) -> Result<()> {
-    let value: serde_json::Value =
-        serde_json::from_str(raw).context("--params-json: stdin is not valid JSON")?;
-    let obj = value
-        .as_object()
-        .context("--params-json: stdin must be a JSON object of param name -> string value")?;
-    for (key, v) in obj {
-        if !declared.contains_key(key) {
-            let known: Vec<&str> = declared.keys().map(String::as_str).collect();
-            bail!(
-                "--params-json: unknown param `{key}` — this command declares: {}",
-                if known.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    known.join(", ")
-                }
-            );
-        }
-        let s = v.as_str().with_context(|| {
-            format!(
-                "--params-json: param `{key}` must be a JSON string, got {}",
-                json_type_name(v)
-            )
-        })?;
-        if provided.contains_key(key) {
-            bail!("param `{key}` was given both positionally and via --params-json — pick one");
-        }
-        provided.insert(key.clone(), s.to_string());
-    }
-    Ok(())
-}
-
 /// Build the CLI dynamically from the resolved manifest: every command becomes
-/// a subcommand, every param a positional arg (optional — missing ones are
-/// prompted for, so partial invocations degrade into a shorter guided flow).
+/// a subcommand, its params bound by `bind::args` (all optional — a missing
+/// one is filled by `exec::fill`, so partial invocations degrade into a
+/// shorter guided flow).
 ///
 /// Help keeps the two surfaces apart: the subcommand list is purely what the
 /// manifest declares (the product); pult's own subcommands are hidden from it
@@ -485,27 +424,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
         if let Some(description) = &cmd.description {
             sub = sub.long_about(format!("{}\n\n{description}", cmd.title));
         }
-        for (index, (name, def)) in cmd.params.iter().enumerate() {
-            let mut arg = Arg::new(name.clone())
-                .index(index + 1)
-                .required(false)
-                .value_name(name.to_uppercase());
-            arg = match def.kind() {
-                ParamKind::Pick(pick) => match &pick.options {
-                    Some(opts) => {
-                        let values: Vec<&str> = opts.iter().map(OptionDef::value).collect();
-                        arg.help(format!("one of: {}", values.join(", ")))
-                    }
-                    None => arg.help("picked from a dynamic option source if omitted"),
-                },
-                ParamKind::Input(input) if input.secret => {
-                    arg.help("secret; prompted without echo if omitted")
-                }
-                ParamKind::Input(_) => arg.help("free text; prompted if omitted"),
-                ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
-            };
-            sub = sub.arg(arg);
-        }
+        sub = sub.args(bind::args(cmd));
         cli = cli.subcommand(sub);
     }
     cli
@@ -596,6 +515,21 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                             "secret": input.secret,
                         })
                     }
+                    ParamKind::Flag(flag) => json!({
+                        "name": name,
+                        "kind": "flag",
+                        // The word the tool receives when the flag is set.
+                        "arg": flag.arg,
+                    }),
+                    ParamKind::Repeat(repeat) => json!({
+                        "name": name,
+                        "kind": "repeat",
+                        // null: a positional repeat, taking the trailing values.
+                        "arg": repeat.arg,
+                        "min": repeat.min,
+                        "max": repeat.max,
+                        "secret": repeat.secret,
+                    }),
                     ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
                 })
                 .collect();
@@ -902,110 +836,4 @@ commands:
         assert!(msg.contains("pult update …"), "got: {msg}");
     }
 
-    /// A command's declared params, for `merge_stdin_params` tests — going
-    /// through a real manifest instead of hand-building `ParamDef`s keeps the
-    /// fixture honest with what the resolver actually produces.
-    fn declared_params(yaml: &str) -> IndexMap<String, ParamDef> {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("pult.yaml"), yaml).unwrap();
-        let loaded = manifest::load(&dir.path().join("pult.yaml")).unwrap();
-        let resolved = resolver::resolve(loaded).unwrap();
-        resolved.commands[0].params.clone()
-    }
-
-    const TOKEN_CMD: &str = "version: 1\ncommands:\n  - id: c\n    title: C\n    params:\n      \
-         token: { input: { secret: true } }\n      region: { input: { default: eu } }\n    run: \"true\"\n";
-
-    #[test]
-    fn merge_stdin_params_happy_path() {
-        let declared = declared_params(TOKEN_CMD);
-        let mut provided = HashMap::new();
-        provided.insert("region".to_string(), "us".to_string());
-        merge_stdin_params(r#"{"token":"hunter2"}"#, &declared, &mut provided).unwrap();
-        assert_eq!(provided.get("token").map(String::as_str), Some("hunter2"));
-        assert_eq!(provided.get("region").map(String::as_str), Some("us"));
-    }
-
-    #[test]
-    fn merge_stdin_params_unknown_key_names_valid_params() {
-        let declared = declared_params(TOKEN_CMD);
-        let mut provided = HashMap::new();
-        let err = merge_stdin_params(r#"{"toekn":"x"}"#, &declared, &mut provided).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("unknown param `toekn`"), "got: {msg}");
-        assert!(
-            msg.contains("token"),
-            "should list valid params, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn merge_stdin_params_conflict_with_positional_errors() {
-        let declared = declared_params(TOKEN_CMD);
-        let mut provided = HashMap::new();
-        provided.insert("token".to_string(), "positional".to_string());
-        let err =
-            merge_stdin_params(r#"{"token":"hunter2"}"#, &declared, &mut provided).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("both positionally and via --params-json"),
-            "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn merge_stdin_params_non_string_value_errors() {
-        let declared = declared_params(TOKEN_CMD);
-        let mut provided = HashMap::new();
-        let err = merge_stdin_params(r#"{"token": 123}"#, &declared, &mut provided).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("must be a JSON string"),
-            "got: {err:#}"
-        );
-    }
-
-    /// Follow-up review finding on #12's fix, same class, a fifth site:
-    /// `--params-json` is the mechanism `docs/reference.md` recommends
-    /// specifically for passing a secret without putting it in argv, so a
-    /// non-string value must never be echoed back on this path — a token
-    /// wrapped in an array by a tooling bug, say, must render as a *type*
-    /// name, not the array's contents. Reddens if `json_type_name` is
-    /// dropped in favor of `format!("... got {v}")`.
-    #[test]
-    fn merge_stdin_params_non_string_value_error_names_the_type_not_the_value() {
-        let declared = declared_params(TOKEN_CMD);
-        let mut provided = HashMap::new();
-        let secret = "hunter2-super-secret";
-        let err = merge_stdin_params(
-            &format!(r#"{{"token": ["{secret}"]}}"#),
-            &declared,
-            &mut provided,
-        )
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(!msg.contains(secret), "leaked: {msg}");
-        assert!(msg.contains("must be a JSON string"), "got: {msg}");
-        assert!(msg.contains("an array"), "got: {msg}");
-    }
-
-    #[test]
-    fn merge_stdin_params_invalid_json_errors() {
-        let declared = declared_params(TOKEN_CMD);
-        let mut provided = HashMap::new();
-        let err = merge_stdin_params("not json", &declared, &mut provided).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not valid JSON"),
-            "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn merge_stdin_params_non_object_json_errors() {
-        let declared = declared_params(TOKEN_CMD);
-        let mut provided = HashMap::new();
-        let err = merge_stdin_params(r#"["token"]"#, &declared, &mut provided).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("must be a JSON object"),
-            "got: {err:#}"
-        );
-    }
 }

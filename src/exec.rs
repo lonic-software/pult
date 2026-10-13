@@ -9,11 +9,26 @@ use crate::compile::Guards;
 use crate::events::{self, InheritedChannel};
 use crate::journal;
 use crate::label;
-use crate::manifest::{ParamDef, ParamKind};
+use crate::manifest::{ParamKind, RepeatDef};
 use crate::mask::{self, Masker};
 use crate::resolver::{Resolved, ResolvedCommand, ResolvedRun};
 use crate::runner::Journaling;
-use crate::{compile, interp, options, prompt, runner, shell, trust};
+use crate::value::{self, Value, Values};
+use crate::{compile, interp, machine, options, prompt, runner, shell, trust};
+
+/// How `fill` asks for a param nobody supplied, keyed to the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prompting {
+    /// The guided flow (bare `pult`, `pult x <source>` with no command):
+    /// every param is asked in order, a flag as yes/no and a repeat one
+    /// item per line.
+    Guided,
+    /// A direct invocation (`pult <cmd>`, `pult x <source> <cmd>`): an
+    /// absent flag is false and an absent optional repeat is empty, neither
+    /// asked; a repeat with `min` ≥ 1 is asked on a terminal and an error
+    /// otherwise. Pick and input are asked as in the guided flow.
+    Direct,
+}
 
 /// Execute one command: fill its params (from provided values or interactive
 /// prompts, in declared order — which is what makes dependent `from:` sources
@@ -31,7 +46,8 @@ use crate::{compile, interp, options, prompt, runner, shell, trust};
 pub fn execute(
     resolved: &Resolved,
     cmd: &ResolvedCommand,
-    provided: &HashMap<String, String>,
+    provided: &HashMap<String, Value>,
+    prompting: Prompting,
     grant: &crate::trust::Grant,
     print: bool,
     run_id: Option<&str>,
@@ -39,14 +55,14 @@ pub fn execute(
     if print {
         // Dry run: compose without executing anything (provided values
         // concrete, the rest as `<name>`), print, and stop — no trust needed.
-        let preview = compose(cmd, &fill(cmd, provided, None)?)?;
+        let preview = compose(cmd, &fill(cmd, provided, None, prompting)?)?;
         println!("{preview}");
         return Ok(0);
     }
 
     // Only an ephemeral source shows its command in the trust prompt (see above).
     let about_to_run = if resolved.ephemeral {
-        Some(compose(cmd, &fill(cmd, provided, None)?)?)
+        Some(compose(cmd, &fill(cmd, provided, None, prompting)?)?)
     } else {
         None
     };
@@ -60,7 +76,7 @@ pub fn execute(
 
     // Trusted now — fill for real (prompting for and resolving any values not
     // given on the command line) and run.
-    let values = fill(cmd, provided, Some(&resolved.run_dir))?;
+    let values = fill(cmd, provided, Some(&resolved.run_dir), prompting)?;
 
     // Resolve the shell this run will need before the journal below is
     // opened, not after: `run_sh`/`run_bash` call `shell::sh()`/`bash()`
@@ -160,10 +176,13 @@ pub fn execute(
             // apply here identically, since this goes through the same
             // `interp::interpolate` → `shell_quote` path.
             let display = masker
-                .apply(&interp::interpolate(template, &redact(cmd, &values))?)
+                .apply(&interp::interpolate(
+                    template,
+                    &value::words(&cmd.params, &redact(cmd, &values)),
+                )?)
                 .into_owned();
             runner::run_sh(
-                &interp::interpolate(template, &values)?,
+                &interp::interpolate(template, &value::words(&cmd.params, &values))?,
                 &display,
                 &resolved.run_dir,
                 journaling,
@@ -190,61 +209,70 @@ pub fn execute(
     }
 }
 
-/// Whether `def` is a `secret: true` input — the one condition
-/// `journal_params`, `redact`, and `build_masker` all need. Unified here so
-/// issue #6 (masking values discovered mid-run, not just supplied up front)
-/// only has to extend this one place instead of three.
-fn is_secret(def: &ParamDef) -> bool {
-    matches!(def.kind(), ParamKind::Input(input) if input.secret)
-}
-
-/// `values` for the journal's audit record: secrets as the spec's literal
+/// `values` for the journal's audit record, as the strings the journal
+/// keeps (see `Value::journal_text`): secrets as the spec's literal
 /// `"<redacted>"` — the value itself never reaches the journal module.
-fn journal_params(
-    cmd: &ResolvedCommand,
-    values: &IndexMap<String, String>,
-) -> IndexMap<String, String> {
+fn journal_params(cmd: &ResolvedCommand, values: &Values) -> IndexMap<String, String> {
+    values
+        .iter()
+        .map(|(name, v)| {
+            let secret = cmd.params.get(name).is_some_and(|def| def.is_secret());
+            let text = if secret {
+                "<redacted>".to_string()
+            } else {
+                v.journal_text()
+            };
+            (name.clone(), text)
+        })
+        .collect()
+}
+
+/// `values` with every secret replaced by a fixed mask (fixed so the mask
+/// doesn't leak the value's length): a secret input's text, and each item of
+/// a secret repeat. Stays typed, because what it returns is rendered again
+/// for display.
+fn redact(cmd: &ResolvedCommand, values: &Values) -> Values {
     let mut out = values.clone();
     for (name, def) in &cmd.params {
-        if is_secret(def)
-            && let Some(v) = out.get_mut(name)
-        {
-            *v = "<redacted>".to_string();
+        if !def.is_secret() {
+            continue;
+        }
+        match out.get_mut(name) {
+            Some(Value::Text(v)) => *v = "••••••".to_string(),
+            Some(Value::List(items)) => {
+                for item in items {
+                    *item = "••••••".to_string();
+                }
+            }
+            Some(Value::Flag(_)) | None => {}
         }
     }
     out
 }
 
-/// `values` with every `secret: true` param replaced by a fixed mask (fixed so
-/// the mask doesn't leak the value's length).
-fn redact(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> IndexMap<String, String> {
-    let mut out = values.clone();
-    for (name, def) in &cmd.params {
-        if is_secret(def)
-            && let Some(v) = out.get_mut(name)
-        {
-            *v = "••••••".to_string();
-        }
-    }
-    out
-}
-
-/// Build the run's `Masker` from post-`fill` secret values, returning
-/// alongside it the name of every secret `Masker::from_named` reports as
-/// producing no maskable segment at all. Deliberately does *not* decide for
-/// itself which values are "too short" — that would be exactly the drift
-/// this fixes (`build_masker` used to run its own whole-value length check,
-/// a different rule from what `Masker::from_named` actually splits and
-/// filters per line; a multi-line value whose every individual line was too
-/// short passed the whole-value check while masking nothing). One rule,
-/// derived from what construction actually did; the caller (`execute`,
-/// above) decides *whether* to warn from it.
-fn build_masker(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> (Masker, Vec<String>) {
+/// Build the run's `Masker` from post-`fill` secret values — a secret
+/// repeat contributes each of its items — returning alongside it the name of
+/// every secret `Masker::from_named` reports as producing no maskable
+/// segment at all. Deliberately does *not* decide for itself which values
+/// are "too short" — that would be exactly the drift this fixes
+/// (`build_masker` used to run its own whole-value length check, a different
+/// rule from what `Masker::from_named` actually splits and filters per line;
+/// a multi-line value whose every individual line was too short passed the
+/// whole-value check while masking nothing). One rule, derived from what
+/// construction actually did; the caller (`execute`, above) decides
+/// *whether* to warn from it.
+fn build_masker(cmd: &ResolvedCommand, values: &Values) -> (Masker, Vec<String>) {
     let secrets: Vec<(String, String)> = cmd
         .params
         .iter()
-        .filter(|(_, def)| is_secret(def))
-        .filter_map(|(name, _)| values.get(name).map(|v| (name.clone(), v.clone())))
+        .filter(|(_, def)| def.is_secret())
+        .filter_map(|(name, _)| values.get(name).map(|v| (name, v)))
+        .flat_map(|(name, v)| {
+            v.strings()
+                .into_iter()
+                .map(|s| (name.clone(), s.to_string()))
+                .collect::<Vec<_>>()
+        })
         .collect();
     Masker::from_named(secrets)
 }
@@ -279,18 +307,24 @@ fn warn_unmaskable(names: &[String]) {
 
 /// Fill a command's params in declared order. `run_dir: None` = **preview**:
 /// never prompt or run a dynamic option source (both would execute code from a
-/// possibly-untrusted module); unprovided params become `<name>` metavars.
-/// `Some(dir)` = **live**: prompt for anything not provided, running dynamic
-/// pickers against `dir` — reached only after the trust gate.
+/// possibly-untrusted module); unprovided params become `<name>` metavars,
+/// except that an absent flag is unset and an absent optional repeat empty.
+/// `Some(dir)` = **live**: fill anything not provided as `prompting` says,
+/// running dynamic pickers against `dir` — reached only after the trust gate.
+///
+/// A provided value's type matches its param's kind: the argv binding and
+/// `--params-json` (main.rs) both build it from the kind.
 fn fill(
     cmd: &ResolvedCommand,
-    provided: &HashMap<String, String>,
+    provided: &HashMap<String, Value>,
     run_dir: Option<&Path>,
-) -> Result<IndexMap<String, String>> {
-    let mut values: IndexMap<String, String> = IndexMap::new();
+    prompting: Prompting,
+) -> Result<Values> {
+    let preview = run_dir.is_none();
+    let mut values = Values::new();
     for (name, def) in &cmd.params {
         let value = match (provided.get(name), def.kind()) {
-            (Some(v), ParamKind::Pick(pick)) => {
+            (Some(Value::Text(v)), ParamKind::Pick(pick)) => {
                 // Validate against static options — values only, never
                 // labels/descriptions; dynamic sources accept any value so
                 // direct invocation stays fast and scriptable.
@@ -304,13 +338,13 @@ fn fill(
                         values.join(", ")
                     );
                 }
-                v.clone()
+                Value::Text(v.clone())
             }
             // A provided secret is used for execution only — preview text
             // (`--print`, the ephemeral trust prompt) shows the slot instead,
             // so a secret passed on the command line is never printed back.
-            (Some(_), ParamKind::Input(input)) if input.secret && run_dir.is_none() => {
-                format!("<{name}>")
+            (Some(Value::Text(_)), ParamKind::Input(input)) if input.secret && preview => {
+                Value::Text(format!("<{name}>"))
             }
             // Deliberate exclusion, not an oversight: if this non-secret
             // value happens to embed a *different* param's secret (e.g. a
@@ -323,9 +357,32 @@ fn fill(
             // `running:` banner, option-source errors, picker options),
             // which only ever applies once execution begins, not to these
             // pre-trust previews.
-            (Some(v), ParamKind::Input(_)) => v.clone(),
+            (Some(v @ Value::Text(_)), ParamKind::Input(_)) => v.clone(),
+            (Some(Value::Flag(b)), ParamKind::Flag(_)) => Value::Flag(*b),
+            (Some(Value::List(items)), ParamKind::Repeat(repeat)) => {
+                check_count(name, repeat, items.len())?;
+                // Like a secret input: the preview shows the slot.
+                if repeat.secret && preview {
+                    Value::List(vec![format!("<{name}>")])
+                } else {
+                    Value::List(items.clone())
+                }
+            }
+            (Some(_), _) => bail!("param `{name}` was given a value of the wrong type"),
+            // An absent flag is unset unless the guided flow asks for it.
+            (None, ParamKind::Flag(_)) if preview || prompting == Prompting::Direct => {
+                Value::Flag(false)
+            }
+            (None, ParamKind::Repeat(repeat))
+                if repeat.min == 0 && (preview || prompting == Prompting::Direct) =>
+            {
+                Value::List(Vec::new())
+            }
+            (None, ParamKind::Repeat(_)) if preview => Value::List(vec![format!("<{name}>")]),
             // Preview: show the slot instead of prompting or shelling out.
-            (None, _) if run_dir.is_none() => format!("<{name}>"),
+            (None, _) if preview => Value::Text(format!("<{name}>")),
+            (None, ParamKind::Flag(_)) => Value::Flag(prompt::yes_no(&format!("{name}?"))?),
+            (None, ParamKind::Repeat(repeat)) => Value::List(prompt_items(name, repeat)?),
             (None, ParamKind::Pick(pick)) => {
                 // A throwaway `Redaction`, rebuilt from just the values
                 // answered so far (never the run's own masker — there isn't
@@ -338,7 +395,8 @@ fn fill(
                 // `build_masker` already tolerate a partial map (they look
                 // values up by name and skip absent ones), so this is safe
                 // per-call, not just at the end of `fill`.
-                let display_values = redact(cmd, &values);
+                let words = value::words(&cmd.params, &values);
+                let display_words = value::words(&cmd.params, &redact(cmd, &values));
                 let (masker, unmaskable) = build_masker(cmd, &values);
                 // Warn *here*, not just at the run level in `execute` — this
                 // is the one point that precedes a failing `pick.from`
@@ -351,8 +409,8 @@ fn fill(
                 // pick, for a command with more than one).
                 warn_unmaskable(&unmaskable);
                 let redaction = options::Redaction {
-                    values: &values,
-                    display_values: &display_values,
+                    values: &words,
+                    display_values: &display_words,
                     masker: &masker,
                 };
                 let opts = options::resolve_pick(pick, &redaction, run_dir.unwrap())?;
@@ -366,19 +424,69 @@ fn fill(
                 let w = label::width();
                 let labels = masked_option_labels(&opts, &masker, w);
                 let i = prompt::select_index(&format!("{name}?"), labels)?;
-                pick_selection(&opts, i)
+                Value::Text(pick_selection(&opts, i))
             }
             (None, ParamKind::Input(input)) if input.secret => {
-                prompt::password(&format!("{name}?"))?
+                Value::Text(prompt::password(&format!("{name}?"))?)
             }
-            (None, ParamKind::Input(input)) => {
-                prompt::text(&format!("{name}?"), input.default.as_deref())?
-            }
+            (None, ParamKind::Input(input)) => Value::Text(prompt::text(
+                &format!("{name}?"),
+                input.default.as_deref(),
+            )?),
             (_, ParamKind::Use(_)) => unreachable!("resolver inlines every use: param"),
         };
         values.insert(name.clone(), value);
     }
     Ok(values)
+}
+
+/// A repeat's item count must lie within its `min`/`max`.
+fn check_count(name: &str, repeat: &RepeatDef, count: usize) -> Result<()> {
+    let min = repeat.min as usize;
+    if count < min {
+        return Err(machine::usage(format!(
+            "`{name}` needs at least {min} value(s), but {count} were given"
+        )));
+    }
+    if let Some(max) = repeat.max
+        && count > max as usize
+    {
+        return Err(machine::usage(format!(
+            "`{name}` takes at most {max} value(s), but {count} were given"
+        )));
+    }
+    Ok(())
+}
+
+/// Ask for a repeat's items one per line. An empty line ends the list once
+/// `min` items are in, and the list ends by itself at `max`, so an empty
+/// item can only be given on the command line or in `--params-json`. A
+/// secret repeat's items are asked without echo.
+fn prompt_items(name: &str, repeat: &RepeatDef) -> Result<Vec<String>> {
+    let mut items = Vec::new();
+    loop {
+        if repeat.max.is_some_and(|max| items.len() >= max as usize) {
+            return Ok(items);
+        }
+        let done = items.len() >= repeat.min as usize;
+        let message = if done {
+            format!("{name}? (item {}, empty line to finish)", items.len() + 1)
+        } else {
+            format!("{name}? (item {})", items.len() + 1)
+        };
+        let item = if repeat.secret {
+            prompt::password(&message)?
+        } else {
+            prompt::text(&message, None)?
+        };
+        if item.is_empty() {
+            if done {
+                return Ok(items);
+            }
+            continue;
+        }
+        items.push(item);
+    }
 }
 
 /// Render a picker's options into on-screen labels with `masker` applied — a
@@ -431,9 +539,11 @@ fn pick_selection(opts: &[options::PickOption], i: usize) -> String {
 
 /// Render the final command text for `values`: a plain `run:` interpolates to a
 /// single line; a step list compiles to its bash script.
-fn compose(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Result<String> {
+fn compose(cmd: &ResolvedCommand, values: &Values) -> Result<String> {
     match &cmd.run {
-        ResolvedRun::Script(template) => interp::interpolate(template, values),
+        ResolvedRun::Script(template) => {
+            interp::interpolate(template, &value::words(&cmd.params, values))
+        }
         ResolvedRun::Steps(_) => compile::compile(cmd, values, Guards::None),
     }
 }
@@ -442,6 +552,14 @@ fn compose(cmd: &ResolvedCommand, values: &IndexMap<String, String>) -> Result<S
 mod tests {
     use super::*;
     use crate::{manifest, resolver};
+
+    /// Text values, as the argv binding builds them for pick and input params.
+    fn text<C: FromIterator<(String, Value)>>(pairs: &[(&str, &str)]) -> C {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::Text(v.to_string())))
+            .collect()
+    }
 
     /// §7.1 — the value handed to the command equals the selected option's
     /// `value`, never its label. Pins the new `pick_selection` call site
@@ -489,13 +607,15 @@ mod tests {
             resolver::resolve(manifest::load(&dir.path().join("pult.yaml")).unwrap()).unwrap();
         let cmd = &resolved.commands[0];
 
-        let ok: HashMap<_, _> = [("env".to_string(), "dev".to_string())].into();
-        let values = fill(cmd, &ok, None).unwrap();
-        assert_eq!(values["env"], "dev");
+        let ok: HashMap<_, _> = text(&[("env", "dev")]);
+        let values = fill(cmd, &ok, None, Prompting::Direct).unwrap();
+        assert_eq!(values["env"], Value::Text("dev".to_string()));
 
         for bad in ["Sandbox", "dev — Sandbox"] {
-            let provided: HashMap<_, _> = [("env".to_string(), bad.to_string())].into();
-            let err = fill(cmd, &provided, None).unwrap_err().to_string();
+            let provided: HashMap<_, _> = text(&[("env", bad)]);
+            let err = fill(cmd, &provided, None, Prompting::Direct)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("expected one of: dev"), "got: {err}");
         }
     }
@@ -523,6 +643,7 @@ mod tests {
             &resolved,
             &resolved.commands[0],
             &HashMap::new(),
+            Prompting::Direct,
             &crate::trust::Grant::Ask,
             true,
             None,
@@ -553,14 +674,10 @@ mod tests {
     fn provided_secret_never_appears_in_preview() {
         let (_d, resolved) = secret_cmd();
         let cmd = &resolved.commands[0];
-        let provided: HashMap<_, _> = [
-            ("token".to_string(), "hunter2".to_string()),
-            ("region".to_string(), "us".to_string()),
-        ]
-        .into();
+        let provided: HashMap<_, _> = text(&[("token", "hunter2"), ("region", "us")]);
         // Preview fill (`--print`, ephemeral trust prompt): the secret becomes
         // its slot even though a value was provided; plain inputs stay concrete.
-        let values = fill(cmd, &provided, None).unwrap();
+        let values = fill(cmd, &provided, None, Prompting::Direct).unwrap();
         let preview = compose(cmd, &values).unwrap();
         assert!(!preview.contains("hunter2"), "leaked: {preview}");
         assert!(preview.contains("<token>"), "got: {preview}");
@@ -571,18 +688,13 @@ mod tests {
     fn redact_masks_secret_values_only() {
         let (_d, resolved) = secret_cmd();
         let cmd = &resolved.commands[0];
-        let values: IndexMap<_, _> = [
-            ("token".to_string(), "hunter2".to_string()),
-            ("region".to_string(), "us".to_string()),
-        ]
-        .into_iter()
-        .collect();
+        let values: Values = text(&[("token", "hunter2"), ("region", "us")]);
         let display = crate::interp::interpolate(
             match &cmd.run {
                 ResolvedRun::Script(t) => t,
                 _ => unreachable!(),
             },
-            &redact(cmd, &values),
+            &value::words(&cmd.params, &redact(cmd, &values)),
         )
         .unwrap();
         assert!(!display.contains("hunter2"), "leaked: {display}");
@@ -619,8 +731,8 @@ mod tests {
         let cmd = &resolved.commands[0];
 
         let secret = "hunter2-super-secret";
-        let provided: HashMap<_, _> = [("token".to_string(), secret.to_string())].into();
-        let err = fill(cmd, &provided, Some(dir.path())).unwrap_err();
+        let provided: HashMap<_, _> = text(&[("token", secret)]);
+        let err = fill(cmd, &provided, Some(dir.path()), Prompting::Direct).unwrap_err();
         let rendered = format!("{err:#}");
 
         assert!(!rendered.contains(secret), "leaked: {rendered}");
@@ -659,15 +771,9 @@ mod tests {
         let cmd = &resolved.commands[0];
 
         let secret = "hunter2-super-secret";
-        let provided: HashMap<_, _> = [
-            ("token".to_string(), secret.to_string()),
-            (
-                "url".to_string(),
-                format!("https://api.example/?token={secret}"),
-            ),
-        ]
-        .into();
-        let err = fill(cmd, &provided, Some(dir.path())).unwrap_err();
+        let url = format!("https://api.example/?token={secret}");
+        let provided: HashMap<_, _> = text(&[("token", secret), ("url", &url)]);
+        let err = fill(cmd, &provided, Some(dir.path()), Prompting::Direct).unwrap_err();
         let rendered = format!("{err:#}");
 
         assert!(!rendered.contains(secret), "leaked: {rendered}");
@@ -758,12 +864,7 @@ mod tests {
     fn build_masker_reports_a_multiline_secret_whose_every_line_is_too_short() {
         let (_d, resolved) = secret_cmd();
         let cmd = &resolved.commands[0];
-        let values: IndexMap<_, _> = [
-            ("token".to_string(), "ab\ncd\nef".to_string()),
-            ("region".to_string(), "us".to_string()),
-        ]
-        .into_iter()
-        .collect();
+        let values: Values = text(&[("token", "ab\ncd\nef"), ("region", "us")]);
         let (_masker, unmaskable) = build_masker(cmd, &values);
         assert_eq!(unmaskable, vec!["token".to_string()]);
     }

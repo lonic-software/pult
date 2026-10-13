@@ -619,6 +619,16 @@ fn visit_param(def: &mut ParamDef, f: &dyn Fn(&mut String)) {
     {
         f(d);
     }
+    if let Some(flag) = &mut def.flag
+        && let Some(arg) = &mut flag.arg
+    {
+        f(arg);
+    }
+    if let Some(repeat) = &mut def.repeat
+        && let Some(arg) = &mut repeat.arg
+    {
+        f(arg);
+    }
 }
 
 fn visit_step(step: &mut StepDef, f: &dyn Fn(&mut String)) {
@@ -698,7 +708,10 @@ fn resolve_command(
         params.insert(name.clone(), concrete);
     }
 
-    // Dependent-picker ordering: a `from:` may reference only earlier params.
+    check_binding(&params).with_context(ctx)?;
+
+    // Dependent-picker ordering: a `from:` may reference only earlier params,
+    // and only text ones — an option source is one string per placeholder.
     let mut seen: HashSet<&str> = HashSet::new();
     for (name, def) in &params {
         if let Some(pick) = &def.pick
@@ -708,6 +721,12 @@ fn resolve_command(
                 if !seen.contains(ph.as_str()) {
                     bail!(
                         "{}: param `{name}`: option source references `{{{ph}}}`, which is not declared before it",
+                        ctx()
+                    );
+                }
+                if params[ph.as_str()].pick.is_none() && params[ph.as_str()].input.is_none() {
+                    bail!(
+                        "{}: param `{name}`: option source references `{{{ph}}}`, which is a flag or repeat — an option source may use only pick and input params",
                         ctx()
                     );
                 }
@@ -762,6 +781,50 @@ fn resolve_command(
         category: cmd.category,
         description: cmd.description,
     })
+}
+
+/// Param names no command may use, whatever the kind: each is one of pult's
+/// own options on a command's line (`json` is read straight from argv, and
+/// `var` is `pult x`'s), so a param of that name would collide with it.
+pub const RESERVED_PARAMS: [&str; 7] = [
+    "trust",
+    "print",
+    "params-json",
+    "run-id",
+    "help",
+    "json",
+    "var",
+];
+
+/// The command-line binding rules, checked on the resolved params (after
+/// `use:` inlining, so an inlined param is held to them under its local
+/// name): no reserved name, and at most one positional repeat, which must be
+/// the last positional param — it takes every trailing value.
+fn check_binding(params: &IndexMap<String, ParamDef>) -> Result<()> {
+    for name in params.keys() {
+        if RESERVED_PARAMS.contains(&name.as_str()) {
+            bail!(
+                "param `{name}` is a reserved name — it would collide with pult's own `--{name}`; rename it"
+            );
+        }
+    }
+    let positional: Vec<(&String, &ParamDef)> =
+        params.iter().filter(|(_, def)| def.is_positional()).collect();
+    let mut trailing = positional.iter().filter(|(_, def)| def.repeat.is_some());
+    if let Some((first, _)) = trailing.next() {
+        if let Some((second, _)) = trailing.next() {
+            bail!(
+                "params `{first}` and `{second}` are both repeats without an `arg` — a command can have only one, since it takes the trailing values; give the other an `arg`"
+            );
+        }
+        let (last, _) = positional.last().expect("contains `first`");
+        if last != first {
+            bail!(
+                "param `{first}` is a repeat without an `arg`, so it takes the trailing values and must be the last positional param (`{last}` follows it)"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn resolve_entry(

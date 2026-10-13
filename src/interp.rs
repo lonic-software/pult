@@ -1,19 +1,20 @@
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
 
-/// Substitute `{name}` placeholders with shell-quoted values — STRICT mode,
+/// Substitute `{name}` placeholders with `words` — each value already
+/// rendered as shell text (see `value::words`), inserted as is. STRICT mode,
 /// for single-line templates (plain `run:` strings, `pick.from` sources):
 /// unknown placeholders and unclosed braces are errors; `{{`/`}}` escape.
-pub fn interpolate(template: &str, values: &IndexMap<String, String>) -> Result<String> {
+pub fn interpolate(template: &str, words: &IndexMap<String, String>) -> Result<String> {
     let mut out = String::with_capacity(template.len());
     walk(template, |part| {
         match part {
             Part::Literal(s) => out.push_str(s),
             Part::Placeholder(name) => {
-                let v = values
+                let v = words
                     .get(name)
                     .with_context(|| format!("unknown parameter `{{{name}}}` in `{template}`"))?;
-                out.push_str(&shell_quote(v));
+                out.push_str(v);
             }
         }
         Ok(())
@@ -108,16 +109,16 @@ fn scan_script(script: &str, mut f: impl FnMut(&str, usize, usize)) {
 }
 
 /// LENIENT interpolation for step scripts and inline run-list fragments:
-/// substitutes `{name}` (shell-quoted) only when `name` is a known value;
-/// everything else — `${TASK+x}`, `awk '{print $1}'`, unmatched braces —
-/// passes through untouched. Never errors.
-pub fn interpolate_lenient(script: &str, values: &IndexMap<String, String>) -> String {
+/// substitutes `{name}` with its rendered `words` entry only when `name` is a
+/// known value; everything else — `${TASK+x}`, `awk '{print $1}'`, unmatched
+/// braces — passes through untouched. Never errors.
+pub fn interpolate_lenient(script: &str, words: &IndexMap<String, String>) -> String {
     let mut out = String::with_capacity(script.len());
     let mut last = 0;
     scan_script(script, |name, start, end| {
-        if let Some(v) = values.get(name) {
+        if let Some(v) = words.get(name) {
             out.push_str(&script[last..start]);
-            out.push_str(&shell_quote(v));
+            out.push_str(v);
             last = end;
         }
     });
@@ -200,6 +201,14 @@ pub fn shell_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Text values rendered the way `value::words` renders them.
+    fn words(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), shell_quote(v)))
+            .collect()
+    }
+
     fn vals(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
         pairs
             .iter()
@@ -211,7 +220,7 @@ mod tests {
     fn substitutes_in_order() {
         let out = interpolate(
             "./impl shell {customer} {env}",
-            &vals(&[("customer", "demo-leeds"), ("env", "dev")]),
+            &words(&[("customer", "demo-leeds"), ("env", "dev")]),
         )
         .unwrap();
         assert_eq!(out, "./impl shell demo-leeds dev");
@@ -219,19 +228,19 @@ mod tests {
 
     #[test]
     fn quotes_unsafe_values() {
-        let out = interpolate("echo {msg}", &vals(&[("msg", "hi; rm -rf /")])).unwrap();
+        let out = interpolate("echo {msg}", &words(&[("msg", "hi; rm -rf /")])).unwrap();
         assert_eq!(out, r"echo 'hi; rm -rf /'");
     }
 
     #[test]
     fn double_braces_are_literal() {
-        let out = interpolate("echo {{literal}} {x}", &vals(&[("x", "v")])).unwrap();
+        let out = interpolate("echo {{literal}} {x}", &words(&[("x", "v")])).unwrap();
         assert_eq!(out, "echo {literal} v");
     }
 
     #[test]
     fn unknown_placeholder_errors_in_strict_mode() {
-        let err = interpolate("echo {nope}", &vals(&[]))
+        let err = interpolate("echo {nope}", &words(&[]))
             .unwrap_err()
             .to_string();
         assert!(err.contains("nope"));
@@ -239,7 +248,7 @@ mod tests {
 
     #[test]
     fn unclosed_brace_errors_in_strict_mode() {
-        assert!(interpolate("echo {oops", &vals(&[])).is_err());
+        assert!(interpolate("echo {oops", &words(&[])).is_err());
     }
 
     #[test]
@@ -252,27 +261,27 @@ mod tests {
 
     #[test]
     fn lenient_substitutes_known_params_only() {
-        let out = interpolate_lenient("deploy {env} {unknown}", &vals(&[("env", "dev")]));
+        let out = interpolate_lenient("deploy {env} {unknown}", &words(&[("env", "dev")]));
         assert_eq!(out, "deploy dev {unknown}");
     }
 
     #[test]
     fn lenient_leaves_shell_expansions_alone() {
         let script = r#"[ "${TASK+x}" ] && echo "${TASK}""#;
-        let out = interpolate_lenient(script, &vals(&[("TASK", "nope")]));
+        let out = interpolate_lenient(script, &words(&[("TASK", "nope")]));
         assert_eq!(out, script, "shell ${{…}} must never be treated as a param");
     }
 
     #[test]
     fn lenient_leaves_awk_and_groups_alone() {
         let script = "ps aux | awk '{print $1}' | while read u; do { echo $u; }; done";
-        let out = interpolate_lenient(script, &vals(&[("env", "dev")]));
+        let out = interpolate_lenient(script, &words(&[("env", "dev")]));
         assert_eq!(out, script);
     }
 
     #[test]
     fn lenient_quotes_substituted_values() {
-        let out = interpolate_lenient("echo {msg}", &vals(&[("msg", "a b")]));
+        let out = interpolate_lenient("echo {msg}", &words(&[("msg", "a b")]));
         assert_eq!(out, "echo 'a b'");
     }
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use clap::{Arg, ArgAction};
 use indexmap::IndexMap;
 
@@ -11,7 +11,7 @@ use crate::manifest::{self, IncludeDef, Loaded, Manifest};
 use crate::resolver::{self, PinInfo, Resolved};
 use crate::{exec, flow};
 
-/// `pult x <source> [command] [values…]` — ephemeral execution: run a command
+/// `pult x <source> [command] [args…]` — ephemeral execution: run a command
 /// straight from a module source without pinning it into any manifest (the npx
 /// of pult). The source is pinned exactly as an include is (a bare git source
 /// resolves to its latest version tag), fetched into the immutable cache, and
@@ -31,26 +31,19 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
                 .value_name("COMMAND")
                 .help("Which of the module's commands to run; omitted opens the guided menu"),
         )
+        // Phase one: the command's own arguments can't be parsed before its
+        // manifest is resolved, so they're kept raw here and bound by `bind`
+        // once it is — the same surface `pult <command>` has.
         .arg(
-            Arg::new("values")
-                .value_name("VALUES")
+            Arg::new("args")
+                .value_name("ARGS")
                 .num_args(0..)
-                .help("Positional values for the command's params, in declared order"),
+                .trailing_var_arg(true)
+                .allow_hyphen_values(true)
+                .help("The command's arguments, exactly as `pult <command>` takes them"),
         )
-        .arg(
-            Arg::new("var")
-                .long("var")
-                .value_name("NAME=VALUE")
-                .action(ArgAction::Append)
-                .help("Bind a module var (repeatable) — for modules that declare `vars:`"),
-        )
-        .arg(crate::trust::arg("the module"))
-        .arg(
-            Arg::new("print")
-                .long("print")
-                .action(ArgAction::SetTrue)
-                .help("Print the composed script instead of running it"),
-        );
+        .arg(var_arg())
+        .args(own_args());
     let matches = crate::machine::get_matches(
         cli,
         std::iter::once("pult x".to_string()).chain(rest.iter().cloned()),
@@ -58,8 +51,8 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
 
     let source = matches.get_one::<String>("source").expect("required");
     let command = matches.get_one::<String>("command").map(String::as_str);
-    let values: Vec<String> = matches
-        .get_many::<String>("values")
+    let tail: Vec<String> = matches
+        .get_many::<String>("args")
         .map(|vs| vs.cloned().collect())
         .unwrap_or_default();
     let vars = parse_vars(&matches)?;
@@ -74,7 +67,7 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
     run(
         source,
         command,
-        &values,
+        &tail,
         &vars,
         &cwd,
         &grant,
@@ -82,6 +75,51 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
         interactive,
         None,
     )
+}
+
+fn var_arg() -> Arg {
+    Arg::new("var")
+        .long("var")
+        .value_name("NAME=VALUE")
+        .action(ArgAction::Append)
+        .help("Bind a module var (repeatable) — for modules that declare `vars:`")
+}
+
+/// `pult x`'s own switches that may also follow the command (`--var` binds
+/// before the module resolves, so it must come before the command).
+fn own_args() -> [Arg; 2] {
+    [
+        crate::trust::arg("the module"),
+        Arg::new("print")
+            .long("print")
+            .action(ArgAction::SetTrue)
+            .help("Print the composed script instead of running it"),
+    ]
+}
+
+/// Phase two: bind the command's raw arguments with the per-command surface
+/// `pult <command>` uses. `pult x`'s own `--print`/`--trust` may appear among
+/// them too; a `--var` there is refused, since the module has already been
+/// resolved by then.
+fn bind_tail(
+    source: &str,
+    cmd: &resolver::ResolvedCommand,
+    tail: &[String],
+) -> Result<(HashMap<String, crate::value::Value>, clap::ArgMatches)> {
+    let cli = clap::Command::new(format!("pult x {source} {}", cmd.id))
+        .no_binary_name(true)
+        .about(cmd.title.clone())
+        .args(crate::bind::args(cmd))
+        .arg(var_arg())
+        .args(own_args());
+    let matches = crate::machine::get_matches(cli, tail.iter().cloned());
+    if matches.contains_id("var") && matches.get_many::<String>("var").is_some() {
+        return Err(crate::machine::usage(format!(
+            "--var must come before the command: pult x {source} --var NAME=VALUE {} …",
+            cmd.id
+        )));
+    }
+    Ok((crate::bind::provided(cmd, &matches), matches))
 }
 
 /// `--var name=value` → pairs; a missing `=` is a usage error, not a silent drop.
@@ -107,7 +145,7 @@ fn parse_vars(matches: &clap::ArgMatches) -> Result<Vec<(String, String)>> {
 pub fn run(
     source: &str,
     command: Option<&str>,
-    values: &[String],
+    tail: &[String],
     vars: &[(String, String)],
     cwd: &Path,
     grant: &crate::trust::Grant,
@@ -138,25 +176,27 @@ pub fn run(
                         command_ids(&resolved)
                     )
                 })?;
-            if values.len() > cmd.params.len() {
-                bail!(
-                    "command `{id}` takes at most {} value(s), but {} were given",
-                    cmd.params.len(),
-                    values.len()
-                );
-            }
-            // Positional values bind to params in declared order; anything not
-            // supplied is prompted for by the executor (same as `pult <cmd>`).
-            let mut provided = HashMap::new();
-            for (i, value) in values.iter().enumerate() {
-                let (name, _) = cmd.params.get_index(i).expect("bounds checked above");
-                provided.insert(name.clone(), value.clone());
-            }
-            exec::execute(&resolved, cmd, &provided, grant, print, None)
+            // Bound exactly as `pult <cmd>` binds; anything not supplied is
+            // filled by the executor the same way too.
+            let (provided, matches) = bind_tail(source, cmd, tail)?;
+            let grant = match crate::trust::Grant::from_matches(&matches) {
+                crate::trust::Grant::Ask => grant.clone(),
+                after => after,
+            };
+            let print = print || matches.get_flag("print");
+            exec::execute(
+                &resolved,
+                cmd,
+                &provided,
+                exec::Prompting::Direct,
+                &grant,
+                print,
+                None,
+            )
         }
         None if interactive => flow::run(&resolved, grant, print, None),
         None => {
-            eprintln!("specify a command:  pult x {source} <command> [values…]");
+            eprintln!("specify a command:  pult x {source} <command> [args…]");
             eprintln!("commands:");
             for c in &resolved.commands {
                 eprintln!("  {}  {}", c.id, c.title);
