@@ -167,10 +167,8 @@ fn run(args: &[String]) -> Result<i32> {
     if matches.get_flag("list") {
         if matches.get_flag("json") {
             let trusted = trust::is_trusted(&resolved.path, &resolved.trust_hash)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&list_json(&resolved, trusted, scope))?
-            );
+            let doc = machine::success("list", list_json(&resolved, trusted, scope));
+            println!("{}", serde_json::to_string_pretty(&doc)?);
         } else {
             print_list(&resolved);
         }
@@ -345,7 +343,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                pult includes verify         check every pin still resolves and no tag moved\n  \
                pult doctor [--json]         run every command's `check:` and report readiness\n  \
                pult runs list [--json]      this repo's run history (the run journal)\n  \
-               pult runs tail <ID> [--follow]  one run's event stream (--json for tooling)\n  \
+               pult runs tail <ID> [--follow]  one run's event stream (--json / --jsonl for tooling)\n  \
                pult self schema             print the manifest JSON Schema (editors/CI)\n  \
                pult --list [--json]         what this manifest declares (--json for tooling)\n\n\
              Run bare `pult` for the guided flow.  Authoring guide: {}",
@@ -466,7 +464,14 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                             Arg::new("json")
                                 .long("json")
                                 .action(ArgAction::SetTrue)
-                                .help("Raw events.jsonl lines (stable schema, for tooling)"),
+                                .conflicts_with("jsonl")
+                                .help("The events so far as one JSON document (for tooling)"),
+                        )
+                        .arg(
+                            Arg::new("jsonl")
+                                .long("jsonl")
+                                .action(ArgAction::SetTrue)
+                                .help("Raw events.jsonl lines, one per line (works with --follow)"),
                         ),
                 )
                 .subcommand(
@@ -506,12 +511,15 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
     cli
 }
 
-/// The `--list --json` document — the stable machine-readable surface for
-/// agents and tooling. Schema 1; changes are additive only, breaking changes
-/// bump `schema`. `trusted` is passed in so this stays a pure function of the
-/// resolved manifest (the caller consults the trust store).
+/// The `--list --json` document's `data` — the stable machine-readable
+/// surface for agents and tooling, carried in the envelope at
+/// `machine::SCHEMA`. Changes within a schema are additive only. `trusted`
+/// is passed in so this stays a pure function of the resolved manifest (the
+/// caller consults the trust store).
 ///
-/// Additive Schema 1 field: a static pick's `params[].option_details` —
+/// A static pick's `params[].option_details` is
+/// `[{"value", "description"}, ...]`, parallel to `options` (same order,
+/// same length, present iff `options` is). Dynamic picks have neither key —
 /// `[{"value", "description"}, ...]`, parallel to `options` (same order,
 /// same length, present iff `options` is). Dynamic picks have neither key —
 /// the option set is unknowable at list time (the source is never run, the
@@ -631,7 +639,6 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
         })
         .collect();
     json!({
-        "schema": 1,
         "pult_version": env!("CARGO_PKG_VERSION"),
         "name": resolved.name,
         "manifest": resolved.path,
@@ -752,7 +759,8 @@ commands:
         let resolved = resolver::resolve(loaded).unwrap();
         let doc = list_json(&resolved, false, Scope::Repo);
 
-        assert_eq!(doc["schema"], 1);
+        // The envelope carries the schema; the payload does not repeat it.
+        assert!(doc.get("schema").is_none());
         assert_eq!(doc["name"], "demo");
         assert_eq!(doc["scope"], "repo");
         assert_eq!(doc["trusted"], false);

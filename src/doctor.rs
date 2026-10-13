@@ -69,10 +69,10 @@ fn report(resolved: &Resolved, want_json: bool) -> Result<i32> {
     let failed = probes.iter().filter(|p| p.ready() == Some(false)).count();
 
     if want_json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&to_json(resolved, &probes))?
-        );
+        // A failing check is a negative result, not a failure to produce
+        // one: the document says `ok: true` and the exit status says 1.
+        let doc = crate::machine::success("doctor", to_json(resolved, &probes));
+        println!("{}", serde_json::to_string_pretty(&doc)?);
     } else {
         print_text(resolved, &probes);
     }
@@ -114,8 +114,8 @@ fn print_text(resolved: &Resolved, probes: &[Probe]) {
     );
 }
 
-/// The `pult doctor --json` document — schema 1, same additive-only contract
-/// as `--list --json`.
+/// The `pult doctor --json` document's `data` — same envelope and
+/// additive-only contract as `--list --json`.
 fn to_json(resolved: &Resolved, probes: &[Probe]) -> serde_json::Value {
     let commands: Vec<_> = probes
         .iter()
@@ -130,7 +130,6 @@ fn to_json(resolved: &Resolved, probes: &[Probe]) -> serde_json::Value {
         })
         .collect();
     json!({
-        "schema": 1,
         "name": resolved.name,
         "manifest": resolved.path,
         "commands": commands,
@@ -181,7 +180,8 @@ mod tests {
         let probes = probe_all(&trio).unwrap();
         let doc = to_json(&trio, &probes);
 
-        assert_eq!(doc["schema"], 1);
+        // The envelope carries the schema; the payload does not repeat it.
+        assert!(doc.get("schema").is_none());
         assert_eq!(doc["name"], trio.name);
         assert_eq!(doc["manifest"], trio.path.to_string_lossy().as_ref());
 

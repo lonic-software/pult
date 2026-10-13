@@ -66,7 +66,7 @@ fn error_doc(out: &Output, command: Option<&str>, code: &str, exit: i32) -> serd
         .unwrap_or_else(|e| panic!("stdout is not one JSON document ({e}): {stdout}"));
     assert_eq!(doc["lonic_json"], 1, "{doc}");
     assert_eq!(doc["tool"], "pult", "{doc}");
-    assert_eq!(doc["schema"], 1, "{doc}");
+    assert_eq!(doc["schema"], 2, "{doc}");
     assert_eq!(doc["ok"], false, "{doc}");
     assert_eq!(
         doc["command"],
@@ -225,17 +225,6 @@ fn an_unknown_run_is_generic_and_reported_before_any_stream() {
     let out = env.pult(&["runs", "tail", "nope", "--json"]);
     error_doc(&out, Some("runs tail"), "generic", 1);
     assert_prose_unchanged(&env, &["runs", "tail", "nope", "--json"]);
-}
-
-/// Success output is untouched: still the bare schema-1 document, no header.
-#[test]
-fn success_documents_are_unchanged() {
-    let env = Env::new(Some(MANIFEST));
-    let out = env.pult(&["--list", "--json"]);
-    assert_eq!(out.status.code(), Some(0));
-    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(doc.get("lonic_json").is_none(), "{doc}");
-    assert!(doc.get("commands").is_some(), "{doc}");
 }
 
 /// A `--json` after `--` belongs to the command, not to pult.
