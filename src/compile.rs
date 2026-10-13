@@ -130,7 +130,9 @@ pub fn step_label(k: usize, entry: &ResolvedEntry) -> String {
             .collect::<Vec<_>>()
             .join(" | "),
     };
-    let label = truncate40(&raw);
+    // Trim again after the cut, which may land on a space: the reader trims
+    // the line, and `--list --json` must name the step the same way.
+    let label = truncate40(&raw).trim_end().to_string();
     if label.is_empty() {
         format!("step {k}")
     } else {
@@ -138,19 +140,34 @@ pub fn step_label(k: usize, entry: &ResolvedEntry) -> String {
     }
 }
 
-/// The first line of `s` with any text in it, control characters replaced
-/// by spaces and surrounding whitespace trimmed; `""` if there is none.
+/// The first line of `s` with any text in it, control and invisible
+/// formatting characters replaced by spaces and surrounding whitespace
+/// trimmed; `""` if there is none.
 fn first_text_line(s: &str) -> String {
     s.lines()
         .map(|line| {
             line.chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
+                .map(|c| if is_unprintable(c) { ' ' } else { c })
                 .collect::<String>()
                 .trim()
                 .to_string()
         })
         .find(|line| !line.is_empty())
         .unwrap_or_default()
+}
+
+/// Control characters, plus the invisible formatting ones that would make a
+/// label look blank or reorder the text around it when printed: zero-width
+/// characters, bidi marks, embeddings, overrides and isolates, and the BOM.
+fn is_unprintable(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
 }
 
 fn truncate40(s: &str) -> String {
@@ -463,6 +480,23 @@ mod tests {
     fn labels_carry_no_control_characters() {
         let entry = ResolvedEntry::Inline("echo \u{1b}[31mred\rover".into());
         assert_eq!(step_label(1, &entry), "echo  [31mred over");
+        let bidi = ResolvedEntry::Inline("echo \u{202E}evil".into());
+        assert_eq!(step_label(1, &bidi), "echo  evil");
+        // Only invisible characters: nothing to name it by.
+        let invisible = ResolvedEntry::Inline("\u{200B}\u{FEFF}".into());
+        assert_eq!(step_label(4, &invisible), "step 4");
+    }
+
+    /// A label cut at 40 characters never ends in whitespace, which the
+    /// reader would trim from the journaled name. Goes red if the cut is not
+    /// trimmed again.
+    #[test]
+    fn a_truncated_label_has_no_trailing_space() {
+        let entry = ResolvedEntry::Pipe(vec![
+            ResolvedSeg::Inline("a".repeat(38)),
+            ResolvedSeg::Inline("sort".into()),
+        ]);
+        assert_eq!(step_label(1, &entry), format!("{} |", "a".repeat(38)));
     }
 
     /// The compiled guard uses the fallback, so an entry with nothing to name

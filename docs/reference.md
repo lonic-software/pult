@@ -621,11 +621,12 @@ guarded `step k/n <name>` emission injected before each top-level entry at
 compile time (a `status <name>` one on an inherited channel, below) —
 structure a command as steps and you get milestones for free, no manifest
 changes required. A step's name is its step name, or the first non-blank
-line of an inline entry (40 characters at most, control characters turned
-into spaces), or `step k` when the entry has no text to name it by. `--print` shows the script without these
-guards (they'd clutter the dry-run output you're meant to read); a live run
-compiles them in, as `status` guards if it inherited the channel (see
-passthrough below).
+line of an inline entry (for a pipe, of each segment, joined with ` | `),
+trimmed, with control and invisible formatting characters turned into
+spaces, and cut to 40 characters; `step k` when the entry has no text to
+name it by. `--print` shows the script without these guards (they'd clutter
+the dry-run output you're meant to read); a live run compiles them in, as
+`status` guards if it inherited the channel (see passthrough below).
 The same labels are exposed as `"steps"` in `--list --json` (below), so a
 surface can render milestones without parsing the script.
 
