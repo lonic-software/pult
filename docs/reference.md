@@ -308,9 +308,12 @@ run one command, the trust prompt shows the **composed command about to run**
 while you read the actual script; the preview never executes module code
 (dynamic option sources stay unresolved), so it's safe before trust. `--print`
 is the same preview with no prompt and nothing recorded — a trust-free dry run;
-`--trust=<hash>` and a bare `--trust` work as they do for a manifest (see Trust
-model). Use it to *try* a command set;
-`pult includes add` to *keep* one. Intercepted before manifest discovery, so it
+`--trust=<hash>` and a bare `--trust` bind as they do for a manifest (see Trust
+model), except that `pult x` records trust only when it is about to run a
+command: not for `--print`, nor for a source given without a command and no
+terminal. `pult x` takes no `--json`, so its refusal names the trust hash in
+the prose only. Use it to *try* a command set; `pult includes add` to *keep*
+one. Intercepted before manifest discovery, so it
 works where no `pult.yaml` exists.
 
 ## Trust model
@@ -339,12 +342,13 @@ so does the refusal. Without a terminal, an untrusted manifest is refused with
 hash (see Error documents), and `pult --list --json` reports it as
 `trust_hash` without needing trust.
 
-- `--trust=<hash>` accepts the manifest only at exactly that hash, and records
-  it immediately, even for a non-executing invocation (`pult --trust=<hash>
-  --list`). Any other hash is refused (`what_changed: "unexpected"`) and
-  records nothing — even when the manifest is already trusted at its current
-  hash, so a pinned hash in CI fails the moment the manifest moves. The `=` is
-  required.
+- `--trust=<hash>` takes a full trust hash (64 hex characters; uppercase is
+  accepted), and anything else is a `usage` error. It accepts the manifest
+  only at exactly that hash, and records it immediately, even for a
+  non-executing invocation (`pult --trust=<hash> --list`). Any other hash is
+  refused (`what_changed: "unexpected"`) and records nothing — even when the
+  manifest is already trusted at its current hash, so a pinned hash in CI
+  fails the moment the manifest moves. The `=` is required.
 - A bare `--trust` accepts whatever is current when it runs, binding to
   nothing anyone reviewed. It stays for CI and existing callers, and when it
   records a hash it warns on stderr, naming that hash so you can pin it.
@@ -530,8 +534,8 @@ Lonic tool:
   - a `usage` error from argument parsing carries the parser's full text as
     `details.usage`;
   - a `trust_changed` refusal carries `{subject, current, previous?,
-    what_changed}`: `subject` is the trust identity (the manifest path, or a
-    `pult x` source), `current` its trust hash now, `previous` the hash trusted
+    what_changed}`: `subject` is the trust identity (the manifest path),
+    `current` its trust hash now, `previous` the hash trusted
     before (absent when there was none), and `what_changed` is `first_contact`,
     `changed`, or `unexpected` (`--trust=<hash>` named a hash that is not
     `current`). Pass `current` back as `--trust=<hash>` once a human has

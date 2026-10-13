@@ -40,11 +40,26 @@ pub fn arg(subject: &str) -> clap::Arg {
         .value_name("HASH")
         .num_args(0..=1)
         .require_equals(true)
-        .value_parser(clap::builder::NonEmptyStringValueParser::new())
+        .value_parser(parse_hash)
         .help(format!(
             "Trust {subject} without prompting: --trust=<HASH> only at that trust hash; \
              a bare --trust at whatever it is now (for CI; warns)"
         ))
+}
+
+/// A `--trust=<hash>` value: a full trust hash, 64 hex characters. Uppercase
+/// is accepted and lowered, so a pasted hash compares equal; anything else is
+/// a usage error rather than a refusal that reads as if the manifest moved.
+fn parse_hash(value: &str) -> std::result::Result<String, String> {
+    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(value.to_ascii_lowercase())
+    } else {
+        Err(
+            "expected a full trust hash: 64 hex characters, as `pult --list --json` \
+             reports in `trust_hash`"
+                .to_string(),
+        )
+    }
 }
 
 /// Why trust is being asked for, or was refused — the error document's
@@ -115,8 +130,8 @@ pub fn ensure_trusted(
             previous.as_deref(),
             WhatChanged::Unexpected,
             format!(
-                "--trust={named} does not match manifest {}: its trust hash is now {resolved_hash}; \
-                 review it again before trusting that",
+                "--trust={named} does not match manifest {}, whose trust hash is \
+                 {resolved_hash}; review the manifest as it is now before trusting that hash",
                 path.display()
             ),
         ));
@@ -150,7 +165,7 @@ pub fn ensure_trusted(
                     what_changed,
                     format!(
                         "manifest {} is not trusted ({state}); its trust hash is {resolved_hash}. \
-                         Run `pult` interactively once to review it, or pass \
+                         Run this once interactively to review it, or pass \
                          --trust={resolved_hash} once you have reviewed it",
                         path.display()
                     ),

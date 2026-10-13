@@ -209,6 +209,38 @@ fn the_trust_value_needs_an_equals_sign() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
 
+/// A value that is not a full trust hash is a usage error, never a refusal
+/// that reads as if the manifest moved; a hash pasted in uppercase is the
+/// same hash.
+#[test]
+fn a_malformed_hash_is_a_usage_error_and_case_does_not_matter() {
+    let env = Env::new();
+    let hash = env.list()["trust_hash"].as_str().unwrap().to_string();
+
+    for bad in [
+        "true",
+        "bad",
+        &hash[..63],
+        &format!("{hash}0"),
+        &format!("{}g", &hash[..63]),
+    ] {
+        let out = env.pult(&[&format!("--trust={bad}"), "doctor", "--json"]);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "--trust={bad}: {}",
+            stderr(&out)
+        );
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["error"]["code"], "usage", "--trust={bad}: {doc}");
+    }
+    assert_eq!(env.list()["trusted"], false);
+
+    let out = env.pult(&[&format!("--trust={}", hash.to_uppercase()), "--list"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(env.list()["trusted"], true);
+}
+
 #[test]
 fn pult_x_binds_its_trust_the_same_way() {
     let env = Env::new();

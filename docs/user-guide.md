@@ -195,8 +195,12 @@ already have (ssh keys, credential helpers) — there is nothing to log into.
 
 - **"manifest … is not trusted"** in a script/CI → run interactively once, or
   review it and pass `--trust=<hash>` with the hash the message names.
-- **"--trust=… does not match"** → the manifest changed since that hash was
-  reviewed; review it again and pin the new hash.
+- **"--trust=… does not match"** → the manifest's trust hash is not the one
+  you named: it changed since that hash was reviewed, or the hash is wrong.
+  Review the manifest as it is now and pin the hash the message names.
+- **"invalid value … for '--trust'"** → the value is not a full trust hash
+  (64 hex characters); copy it from the prompt, the refusal, or
+  `pult --list --json`.
 - **"no pult.yaml found"** → you're not inside a repo that has one (it
   searches upward from the current directory), and you have no user manifest
   at `~/.config/pult/pult.yaml` to fall back to.
