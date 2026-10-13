@@ -321,9 +321,9 @@ surfaces below.
    render progress natively (Windows Terminal, WezTerm, Ghostty) show it
    with zero drawing on our side. If a valid `PULT_EVENTS` is already set when
    pult runs a command, pult does nothing — the var and its fd pass straight
-   through to the child, and pult injects no `step` milestones of its own —
-   so a parent process can own the channel and render events its own way
-   instead.
+   through to the child, and pult names each step with a `status` line
+   instead of injecting `step` milestones of its own — so a parent process
+   can own the channel and render events its own way instead.
 2. **Launcher palette** — evolve the bare-`pult` flow into a scope-aware,
    searchable palette (repo + user side by side; menus don't have the CLI's
    namespace-collision problem), organized into tabs/sections by command

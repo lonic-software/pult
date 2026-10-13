@@ -10,14 +10,14 @@ use crate::resolver::{ResolvedCommand, ResolvedEntry, ResolvedRun, ResolvedSeg};
 /// leniently into user-authored fragments only — generated glue never passes
 /// through interpolation.
 ///
-/// `events`: when true, inject a guarded `step k/n <label>` emission before
-/// each top-level entry (see `step_guard`) — consumed only if a live run has
-/// wired up `$PULT_EVENTS`, so it's a silent no-op elsewhere. `--print`
-/// previews pass `false` to keep that output exactly the composed script.
+/// `guards`: which guarded event, if any, to inject before each top-level
+/// entry (see `Guards`) — consumed only if a live run has wired up
+/// `$PULT_EVENTS`, so it's a silent no-op elsewhere. `--print` previews pass
+/// `Guards::None` to keep that output exactly the composed script.
 pub fn compile(
     cmd: &ResolvedCommand,
     values: &IndexMap<String, String>,
-    events: bool,
+    guards: Guards,
 ) -> Result<String> {
     let ResolvedRun::Steps(entries) = &cmd.run else {
         bail!("command `{}` has a plain run, nothing to compile", cmd.id);
@@ -29,8 +29,10 @@ pub fn compile(
     let total = entries.len();
 
     for (i, entry) in entries.iter().enumerate() {
-        if events {
-            body.push_str(&step_guard(i + 1, total, &step_label(entry)));
+        match guards {
+            Guards::None => {}
+            Guards::Step => body.push_str(&step_guard(i + 1, total, &step_label(entry))),
+            Guards::Status => body.push_str(&status_guard(&step_label(entry))),
         }
         match entry {
             ResolvedEntry::Inline(s) => {
@@ -75,13 +77,38 @@ pub fn compile(
     Ok(out)
 }
 
+/// The event pult injects before each top-level entry of a compiled step
+/// list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guards {
+    /// Nothing: the script exactly as composed (`--print`).
+    None,
+    /// `step k/n <label>`: pult may own the channel, and only a channel's
+    /// owner emits `step`.
+    Step,
+    /// `status <label>`: the channel was inherited, so pult is not its owner
+    /// and may emit only `progress` and `status`. The status names each step
+    /// as it starts, which also marks where the step's own `progress`
+    /// restarts from zero.
+    Status,
+}
+
 /// A guarded, no-op-when-unwired emission of the `step k/n <label>` event —
-/// injected before every top-level entry when `events` is on. The guard
+/// injected before every top-level entry under `Guards::Step`. The guard
 /// means the compiled script behaves identically whether or not anything is
 /// listening on `$PULT_EVENTS`.
 fn step_guard(k: usize, n: usize, label: &str) -> String {
     format!(
         "[ -n \"${{PULT_EVENTS:-}}\" ] && printf 'step %d/%d %s\\n' {k} {n} {} >&\"$PULT_EVENTS\" || true\n",
+        interp::shell_quote(label)
+    )
+}
+
+/// The same guard, emitting `status <label>` — injected before every
+/// top-level entry under `Guards::Status`.
+fn status_guard(label: &str) -> String {
+    format!(
+        "[ -n \"${{PULT_EVENTS:-}}\" ] && printf 'status %s\\n' {} >&\"$PULT_EVENTS\" || true\n",
         interp::shell_quote(label)
     )
 }
@@ -208,7 +235,7 @@ mod tests {
             }),
             ResolvedEntry::Inline("echo \"$BACKEND_TASK\"".into()),
         ]);
-        let script = compile(&cmd, &vals(&[("env", "dev")]), false).unwrap();
+        let script = compile(&cmd, &vals(&[("env", "dev")]), Guards::None).unwrap();
         assert!(script.starts_with("set -euo pipefail\n"), "got: {script}");
         assert!(
             script.contains("aws__resolve_task() {\nTASK=$(find-task dev)\n}"),
@@ -236,7 +263,7 @@ mod tests {
             },
             ResolvedSeg::Inline("tr a-z A-Z".into()),
         ])]);
-        let script = compile(&cmd, &vals(&[]), false).unwrap();
+        let script = compile(&cmd, &vals(&[]), Guards::None).unwrap();
         assert!(
             script.contains("list() {\nprintf 'a\\nb\\n'\n}"),
             "got: {script}"
@@ -255,7 +282,7 @@ mod tests {
             })
         };
         let cmd = command(vec![call("echo one"), call("echo two"), call("echo one")]);
-        let script = compile(&cmd, &vals(&[]), false).unwrap();
+        let script = compile(&cmd, &vals(&[]), Guards::None).unwrap();
         assert!(script.contains("greet() {\necho one\n}"), "got: {script}");
         assert!(script.contains("greet_2() {\necho two\n}"), "got: {script}");
         assert_eq!(
@@ -273,13 +300,13 @@ mod tests {
             outputs: vec!["OUT".into()],
             exports: IndexMap::new(),
         })]);
-        let script = compile(&cmd, &vals(&[("env", "dev")]), false).unwrap();
+        let script = compile(&cmd, &vals(&[("env", "dev")]), Guards::None).unwrap();
         assert!(script.contains("awk '{print $1}'"), "got: {script}");
         assert!(script.contains("${X:-}"), "got: {script}");
     }
 
     #[test]
-    fn events_false_is_byte_identical_to_no_events_output() {
+    fn no_guards_leave_the_composed_script_untouched() {
         let cmd = command(vec![
             ResolvedEntry::Call(ResolvedCall {
                 name: "aws:resolve-task".into(),
@@ -290,15 +317,18 @@ mod tests {
             ResolvedEntry::Inline("echo done".into()),
         ]);
         let values = vals(&[("env", "dev")]);
-        let without_flag = compile(&cmd, &values, false).unwrap();
-        // `--print` and any other caller that never mentions `events` still
-        // gets exactly this — the guard is opt-in, not a hidden default.
-        assert!(!without_flag.contains("PULT_EVENTS"), "got: {without_flag}");
-        assert!(!without_flag.contains("step 1/2"), "got: {without_flag}");
+        let plain = compile(&cmd, &values, Guards::None).unwrap();
+        // `--print` gets exactly this — guards are opt-in, never a hidden
+        // default.
+        assert!(!plain.contains("PULT_EVENTS"), "got: {plain}");
+        assert!(!plain.contains("step 1/2"), "got: {plain}");
     }
 
+    /// Under an inherited channel each entry is named by a `status` guard and
+    /// no `step` guard is compiled in. Goes red if `Guards::Status` emits
+    /// `step` lines, or nothing.
     #[test]
-    fn events_true_injects_guarded_step_lines() {
+    fn status_guards_name_each_step_and_emit_no_step_lines() {
         let cmd = command(vec![
             ResolvedEntry::Call(ResolvedCall {
                 name: "aws:resolve-task".into(),
@@ -308,7 +338,38 @@ mod tests {
             }),
             ResolvedEntry::Inline("echo done".into()),
         ]);
-        let script = compile(&cmd, &vals(&[("env", "dev")]), true).unwrap();
+        let script = compile(&cmd, &vals(&[("env", "dev")]), Guards::Status).unwrap();
+        assert!(
+            script.contains(
+                "[ -n \"${PULT_EVENTS:-}\" ] && printf 'status %s\\n' aws:resolve-task >&\"$PULT_EVENTS\" || true"
+            ),
+            "got: {script}"
+        );
+        assert!(
+            script.contains(
+                "[ -n \"${PULT_EVENTS:-}\" ] && printf 'status %s\\n' 'echo done' >&\"$PULT_EVENTS\" || true"
+            ),
+            "got: {script}"
+        );
+        assert!(!script.contains("'step "), "got: {script}");
+        let guard1 = script.find("aws:resolve-task >&").unwrap();
+        let call_pos = script.rfind("aws__resolve_task\n").unwrap();
+        let guard2 = script.find("'echo done' >&").unwrap();
+        assert!(guard1 < call_pos && call_pos < guard2);
+    }
+
+    #[test]
+    fn step_guards_inject_guarded_step_lines() {
+        let cmd = command(vec![
+            ResolvedEntry::Call(ResolvedCall {
+                name: "aws:resolve-task".into(),
+                script: "TASK=$(find-task {env})".into(),
+                outputs: vec!["TASK".into()],
+                exports: IndexMap::new(),
+            }),
+            ResolvedEntry::Inline("echo done".into()),
+        ]);
+        let script = compile(&cmd, &vals(&[("env", "dev")]), Guards::Step).unwrap();
         assert!(
             script.contains(
                 "[ -n \"${PULT_EVENTS:-}\" ] && printf 'step %d/%d %s\\n' 1 2 aws:resolve-task >&\"$PULT_EVENTS\" || true"
@@ -331,10 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn events_true_truncates_multiline_inline_labels_to_first_line() {
+    fn step_guards_truncate_multiline_inline_labels_to_first_line() {
         let long = "a".repeat(50);
         let cmd = command(vec![ResolvedEntry::Inline(format!("{long}\nsecond line"))]);
-        let script = compile(&cmd, &vals(&[]), true).unwrap();
+        let script = compile(&cmd, &vals(&[]), Guards::Step).unwrap();
         // The label is the first line only, truncated to 40 chars — not the
         // full 50-char first line and not the second line. The inline body
         // itself (both lines) still runs unchanged; only the guard's label
@@ -351,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn events_true_pipe_label_joins_segments() {
+    fn step_guard_pipe_label_joins_segments() {
         let cmd = command(vec![ResolvedEntry::Pipe(vec![
             ResolvedSeg::Call {
                 name: "list".into(),
@@ -359,7 +420,7 @@ mod tests {
             },
             ResolvedSeg::Inline("tr a-z A-Z".into()),
         ])]);
-        let script = compile(&cmd, &vals(&[]), true).unwrap();
+        let script = compile(&cmd, &vals(&[]), Guards::Step).unwrap();
         assert!(
             script.contains("printf 'step %d/%d %s\\n' 1 1 'list | tr a-z A-Z'"),
             "got: {script}"
