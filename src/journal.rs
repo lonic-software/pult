@@ -59,7 +59,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::events::Event;
+use crate::events::{self, Event};
 use crate::mask::Masker;
 
 /// Journal protocol schema — additive-only, same discipline as `--list`'s.
@@ -169,6 +169,9 @@ struct Inner {
     warned: bool,
     /// See `append_locked` — the only place this is read.
     masker: Masker,
+    /// The last `step` journaled, `(k, n)` — the band a later `progress`
+    /// record's `run_pct` is computed in (see `event`).
+    step: Option<(u32, u32)>,
 }
 
 impl Journal {
@@ -291,6 +294,7 @@ impl Journal {
             done: false,
             warned: false,
             masker: info.masker,
+            step: None,
         }))))
     }
 
@@ -302,19 +306,34 @@ impl Journal {
     }
 
     /// One parsed `PULT_EVENTS` protocol event (step/progress/status).
+    ///
+    /// A `progress` record keeps the child's own value as `pct` (0–100 of
+    /// the current step) and adds `run_pct`, the same value mapped onto the
+    /// whole run through the band of the last `step` (`events::run_pct`;
+    /// `null` when `pct` is). The step is tracked from the records this
+    /// journal receives, so a child that writes its own `step` lines onto the
+    /// channel moves the band too — the channel carries no sender.
     pub fn event(&self, event: &Event) {
+        let mut inner = self.0.lock().unwrap();
+        if inner.done {
+            return;
+        }
         let doc = match event {
-            Event::Step { k, n, name } => serde_json::json!({
-                "ts": now_ms(), "kind": "step", "k": k, "n": n, "name": name,
-            }),
+            Event::Step { k, n, name } => {
+                inner.step = Some((*k, *n));
+                serde_json::json!({
+                    "ts": now_ms(), "kind": "step", "k": k, "n": n, "name": name,
+                })
+            }
             Event::Progress { pct, text } => serde_json::json!({
-                "ts": now_ms(), "kind": "progress", "pct": pct, "text": text,
+                "ts": now_ms(), "kind": "progress", "pct": pct,
+                "run_pct": pct.map(|p| events::run_pct(inner.step, p)), "text": text,
             }),
             Event::Status(text) => serde_json::json!({
                 "ts": now_ms(), "kind": "status", "text": text,
             }),
         };
-        self.append(doc);
+        Self::append_locked(&mut inner, doc);
     }
 
     /// Terminal record: append the `exit` event, mark the journal done
@@ -712,6 +731,52 @@ mod tests {
         assert!(lines[2]["text"].as_str().unwrap().contains("<redacted>"));
         assert_eq!(lines[3]["kind"], "step");
         assert!(lines[3]["name"].as_str().unwrap().contains("<redacted>"));
+    }
+
+    /// A `progress` record keeps the child's raw `pct` and adds `run_pct`,
+    /// banded by the last `step` journaled. Values chosen so the right
+    /// answer collides with no wrong one: raw 60, step start 33 and unscaled
+    /// 33+60 = 93 all differ from the banded (100+60)/3 = 53.
+    #[test]
+    fn progress_records_carry_raw_pct_and_banded_run_pct() {
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let manifest = repo.path().join("pult.yaml");
+        let journal = Journal::start_at(state.path(), info(repo.path(), &manifest)).unwrap();
+
+        journal.event(&Event::Progress {
+            pct: Some(42),
+            text: None,
+        });
+        journal.event(&Event::Step {
+            k: 2,
+            n: 3,
+            name: "migrate".to_string(),
+        });
+        journal.event(&Event::Progress {
+            pct: Some(60),
+            text: None,
+        });
+        journal.event(&Event::Progress {
+            pct: None,
+            text: None,
+        });
+        journal.finish(Some(0), false);
+
+        let lines: Vec<serde_json::Value> = read_events_jsonl(state.path(), repo.path())
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        // Before any step the run is one band.
+        assert_eq!(lines[0]["pct"], 42);
+        assert_eq!(lines[0]["run_pct"], 42);
+        assert_eq!(lines[1]["kind"], "step");
+        assert_eq!(lines[2]["pct"], 60);
+        assert_eq!(lines[2]["run_pct"], 53);
+        // Indeterminate stays indeterminate on both scales.
+        assert!(lines[3]["pct"].is_null());
+        assert!(lines[3]["run_pct"].is_null());
+        assert!(lines[3].as_object().unwrap().contains_key("run_pct"));
     }
 
     /// #7 review finding 3: `meta.json` is a second durable file entirely

@@ -319,10 +319,11 @@ surfaces below.
    `--list --json`, so a non-CLI surface can render them without parsing the
    script. Plain-CLI pult translates events to OSC 9;4, so terminals that
    render progress natively (Windows Terminal, WezTerm, Ghostty) show it
-   with zero drawing on our side. If `PULT_EVENTS` is already set when pult
-   runs a command, pult does nothing — the var and its fd pass straight
-   through to the child — so a parent process (the future desktop app) can
-   own the channel and render events its own way instead.
+   with zero drawing on our side. If a valid `PULT_EVENTS` is already set when
+   pult runs a command, pult does nothing — the var and its fd pass straight
+   through to the child, and pult injects no `step` milestones of its own —
+   so a parent process can own the channel and render events its own way
+   instead.
 2. **Launcher palette** — evolve the bare-`pult` flow into a scope-aware,
    searchable palette (repo + user side by side; menus don't have the CLI's
    namespace-collision problem), organized into tabs/sections by command

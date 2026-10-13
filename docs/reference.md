@@ -446,7 +446,8 @@ Field notes:
   below), don't assume pult ran it. `interactive` — the command needs a
   controlling terminal; non-terminal surfaces should treat it as
   terminal-only rather than capturing its output.
-- `steps` — the labels a live run emits as `step k/n <name>` events (see
+- `steps` — the labels a live run emits as `step k/n <name>` events (none
+  when the run inherited its `PULT_EVENTS` channel; see
   [Events protocol](#events-protocol--pult_events) below); `null` for a
   string-form `run:`, which has no steps to name.
 - `pult <id> <values…> --print` prints the composed script without running it —
@@ -590,9 +591,9 @@ side:
 
 | Event | OSC |
 |---|---|
-| `progress <n>` | state 1 (set), pct `n` |
+| `progress <p>` | state 1 (set), pct `((k-1)*100+p)/n` within the current step `k/n`; `p` before any step |
 | `progress ?` | state 3 (indeterminate) |
-| `step <k>/<n>` (no `progress` seen yet) | state 1, pct derived as `(k-1)*100/n` |
+| `step <k>/<n>` | state 1, pct `(k-1)*100/n` — the step's start |
 | a run that rendered at least one event finishes | state 0 (clear) |
 | a run that never emitted a single event finishes | nothing — no OSC at all |
 
@@ -606,9 +607,13 @@ command never reported.
 
 `status` carries no CLI rendering — it's consumed and dropped; it exists for
 richer surfaces (a pane runner, the desktop app) that can show a live text
-line. **Explicit beats derived**: once any `progress` event has arrived in a
-run, `step` milestones stop driving the percentage — they're a coarse
-fallback for scripts that never call `progress` at all.
+line. **A `progress` value is 0–100 of the current step**, not of the
+run: a tool reports its own work, and pult draws it inside the band of the
+step that launched it. Steps keep driving the bar throughout — every `step`
+moves it to that step's start, whether or not a `progress` came before.
+Richer surfaces get both scales: a journaled `progress` record keeps the
+reported value as `pct` and adds `run_pct`, the same banded value the
+terminal draws (`null` when `pct` is).
 
 **Compiled step lists emit `step` events automatically.** A list-form `run:`
 (see [authoring.md](authoring.md#2--composing-commands-from-steps)) gets a
@@ -616,17 +621,27 @@ guarded `step k/n <name>` emission injected before each top-level entry at
 compile time — structure a command as steps and you get milestones for
 free, no manifest changes required. `--print` shows the script without these
 guards (they'd clutter the dry-run output you're meant to read); a live run
-compiles them in. The same labels are exposed as `"steps"` in `--list --json`
-(below), so a surface can render milestones without parsing the script.
+compiles them in, unless it inherited the channel (see passthrough below).
+The same labels are exposed as `"steps"` in `--list --json` (below), so a
+surface can render milestones without parsing the script.
 
-**`PULT_EVENTS` passthrough**: if `PULT_EVENTS` is already set in pult's own
-environment when it runs a command, pult does nothing — no pipe, no
-translation. The var and its fd inherit through to the child as-is. This is
-for a parent process (the future desktop app) that owns the channel itself
-and wants to render events its own way; pult only creates its own channel
-(and does the OSC translation above) when nothing upstream already claimed
-one **and** stderr is a terminal. Piped/non-interactive runs (CI) get neither
-— `PULT_EVENTS` stays unset, zero behavior change.
+**`PULT_EVENTS` passthrough**: if a valid `PULT_EVENTS` is already set in
+pult's own environment when it runs a command, pult does nothing — no pipe, no
+translation, and no `step` lines of its own: a step list is compiled without
+its guards, because only a channel's owner emits `step`. The var and its fd
+inherit through to the child as-is. This is for a parent process (another
+pult, or any tool that reads events) that owns the channel itself and wants
+to render events its own way. The owner then sees the command's `progress`
+and `status` lines but no step framing from this pult: each step's tool
+reports 0–100 of its own work, so the values restart at every step, and the
+owner draws them inside whatever band it gave this whole run.
+
+When nothing upstream claimed one, pult creates its own channel (unix only)
+for a run whose output it journals — the journal records events whether or
+not anyone is watching — or when stderr is a terminal, and does the OSC
+translation above only on a terminal. Any other run (an `interactive`
+command without a terminal, `PULT_JOURNAL=0` in CI) gets no channel:
+`PULT_EVENTS` stays unset.
 
 An inherited `PULT_EVENTS` is only honored if it's a bare fd number (plain
 decimal digits, no sign, no surrounding whitespace) — bash's `>&word`
@@ -636,6 +651,14 @@ injected `step` guard silently truncate a file by that name. An invalid
 value is never forwarded to the child (pult strips it before running the
 command) and pult prints a one-line warning to stderr; the run proceeds as
 if `PULT_EVENTS` had never been set.
+
+**The channel carries no sender.** On a channel pult owns, its injected
+`step` lines and everything the command writes arrive on one pipe, and pult
+cannot tell them apart. A command that writes `step` lines itself moves the
+band exactly as pult's own would, in the terminal bar and in the journal's
+`run_pct`. That is accepted rather than guarded against: a tool that finds
+`PULT_EVENTS` already set should emit only `progress` and `status`, and
+leave `step` to whoever owns the channel.
 
 **Fd 3 conflicts**: pult's own channel always uses fd 3. If pult itself was
 started with fd 3 already open (for example `pult import 3<seed.txt`), that

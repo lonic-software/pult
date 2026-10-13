@@ -5,6 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
+use crate::events::{self, InheritedChannel};
 use crate::journal;
 use crate::label;
 use crate::manifest::{ParamDef, ParamKind};
@@ -141,6 +142,7 @@ pub fn execute(
         warn_unmaskable(&unmaskable);
     }
 
+    let channel = events::inherited_channel();
     match &cmd.run {
         ResolvedRun::Script(template) => {
             // The `running:` banner (and any error message) shows a line
@@ -164,13 +166,18 @@ pub fn execute(
                 &display,
                 &resolved.run_dir,
                 journaling,
+                channel,
             )
         }
+        // A channel inherited from upstream belongs to whoever set it, and
+        // only a channel's owner emits `step`: inject the guards only when
+        // pult may own the channel itself.
         ResolvedRun::Steps(_) => runner::run_bash(
-            &compile::compile(cmd, &values, true)?,
+            &compile::compile(cmd, &values, channel != InheritedChannel::Owned)?,
             &cmd.id,
             &resolved.run_dir,
             journaling,
+            channel,
         ),
     }
 }
