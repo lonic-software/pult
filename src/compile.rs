@@ -157,16 +157,21 @@ fn first_text_line(s: &str) -> String {
 }
 
 /// Control characters, plus the invisible formatting ones that would make a
-/// label look blank or reorder the text around it when printed: zero-width
-/// characters, bidi marks, embeddings, overrides and isolates, and the BOM.
+/// label look blank or reorder the text around it when printed: the soft
+/// hyphen, zero-width characters, bidi marks, embeddings, overrides and
+/// isolates, the BOM and the tag characters.
 fn is_unprintable(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{200B}'..='\u{200F}'
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
                 | '\u{202A}'..='\u{202E}'
                 | '\u{2060}'..='\u{2069}'
                 | '\u{FEFF}'
+                | '\u{E0000}'..='\u{E007F}'
         )
 }
 
@@ -483,7 +488,7 @@ mod tests {
         let bidi = ResolvedEntry::Inline("echo \u{202E}evil".into());
         assert_eq!(step_label(1, &bidi), "echo  evil");
         // Only invisible characters: nothing to name it by.
-        let invisible = ResolvedEntry::Inline("\u{200B}\u{FEFF}".into());
+        let invisible = ResolvedEntry::Inline("\u{200B}\u{FEFF}\u{061C}\u{00AD}\u{E0041}".into());
         assert_eq!(step_label(4, &invisible), "step 4");
     }
 
