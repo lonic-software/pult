@@ -167,7 +167,8 @@ pub fn ensure_fetched(git_src: &GitSource, cache_root: &Path) -> Result<(PathBuf
         return Ok((repo, meta));
     }
     let meta = fetch(git_src, cache_root, &entry)
-        .with_context(|| format!("failed to fetch git module `{}`", git_src.display))?;
+        .with_context(|| format!("failed to fetch git module `{}`", git_src.display))
+        .map_err(|e| crate::machine::coded(crate::machine::ErrorCode::FetchFailed, e))?;
     Ok((entry.join("repo"), meta))
 }
 

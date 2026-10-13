@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::prompt;
 
@@ -30,16 +30,22 @@ pub fn ensure_trusted(
         return save_store(&store_path, &store);
     }
     if !std::io::stdin().is_terminal() {
-        bail!(
-            "manifest {} is not trusted; run `pult` interactively once to review it, or pass --trust",
-            path.display()
-        );
+        return Err(crate::machine::coded(
+            crate::machine::ErrorCode::TrustChanged,
+            anyhow::anyhow!(
+                "manifest {} is not trusted; run `pult` interactively once to review it, or pass --trust",
+                path.display()
+            ),
+        ));
     }
 
     let question = build_question(path, previous.is_some(), includes, about_to_run);
     let yes = prompt::confirm(&question)?;
     if !yes {
-        bail!("manifest not trusted — nothing was run");
+        return Err(crate::machine::coded(
+            crate::machine::ErrorCode::TrustChanged,
+            anyhow::anyhow!("manifest not trusted — nothing was run"),
+        ));
     }
     store.insert(key, resolved_hash.to_string());
     save_store(&store_path, &store)

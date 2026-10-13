@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::manifest::{self, Loaded};
 
@@ -45,14 +45,17 @@ pub fn find_manifest_from(start: &Path, user_manifest: Option<&Path>) -> Result<
     {
         return Ok((manifest::load(path)?, Scope::User));
     }
-    bail!(
-        "no pult.yaml found (searched from {} upward; no user manifest at {}) — \
+    Err(crate::machine::coded(
+        crate::machine::ErrorCode::NoManifest,
+        anyhow::anyhow!(
+            "no pult.yaml found (searched from {} upward; no user manifest at {}) — \
          `pult init` creates one here, `pult init --user` creates your personal one",
-        start.display(),
-        user_manifest
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "~/.config/pult/pult.yaml".to_string()),
-    );
+            start.display(),
+            user_manifest
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "~/.config/pult/pult.yaml".to_string()),
+        ),
+    ))
 }
 
 /// `$PULT_USER_MANIFEST`, or the first of `~/.config/pult/pult.{yaml,yml}`

@@ -19,7 +19,7 @@ use crate::{exec, flow};
 /// "unseen code". Intercepted before discovery (like `init`/`update`) because
 /// the whole point is running where no local manifest exists yet.
 pub fn run_cli(rest: &[String]) -> Result<i32> {
-    let matches = clap::Command::new("pult x")
+    let cli = clap::Command::new("pult x")
         .bin_name("pult x")
         .about("Run a command from a module source without adding it to a manifest")
         .arg(Arg::new("source").required(true).value_name("SOURCE").help(
@@ -55,8 +55,11 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
                 .long("print")
                 .action(ArgAction::SetTrue)
                 .help("Print the composed script instead of running it"),
-        )
-        .get_matches_from(std::iter::once("pult x".to_string()).chain(rest.iter().cloned()));
+        );
+    let matches = crate::machine::get_matches(
+        cli,
+        std::iter::once("pult x".to_string()).chain(rest.iter().cloned()),
+    );
 
     let source = matches.get_one::<String>("source").expect("required");
     let command = matches.get_one::<String>("command").map(String::as_str);

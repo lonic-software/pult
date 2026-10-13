@@ -31,12 +31,9 @@ pub fn run_cli(resolved: &Resolved, matches: &clap::ArgMatches) -> Result<i32> {
             sub.get_flag("json"),
         ),
         Some(("prune", _)) => prune(resolved),
-        _ => {
-            eprintln!(
-                "usage: pult runs <list [--json] | tail <RUN_ID> [--follow] [--json] | prune>"
-            );
-            Ok(2)
-        }
+        _ => Err(crate::machine::usage(
+            "usage: pult runs <list [--json] | tail <RUN_ID> [--follow] [--json] | prune>",
+        )),
     }
 }
 
@@ -227,6 +224,9 @@ fn drain_events(
         *offset += n as u64;
         let trimmed = line.trim_end();
         if json {
+            // From here on stdout is a JSONL stream; a later failure must not
+            // append an error document to it.
+            crate::machine::commit_stdout();
             writeln!(out, "{trimmed}")?;
         } else if let Some(rendered) = render_event(trimmed) {
             writeln!(out, "{rendered}")?;
