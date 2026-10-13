@@ -476,6 +476,52 @@ printed table:
 `ready` and `exit_code` are `null` when the command declares no `check:` —
 there's nothing to run, not a failure.
 
+## Machine-readable failures — the error document
+
+When `pult --list --json`, `pult doctor --json`, `pult runs list --json` or
+`pult runs tail --json` fails in a way pult controls, stdout carries exactly one
+error document instead of the success document, in the envelope shared by every
+Lonic tool:
+
+```json
+{
+  "lonic_json": 1,
+  "tool": "pult",
+  "schema": 1,
+  "command": "list",
+  "ok": false,
+  "error": {
+    "code": "no_manifest",
+    "message": "no pult.yaml found (searched from /repo upward; …)"
+  }
+}
+```
+
+- The prose on stderr is exactly what it is without `--json`; the document is
+  purely additive. `message` is the same text, without the `pult: error:` prefix
+  (for an argument-parsing failure, the parser's description of what failed).
+- `command` is `"list"`, `"doctor"`, `"runs list"` or `"runs tail"`, or `null`
+  when the command line names none of them (or could not be parsed that far).
+- `error.details` is present only where a code defines it: a `usage` error from
+  argument parsing carries the parser's full text as `details.usage`.
+- Classify by `error.code`, never by the exit status. Codes are stable within
+  a `schema`; new ones may be added, so treat an unknown code as `generic`.
+- JSON mode is a bare `--json` argument before any `--`. Help and version
+  output stay plain text, and success documents keep their own shape (no
+  envelope header).
+- `runs tail --json` writes a document only when it fails before streaming its
+  first event line; a failure after that ends the stream with the prose line only.
+
+| Code | Exit | Meaning |
+|---|---|---|
+| `usage` | 2 | the command line could not be parsed, or names no known subcommand |
+| `no_manifest` | 1 | no manifest found from the current directory upward, and no user manifest |
+| `invalid_manifest` | 1 | the manifest, or something it includes, is unreadable, invalid or does not resolve |
+| `trust_changed` | 1 | the manifest is not trusted at its current content, and nothing granted it |
+| `fetch_failed` | 1 | a git module could not be fetched |
+| `cancelled` | 130 | the user cancelled one of pult's own prompts |
+| `generic` | 1 | any other failure |
+
 ## `--params-json` — param values without argv
 
 `pult <command> [values…] --params-json` reads the rest of a command's param
@@ -606,6 +652,11 @@ clobbering it.
 | 130 | prompt cancelled (Esc / Ctrl-C) |
 | 1 | pult error (untrusted manifest, invalid manifest, fetch failure, …) |
 | 2 | usage error for engine subcommands |
+
+Every exit status except 0 may also be the executed command's own, so under
+`--json` classify a failure by the error document's `error.code` (see
+[Machine-readable failures](#machine-readable-failures--the-error-document)),
+not by the number.
 
 ## Environment variables
 

@@ -371,7 +371,14 @@ struct VersionProbe {
     version: Option<u32>,
 }
 
+/// Every failure here is `invalid_manifest`: the manifest exists (or was
+/// named) but cannot be read as one.
 pub fn load(path: &Path) -> Result<Loaded> {
+    load_inner(path)
+        .map_err(|e| crate::machine::coded(crate::machine::ErrorCode::InvalidManifest, e))
+}
+
+fn load_inner(path: &Path) -> Result<Loaded> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let manifest = parse(&raw, path)?;

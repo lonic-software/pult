@@ -9,7 +9,7 @@ use crate::discovery;
 /// discovery (like `update`): its whole point is running where nothing
 /// exists yet.
 pub fn run_cli(rest: &[String]) -> Result<i32> {
-    let matches = clap::Command::new("pult init")
+    let cli = clap::Command::new("pult init")
         .bin_name("pult init")
         .about("Create a starter pult.yaml in the current directory")
         .arg(
@@ -17,8 +17,11 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
                 .long("user")
                 .action(ArgAction::SetTrue)
                 .help("Create your user manifest (~/.config/pult/pult.yaml) instead"),
-        )
-        .get_matches_from(std::iter::once("pult init".to_string()).chain(rest.iter().cloned()));
+        );
+    let matches = crate::machine::get_matches(
+        cli,
+        std::iter::once("pult init".to_string()).chain(rest.iter().cloned()),
+    );
 
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let target = if matches.get_flag("user") {

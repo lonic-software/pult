@@ -31,12 +31,9 @@ pub fn run_cli(resolved: &Resolved, matches: &clap::ArgMatches) -> Result<i32> {
             sub.get_flag("json"),
         ),
         Some(("prune", _)) => prune(resolved),
-        _ => {
-            eprintln!(
-                "usage: pult runs <list [--json] | tail <RUN_ID> [--follow] [--json] | prune>"
-            );
-            Ok(2)
-        }
+        _ => Err(crate::machine::usage(
+            "usage: pult runs <list [--json] | tail <RUN_ID> [--follow] [--json] | prune>",
+        )),
     }
 }
 
@@ -153,7 +150,9 @@ fn tail(resolved: &Resolved, run_id: &str, follow: bool, json: bool) -> Result<i
     let mut file = std::fs::File::open(&events_path)
         .with_context(|| format!("failed to open {}", events_path.display()))?;
     let mut offset: u64 = 0;
-    let mut stdout = std::io::stdout();
+    // Once a line is out, stdout is a JSONL stream: a later failure must not
+    // append an error document to it.
+    let mut stdout = crate::machine::StreamStdout::new();
 
     follow_events(&mut file, &mut offset, follow, json, &mut stdout, || {
         journal::read_meta(&run_dir)

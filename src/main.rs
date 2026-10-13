@@ -10,6 +10,7 @@ mod init;
 mod interp;
 mod journal;
 mod label;
+mod machine;
 mod manifest;
 mod mask;
 mod options;
@@ -35,17 +36,11 @@ use manifest::{OptionDef, ParamDef, ParamKind};
 use resolver::{PinInfo, Resolved, ResolvedRun};
 
 fn main() {
-    match run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    machine::init(&args);
+    match run(&args) {
         Ok(code) => std::process::exit(code),
-        Err(e) => {
-            if e.downcast_ref::<prompt::Cancelled>().is_some()
-                || e.downcast_ref::<prompt::Dismissed>().is_some()
-            {
-                std::process::exit(130);
-            }
-            eprintln!("pult: error: {e:#}");
-            std::process::exit(1);
-        }
+        Err(e) => std::process::exit(machine::report(&e)),
     }
 }
 
@@ -67,10 +62,9 @@ pub(crate) fn schema_url() -> String {
     )
 }
 
-fn run() -> Result<i32> {
+fn run(args: &[String]) -> Result<i32> {
     // `pult update` needs no manifest (the id is reserved, so no manifest
     // command can ever claim it) — handle it before discovery.
-    let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("update") {
         let requested = args.get(1).filter(|a| !a.starts_with('-'));
         return selfupdate::run(requested.map(String::as_str));
@@ -100,10 +94,7 @@ fn run() -> Result<i32> {
                 print!("{}", include_str!("../pult.schema.json"));
                 Ok(0)
             }
-            _ => {
-                eprintln!("usage: pult self schema");
-                Ok(2)
-            }
+            _ => Err(machine::usage("usage: pult self schema")),
         };
     }
 
@@ -111,7 +102,6 @@ fn run() -> Result<i32> {
         Ok(found) => found,
         Err(e) => {
             // --version / --help should still work with no manifest around.
-            let args: Vec<String> = std::env::args().skip(1).collect();
             if args.iter().any(|a| a == "-V" || a == "--version") {
                 println!("pult {}", env!("CARGO_PKG_VERSION"));
                 return Ok(0);
@@ -134,14 +124,15 @@ fn run() -> Result<i32> {
             return Err(e);
         }
     };
-    let mut resolved = resolver::resolve(loaded)?;
+    let mut resolved = resolver::resolve(loaded)
+        .map_err(|e| machine::coded(machine::ErrorCode::InvalidManifest, e))?;
     if scope == Scope::User {
         // Personal commands act on wherever you are; the manifest dir
         // (~/.config/pult) stays the base for the manifest's own includes.
         resolved.run_dir = std::env::current_dir().context("failed to read current directory")?;
     }
 
-    let matches = build_cli(&resolved, scope).get_matches();
+    let matches = machine::get_matches(build_cli(&resolved, scope), std::env::args_os());
     let assume_trusted = matches.get_flag("trust");
     let print = matches.get_flag("print");
     let params_json = matches.get_flag("params-json");
@@ -194,10 +185,9 @@ fn run() -> Result<i32> {
         Some(("runs", sub)) => runs::run_cli(&resolved, sub),
         Some(("includes", sub)) => match sub.subcommand() {
             Some(("verify", _)) => verify::run(&resolved),
-            _ => {
-                eprintln!("usage: pult includes <verify | add <SOURCE> [--prefix P] [--user]>");
-                Ok(2)
-            }
+            _ => Err(machine::usage(
+                "usage: pult includes <verify | add <SOURCE> [--prefix P] [--user]>",
+            )),
         },
         Some((id, sub)) => {
             let cmd = resolve_manifest_command(&resolved.commands, id)?;

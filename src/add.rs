@@ -11,7 +11,7 @@ use crate::{discovery, manifest, prompt, resolver};
 /// and append it to a manifest's includes. Intercepted before discovery (like
 /// `update`), so `--user` works even where no manifest exists yet.
 pub fn run_cli(rest: &[String]) -> Result<i32> {
-    let matches = clap::Command::new("pult includes add")
+    let cli = clap::Command::new("pult includes add")
         .bin_name("pult includes add")
         .about("Pin a module source and add it to a manifest's includes")
         .arg(Arg::new("source").required(true).value_name("SOURCE").help(
@@ -31,10 +31,11 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
                 .help(
                     "Add to your user manifest (~/.config/pult/pult.yaml), creating it if needed",
                 ),
-        )
-        .get_matches_from(
-            std::iter::once("pult includes add".to_string()).chain(rest.iter().cloned()),
         );
+    let matches = crate::machine::get_matches(
+        cli,
+        std::iter::once("pult includes add".to_string()).chain(rest.iter().cloned()),
+    );
 
     let source = matches.get_one::<String>("source").expect("required");
     let prefix = matches.get_one::<String>("prefix").map(String::as_str);

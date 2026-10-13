@@ -149,13 +149,24 @@ pub fn default_cache_root() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("PULT_CACHE_DIR") {
         return Ok(PathBuf::from(p));
     }
-    let base = dirs::cache_dir().context("could not determine the user cache directory")?;
+    // Coded `generic` here, so the resolution boundary does not report an
+    // environment fault as an invalid manifest.
+    let base = dirs::cache_dir()
+        .context("could not determine the user cache directory")
+        .map_err(|e| crate::machine::coded(crate::machine::ErrorCode::Generic, e))?;
     Ok(base.join("pult").join("modules"))
 }
 
 /// Return the checkout directory for a pinned git module, fetching on a cold
 /// cache. Pins are immutable, so a cache hit never touches the network.
+/// Every failure here is `fetch_failed`: the module could not be obtained,
+/// whether from the network or from a damaged cache entry.
 pub fn ensure_fetched(git_src: &GitSource, cache_root: &Path) -> Result<(PathBuf, CacheMeta)> {
+    ensure_fetched_inner(git_src, cache_root)
+        .map_err(|e| crate::machine::coded(crate::machine::ErrorCode::FetchFailed, e))
+}
+
+fn ensure_fetched_inner(git_src: &GitSource, cache_root: &Path) -> Result<(PathBuf, CacheMeta)> {
     let entry = cache_root.join(cache_key(git_src));
     let repo = entry.join("repo");
     let meta_path = entry.join("meta.json");
