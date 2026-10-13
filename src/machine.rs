@@ -95,15 +95,18 @@ impl std::error::Error for Coded {
 /// wins: a code is attached where the failure is best understood, so a fetch
 /// failure inside manifest resolution stays `fetch_failed` when the
 /// resolution boundary later marks everything it returns `invalid_manifest`.
+/// An error that already carries a code is returned as it is, so a prompt's
+/// sentinel stays reachable by `downcast_ref` at the top of the error.
 pub fn coded(code: ErrorCode, err: impl Into<anyhow::Error>) -> anyhow::Error {
     let inner = err.into();
-    let code = existing_code(&inner).unwrap_or(code);
+    if existing_code(&inner).is_some() {
+        return inner;
+    }
     anyhow::Error::new(Coded { code, inner })
 }
 
 /// The code an error already carries: a prompt's own cancellation sentinel,
-/// or the outermost [`Coded`] in its chain (which, by [`coded`], already
-/// holds the innermost code attached).
+/// or the outermost [`Coded`] in its chain (by [`coded`], the only one).
 fn existing_code(err: &anyhow::Error) -> Option<ErrorCode> {
     err.chain().find_map(|e| {
         if e.is::<prompt::Cancelled>() || e.is::<prompt::Dismissed>() {
@@ -221,10 +224,11 @@ fn emit(code: ErrorCode, message: &str, details: Option<serde_json::Value>) {
     if !mode.json || STDOUT_COMMITTED.load(Ordering::Relaxed) {
         return;
     }
-    println!(
-        "{}",
-        document(mode.command.as_deref(), code, message, details)
-    );
+    // Not `println!`: with stdout closed it panics, turning the failure's
+    // exit status into 101. A document nobody can read is simply dropped.
+    use std::io::Write;
+    let doc = document(mode.command.as_deref(), code, message, details);
+    let _ = writeln!(std::io::stdout().lock(), "{doc}");
 }
 
 /// Report a failure that reached `main()` and return its exit status: the
@@ -266,13 +270,41 @@ where
     }
     let text = err.render().to_string();
     let _ = err.print();
-    let first = text.lines().next().unwrap_or_default();
     emit(
         ErrorCode::Usage,
-        first.strip_prefix("error: ").unwrap_or(first),
+        &clap_message(&text),
         Some(serde_json::json!({ "usage": text.trim_end() })),
     );
     std::process::exit(ErrorCode::Usage.exit_code());
+}
+
+/// The failure itself from clap's rendered error: the paragraph before the
+/// usage and help hints, without its `error: ` prefix. It can span lines
+/// (`the following required arguments were not provided:\n  <RUN_ID>`).
+fn clap_message(text: &str) -> String {
+    let head = text.split("\n\n").next().unwrap_or_default().trim_end();
+    head.strip_prefix("error: ").unwrap_or(head).to_string()
+}
+
+/// A stdout writer that marks stdout committed on its first write, for
+/// streams that must not be followed by an error document.
+pub struct StreamStdout(std::io::Stdout);
+
+impl StreamStdout {
+    pub fn new() -> Self {
+        StreamStdout(std::io::stdout())
+    }
+}
+
+impl std::io::Write for StreamStdout {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        commit_stdout();
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
 }
 
 #[cfg(test)]
@@ -375,6 +407,34 @@ mod tests {
         let err = coded(ErrorCode::TrustChanged, prompt::Dismissed);
         assert_eq!(classify(&err), ErrorCode::Cancelled);
         assert_eq!(ErrorCode::Cancelled.exit_code(), 130);
+    }
+
+    #[test]
+    fn writing_a_stream_line_commits_stdout() {
+        use std::io::Write;
+        assert!(!STDOUT_COMMITTED.load(Ordering::Relaxed));
+        let mut out = StreamStdout::new();
+        out.write_all(b"").unwrap();
+        assert!(STDOUT_COMMITTED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_clap_message_keeps_every_line_of_the_failure_but_not_the_hints() {
+        let text = "error: the following required arguments were not provided:\n  <RUN_ID>\n\n\
+                    Usage: pult runs tail <RUN_ID>\n\nFor more information, try '--help'.\n";
+        assert_eq!(
+            clap_message(text),
+            "the following required arguments were not provided:\n  <RUN_ID>"
+        );
+    }
+
+    /// Reddens if `coded` wraps an error that already carries a code: the
+    /// prompt sentinel would no longer be the error's own type, and the
+    /// guided flow's Esc-steps-back check (`downcast_ref::<Dismissed>`) breaks.
+    #[test]
+    fn coding_a_prompt_sentinel_leaves_it_downcastable() {
+        let err = coded(ErrorCode::InvalidManifest, prompt::Dismissed);
+        assert!(err.downcast_ref::<prompt::Dismissed>().is_some());
     }
 
     #[test]

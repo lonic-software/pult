@@ -150,7 +150,9 @@ fn tail(resolved: &Resolved, run_id: &str, follow: bool, json: bool) -> Result<i
     let mut file = std::fs::File::open(&events_path)
         .with_context(|| format!("failed to open {}", events_path.display()))?;
     let mut offset: u64 = 0;
-    let mut stdout = std::io::stdout();
+    // Once a line is out, stdout is a JSONL stream: a later failure must not
+    // append an error document to it.
+    let mut stdout = crate::machine::StreamStdout::new();
 
     follow_events(&mut file, &mut offset, follow, json, &mut stdout, || {
         journal::read_meta(&run_dir)
@@ -224,9 +226,6 @@ fn drain_events(
         *offset += n as u64;
         let trimmed = line.trim_end();
         if json {
-            // From here on stdout is a JSONL stream; a later failure must not
-            // append an error document to it.
-            crate::machine::commit_stdout();
             writeln!(out, "{trimmed}")?;
         } else if let Some(rendered) = render_event(trimmed) {
             writeln!(out, "{rendered}")?;

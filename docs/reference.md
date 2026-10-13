@@ -498,7 +498,8 @@ Lonic tool:
 ```
 
 - The prose on stderr is exactly what it is without `--json`; the document is
-  purely additive. `message` is the same text, without the `pult: error:` prefix.
+  purely additive. `message` is the same text, without the `pult: error:` prefix
+  (for an argument-parsing failure, the parser's description of what failed).
 - `command` is `"list"`, `"doctor"`, `"runs list"` or `"runs tail"`, or `null`
   when the command line names none of them (or could not be parsed that far).
 - `error.details` is present only where a code defines it: a `usage` error from

@@ -38,7 +38,7 @@ use resolver::{PinInfo, Resolved, ResolvedRun};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     machine::init(&args);
-    match run() {
+    match run(&args) {
         Ok(code) => std::process::exit(code),
         Err(e) => std::process::exit(machine::report(&e)),
     }
@@ -62,10 +62,9 @@ pub(crate) fn schema_url() -> String {
     )
 }
 
-fn run() -> Result<i32> {
+fn run(args: &[String]) -> Result<i32> {
     // `pult update` needs no manifest (the id is reserved, so no manifest
     // command can ever claim it) — handle it before discovery.
-    let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("update") {
         let requested = args.get(1).filter(|a| !a.starts_with('-'));
         return selfupdate::run(requested.map(String::as_str));
@@ -103,7 +102,6 @@ fn run() -> Result<i32> {
         Ok(found) => found,
         Err(e) => {
             // --version / --help should still work with no manifest around.
-            let args: Vec<String> = std::env::args().skip(1).collect();
             if args.iter().any(|a| a == "-V" || a == "--version") {
                 println!("pult {}", env!("CARGO_PKG_VERSION"));
                 return Ok(0);

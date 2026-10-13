@@ -30,8 +30,14 @@ impl Env {
     }
 
     fn pult(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_pult"))
-            .current_dir(self.repo.path())
+        self.command(args)
+            .output()
+            .expect("failed to run the pult binary")
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_pult"));
+        cmd.current_dir(self.repo.path())
             .env("PULT_STATE_DIR", self.state.path())
             .env("PULT_TRUST_STORE", self.trust.path().join("trust.json"))
             .env("PULT_CACHE_DIR", self.cache.path())
@@ -41,8 +47,8 @@ impl Env {
             )
             .args(args)
             .stdin(Stdio::null())
-            .output()
-            .expect("failed to run the pult binary")
+            .stderr(Stdio::piped());
+        cmd
     }
 }
 
@@ -186,6 +192,12 @@ fn a_command_line_clap_rejects_is_a_usage_document_with_clap_text() {
         "unexpected argument '--bogus' found"
     );
 
+    // A failure clap describes over several lines keeps all of them.
+    let out = env.pult(&["runs", "tail", "--json"]);
+    let doc = error_doc(&out, Some("runs tail"), "usage", 2);
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(message.contains("<RUN_ID>"), "{doc}");
+
     // Help is not a failure: no document, clap's help on stdout, exit 0.
     let out = env.pult(&["doctor", "--json", "--help"]);
     assert_eq!(out.status.code(), Some(0));
@@ -236,5 +248,85 @@ fn json_after_the_separator_does_not_ask_for_a_document() {
         out.stdout.is_empty(),
         "{}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// With stdout closed, the document cannot be written; the failure still
+/// exits with its own status and prose rather than a panic (exit 101).
+#[test]
+fn a_closed_stdout_does_not_turn_the_failure_into_a_panic() {
+    let env = Env::new(None);
+    let mut child = env.command(&["--list", "--json"]);
+    let out = child.stdout(Stdio::piped()).spawn().unwrap();
+    // Close our end of the pipe before pult writes to it.
+    let mut out = out;
+    drop(out.stdout.take());
+    let out = out.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// A damaged module cache is a fetch problem, not an authoring one.
+#[test]
+fn a_corrupt_module_cache_entry_is_fetch_failed() {
+    let env = Env::new(Some(MANIFEST));
+    let source = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .current_dir(source.path())
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    };
+    std::fs::write(
+        source.path().join("pult.module.yaml"),
+        "version: 1\ncommands: []\n",
+    )
+    .unwrap();
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-qm",
+        "m",
+    ]);
+    git(&["tag", "v1.0.0"]);
+    std::fs::write(
+        env.repo.path().join("pult.yaml"),
+        format!(
+            "version: 1\nincludes:\n  - source: git::file://{}@v1.0.0\n{}",
+            source.path().display(),
+            MANIFEST.trim_start_matches("version: 1\n")
+        ),
+    )
+    .unwrap();
+    // Warm the cache, then damage every entry's metadata.
+    let warm = env.pult(&["--list", "--json"]);
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    for entry in std::fs::read_dir(env.cache.path()).unwrap() {
+        let meta = entry.unwrap().path().join("meta.json");
+        if meta.exists() {
+            std::fs::write(meta, "{").unwrap();
+        }
+    }
+    error_doc(
+        &env.pult(&["--list", "--json"]),
+        Some("list"),
+        "fetch_failed",
+        1,
     );
 }
