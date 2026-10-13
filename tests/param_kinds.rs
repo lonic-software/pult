@@ -131,21 +131,29 @@ fn a_required_repeat_without_a_terminal_names_the_param() {
     );
 }
 
+/// Exit 2, pult's usage exit. A manifest command takes no `--json`, so the
+/// message is the evidence the bound itself refused.
 #[test]
 fn a_count_outside_the_bounds_is_a_usage_error() {
     let env = Env::new(MANIFEST);
     let over = env.pult(&[
-        "--json", "go", "dev", "--only", "a", "--only", "b", "--only", "c", "f1", "--print",
+        "go", "dev", "--only", "a", "--only", "b", "--only", "c", "f1", "--print",
     ]);
     expect(&over, 2);
-    assert_eq!(error_code(&over), "usage");
+    assert!(
+        stderr(&over).contains("`only` takes at most 2 value(s), but 3 were given"),
+        "{over:?}"
+    );
 
     let under = env.pult_stdin(
-        &["--json", "go", "--params-json", "--print"],
+        &["go", "--params-json", "--print"],
         r#"{"env": "dev", "files": []}"#,
     );
     expect(&under, 2);
-    assert_eq!(error_code(&under), "usage");
+    assert!(
+        stderr(&under).contains("`files` needs at least 1 value(s), but 0 were given"),
+        "{under:?}"
+    );
 }
 
 #[test]
