@@ -17,7 +17,7 @@ commands:
     title: Build
     run:
       - "echo one"
-      - 'printf "progress 60 half\n" >&"$PULT_EVENTS"'
+      - '[ -n "${PULT_EVENTS:-}" ] && printf "progress 60 half\n" >&"$PULT_EVENTS" || true'
       - "echo three"
 "#;
 
@@ -30,11 +30,15 @@ enum Upstream<'a> {
     Channel(&'a Path),
     /// A value that is not an fd number.
     Invalid(&'a str),
+    /// The same, on a run with journaling off and no terminal, so pult
+    /// creates no channel of its own to replace the value with.
+    InvalidUnjournaled(&'a str),
 }
 
 fn run_pult(repo: &Path, state: &Path, trust: &Path, upstream: Upstream) -> Output {
     std::fs::write(repo.join("pult.yaml"), MANIFEST).unwrap();
     let pult = env!("CARGO_BIN_EXE_pult");
+    let journal_off = matches!(upstream, Upstream::InvalidUnjournaled(_));
     let mut command = match upstream {
         Upstream::Channel(file) => {
             let mut c = Command::new("sh");
@@ -44,7 +48,7 @@ fn run_pult(repo: &Path, state: &Path, trust: &Path, upstream: Upstream) -> Outp
                 .env("PULT_EVENTS", "5");
             c
         }
-        Upstream::Invalid(value) => {
+        Upstream::Invalid(value) | Upstream::InvalidUnjournaled(value) => {
             let mut c = Command::new(pult);
             c.env("PULT_EVENTS", value);
             c
@@ -55,13 +59,17 @@ fn run_pult(repo: &Path, state: &Path, trust: &Path, upstream: Upstream) -> Outp
             c
         }
     };
-    let output = command
+    command
         .current_dir(repo)
         .env("PULT_STATE_DIR", state)
         .env("PULT_TRUST_STORE", trust)
         // Journaling is on by default; an exported `PULT_JOURNAL=0` must not
         // turn these tests into a missing-journal failure.
-        .env_remove("PULT_JOURNAL")
+        .env_remove("PULT_JOURNAL");
+    if journal_off {
+        command.env("PULT_JOURNAL", "0");
+    }
+    let output = command
         .args(["--trust", "--run-id", "events-run", "build"])
         .output()
         .expect("failed to run the pult binary");
@@ -159,8 +167,7 @@ fn an_owned_channel_journals_steps_and_banded_progress() {
 /// strips it, owns the channel itself and injects its steps, all from one
 /// reading of `PULT_EVENTS`. Goes red if the compile-time choice treats any
 /// set value as inherited (no `step` records, while the runner still claims
-/// the channel). The strip itself is pinned by the warning only: on a
-/// journaled run pult's own channel replaces the value anyway.
+/// the channel). The strip is pinned by the test below.
 #[test]
 fn an_invalid_inherited_value_is_stripped_and_pult_owns_the_channel() {
     let state = tempfile::tempdir().unwrap();
@@ -185,4 +192,33 @@ fn an_invalid_inherited_value_is_stripped_and_pult_owns_the_channel() {
     assert_eq!(steps, 3, "records: {records:?}");
     let progress = records.iter().find(|r| r["kind"] == "progress").unwrap();
     assert_eq!(progress["run_pct"], 53);
+}
+
+/// With no channel of its own to replace it (journaling off, no terminal),
+/// only the strip keeps an invalid value from the script: forwarded, the
+/// injected guards would each write `step` lines into a file named
+/// `events.log` in the run directory. Goes red if the runner warns but stops
+/// removing the value from the child's environment.
+#[test]
+fn an_invalid_inherited_value_never_reaches_the_script() {
+    let state = tempfile::tempdir().unwrap();
+    let trust = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+
+    let output = run_pult(
+        repo.path(),
+        state.path(),
+        &trust.path().join("trust.json"),
+        Upstream::InvalidUnjournaled("events.log"),
+    );
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("pult: ignoring invalid PULT_EVENTS=events.log"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The run did execute its steps, with nowhere to send events.
+    assert!(String::from_utf8_lossy(&output.stdout).contains("three"));
+    assert!(!repo.path().join("events.log").exists());
 }
