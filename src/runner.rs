@@ -174,7 +174,7 @@ mod journaled {
         what: &str,
         journal: &Journal,
         masker: &Masker,
-        inherited: bool,
+        #[cfg_attr(not(unix), allow(unused_variables))] inherited: bool,
     ) -> Result<(i32, bool)> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
