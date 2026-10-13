@@ -430,10 +430,9 @@ fn fill(
             (None, ParamKind::Input(input)) if input.secret => {
                 Value::Text(prompt::password(&format!("{name}?"))?)
             }
-            (None, ParamKind::Input(input)) => Value::Text(prompt::text(
-                &format!("{name}?"),
-                input.default.as_deref(),
-            )?),
+            (None, ParamKind::Input(input)) => {
+                Value::Text(prompt::text(&format!("{name}?"), input.default.as_deref())?)
+            }
             (_, ParamKind::Use(_)) => unreachable!("resolver inlines every use: param"),
         };
         values.insert(name.clone(), value);

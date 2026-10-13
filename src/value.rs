@@ -62,9 +62,7 @@ pub fn render(def: Option<&ParamDef>, value: &Value) -> String {
     match value {
         Value::Text(s) => interp::shell_quote(s),
         Value::Flag(false) => String::new(),
-        Value::Flag(true) => {
-            interp::shell_quote(arg.expect("a resolved flag always has an `arg`"))
-        }
+        Value::Flag(true) => interp::shell_quote(arg.expect("a resolved flag always has an `arg`")),
         Value::List(items) => items
             .iter()
             .map(|item| match arg {
@@ -100,7 +98,10 @@ mod tests {
         let positional = def("repeat: {}");
         assert_eq!(render(Some(&positional), &items), "'a b' c");
         // An empty item is still a word.
-        assert_eq!(render(Some(&positional), &Value::List(vec![String::new()])), "''");
+        assert_eq!(
+            render(Some(&positional), &Value::List(vec![String::new()])),
+            "''"
+        );
     }
 
     #[test]

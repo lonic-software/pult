@@ -164,7 +164,10 @@ fn params_json_is_typed_by_kind() {
         r#"{"env": "dev", "force": "yes", "files": ["x"]}"#,
     );
     expect(&wrong, 2);
-    assert!(stderr(&wrong).contains("`force` must be a boolean"), "{wrong:?}");
+    assert!(
+        stderr(&wrong).contains("`force` must be a boolean"),
+        "{wrong:?}"
+    );
 
     let right = env.pult_stdin(
         &["go", "--params-json", "--print"],
@@ -221,7 +224,14 @@ commands:
 "#,
     );
     let out = env.pult(&[
-        "--trust", "go", "--keys", "hunter2-super-secret", "a", "b c", "--run-id", "r1",
+        "--trust",
+        "go",
+        "--keys",
+        "hunter2-super-secret",
+        "a",
+        "b c",
+        "--run-id",
+        "r1",
     ]);
     expect(&out, 0);
     let meta = find(env.state.path(), "meta.json").expect("no meta.json journaled");
@@ -330,7 +340,10 @@ fn pult_x_binds_a_command_exactly_as_pult_does() {
 
     let out = env.pult(&["x", "./mod", "go", "dev", "f1", "--var", "a=b"]);
     expect(&out, 2);
-    assert!(stderr(&out).contains("--var must come before the command"), "{out:?}");
+    assert!(
+        stderr(&out).contains("--var must come before the command"),
+        "{out:?}"
+    );
 
     let out = env.pult(&["x", "./mod", "go", "--help"]);
     expect(&out, 0);

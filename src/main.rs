@@ -835,5 +835,4 @@ commands:
         assert!(msg.contains("pult's own subcommand"), "got: {msg}");
         assert!(msg.contains("pult update …"), "got: {msg}");
     }
-
 }

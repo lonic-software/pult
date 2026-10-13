@@ -163,7 +163,13 @@ pub enum ParamKind<'a> {
 
 impl ParamDef {
     pub fn kind(&self) -> ParamKind<'_> {
-        match (&self.pick, &self.input, &self.flag, &self.repeat, &self.use_) {
+        match (
+            &self.pick,
+            &self.input,
+            &self.flag,
+            &self.repeat,
+            &self.use_,
+        ) {
             (Some(pick), None, None, None, None) => ParamKind::Pick(pick),
             (None, Some(input), None, None, None) => ParamKind::Input(input),
             (None, None, Some(flag), None, None) => ParamKind::Flag(flag),
@@ -504,10 +510,12 @@ pub fn parse(raw: &str, origin: &Path) -> Result<Manifest> {
 /// before the resolver prefixes an include's params or inlines a `use:`, so
 /// the key is always the one in the declaring file.
 fn default_flag_args(manifest: &mut Manifest) {
-    let params = manifest
-        .params
-        .iter_mut()
-        .chain(manifest.commands.iter_mut().flat_map(|c| c.params.iter_mut()));
+    let params = manifest.params.iter_mut().chain(
+        manifest
+            .commands
+            .iter_mut()
+            .flat_map(|c| c.params.iter_mut()),
+    );
     for (key, def) in params {
         if let Some(flag) = &mut def.flag
             && flag.arg.is_none()

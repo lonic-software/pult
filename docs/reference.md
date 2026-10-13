@@ -85,7 +85,7 @@ future phase and rejected with an explanatory error.
   the big label, and a long title just truncates and duplicates the
   description's job.
 
-### `<param>` — exactly one of `pick`, `input`, `use`
+### `<param>` — exactly one of `pick`, `input`, `flag`, `repeat`, `use`
 
 ```yaml
 env:      { pick: { options: [dev, uat, pre] } }   # static list
@@ -94,6 +94,10 @@ note:     { input: { default: "hi" } }             # free text
 token:    { input: { secret: true } }              # prompted without echo
 region:   { use: aws:region }                      # copy of a named param
 zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-east-1] } }  # per-value descriptions
+force:    { flag: {} }                             # switch: renders --force when set
+dry:      { flag: { arg: "-n" } }                  # switch with its own word
+only:     { repeat: { arg: "--only", max: 2 } }    # named option, up to twice
+files:    { repeat: { min: 1 } }                   # the trailing positionals
 ```
 
 - `pick.options` — a static list. Each entry is a bare value or a
@@ -110,6 +114,45 @@ zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-eas
   CLI-provided values are **not** validated against dynamic sources.
 - `use` — must reference an existing named param, which must itself be
   concrete (a named param cannot be another `use:`).
+- `flag` — a boolean. Set, it renders as its `arg`; unset, as nothing at
+  all (no empty word). `arg` defaults to `--<key>`, where the key is the
+  param's name **in the file that declares it**: an include `prefix:` or a
+  `use:` under another name changes what the command line calls the
+  switch, never the word the tool receives. `flag:` with no body is a flag
+  with every default. A flag has no `default:` and is never secret.
+- `repeat` — a list of values, each rendered as its own shell-quoted word,
+  and each preceded by `arg` when one is set (`--only a --only 'b c'`); an
+  empty list renders as nothing. `min` (default 0) and `max` (default
+  unbounded; at least 1, and at least `min`) bound the item count, and a
+  count outside them is a usage error (exit 2). `secret: true` treats every
+  item exactly as a secret input is treated (masked in previews, the
+  journal and the picker; prompted without echo).
+- `arg`, when given, must be non-empty. A `pick.from` source may reference
+  only pick and input params.
+
+**On the command line.** `pult <command>` and `pult x <source> <command>`
+take a command's params the same way:
+
+- a pick, an input, and a repeat **without** `arg` take positional slots in
+  declaration order; the arg-less repeat takes every trailing value, so a
+  command has at most one, and it is the last positional;
+- a flag is the switch `--<name>`;
+- a repeat **with** `arg` is the option `--<name> <value>`, given once per
+  item.
+
+`<name>` is the param's name in the command (after any `prefix:` and
+`use:`), not its `arg`. A param may not be named `trust`, `print`,
+`params-json`, `run-id`, `help`, `json` or `var`, since those are pult's
+own options. Every rule here is checked when the manifest loads, after
+`use:` params are inlined, and a violation is a load error.
+
+**Filling what the command line leaves out.** Invoked directly, an absent
+flag is unset and an absent repeat with `min: 0` is empty, without asking.
+A repeat with `min` above 0 is asked for an item at a time on a terminal
+(an empty line finishes once `min` items are in), and is an error without
+one. Picks and inputs are prompted as always. The guided menu asks for
+every param, flags and optional repeats included. `--print` never asks:
+what is missing shows as `<name>`.
 - `input.secret` — prompted masked (no echo into scrollback). What pult
   displays about the value itself is covered by two different guarantees,
   and they are not the same strength:
@@ -141,8 +184,8 @@ zone:     { pick: { options: [{ value: eu-west-1, description: Ireland }, us-eas
   value passed as a CLI argument also lands in your shell history — prefer
   the prompt for anything truly sensitive, or `--params-json` (below) when
   tooling needs to pass it non-interactively without putting it in argv.
-  (`--params-json` rejects a non-string param value outright, and names
-  only its JSON type in the error, never its content — so a tooling bug
+  (`--params-json` rejects a value of the wrong JSON type outright, and
+  names only its type in the error, never its content — so a tooling bug
   that wraps a secret in an array, say, doesn't itself become the leak.)
 
   **What journaling masks, and what it doesn't.** Journaling is on by
@@ -291,7 +334,7 @@ manifest and creates it if missing.
 
 ### `pult x` — ephemeral execution
 
-`pult x <SOURCE> [COMMAND] [values…]` runs a command straight from a module
+`pult x <SOURCE> [COMMAND] [args…]` runs a command straight from a module
 source without adding it to any manifest — the same source syntax, pinning, and
 immutable cache as an include (a bare git source resolves to its latest version
 tag; pin explicitly with `@<tag|sha>` to run offline from a warm cache). With no
@@ -299,7 +342,9 @@ tag; pin explicitly with `@<tag|sha>` to run offline from a warm cache). With no
 module offers and exits `2`. Commands run in the **invocation directory** (they
 act on where you are, like user-scope commands); `${module.dir}` executables and
 module `vars:` (bind them with `--var NAME=VALUE`, repeatable) work as they do in
-an include. The same trust prompt gates the run: the trust identity is the
+an include. The command's own args bind exactly as `pult <command>` binds them
+(see "On the command line"; `pult x <SOURCE> <COMMAND> --help` lists them), and
+`--var` must come before `COMMAND`. The same trust prompt gates the run: the trust identity is the
 source itself — a pinned git source (globally unique) or a local module's
 canonical path — so re-running a trusted source doesn't re-prompt, while a moved
 tag or an edited local tree does. Because you're trusting one ad-hoc source to
@@ -350,8 +395,10 @@ hash (see Error documents), and `pult --list --json` reports it as
   manifest is already trusted at its current hash, so a pinned hash in CI
   fails the moment the manifest moves. The `=` is required.
 - A bare `--trust` accepts whatever is current when it runs, binding to
-  nothing anyone reviewed. It stays for CI and existing callers, and when it
-  records a hash it warns on stderr, naming that hash so you can pin it.
+  nothing anyone reviewed. It is the permanent grant for CI, which has no
+  human to review a hash, and is not deprecated. When it records a hash it
+  warns on stderr, naming that hash so you can pin it. Interactive tooling
+  should pass `--trust=<hash>` with the hash a human saw instead.
 
 ## Module cache
 
@@ -367,40 +414,60 @@ cache directory is always safe (next run re-fetches).
 
 ```
 pult                          guided flow
-pult <command> [values…]      direct invocation (missing values are prompted)
+pult <command> [args…]        direct invocation (see "On the command line"; missing values are prompted)
 pult <command> --help         generated per-command help
 pult --list                   commands, params, and origins (flat, one line each — scripts parse this)
 pult --list --json            the same, machine-readable, grouped by category (schema below)
 pult <command> --print        print the composed script instead of running
 pult <command> --params-json  read this command's param values from stdin as a JSON
-                                object (positional args still work; keeps them out of
+                                object (command-line args still work; keeps them out of
                                 pult's argv and shell history — see caveat below)
 pult --trust=<hash> …         trust this manifest at exactly that hash (records immediately)
 pult --trust …                trust it at whatever is current (warns with the hash recorded)
 pult x <SOURCE> [COMMAND]     run a command from a module source, no manifest (npx-style)
-     [values…] [--var N=V]      --trust / --print as elsewhere, but trust records only on a run;
-                                a bare source takes the latest tag
+     [args…] [--var N=V]        the command's args as for `pult <command>`; --var before the
+                                command; --trust / --print as elsewhere, but trust records only
+                                on a run; a bare source takes the latest tag
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
 pult doctor [--json]          run every command's check: and report readiness (exit 1 if
                                 any fail; trust-gated — checks are manifest code; --json for
                                 the machine-readable form)
+pult runs list [--json]       journaled runs, newest first
+pult runs tail <ID>           a run's journaled events (--follow to keep reading a live run;
+     [--follow|--json|--jsonl]  --json for one document, --jsonl for the raw event lines)
 pult init [--user]            scaffold a starter manifest here (or your user manifest)
 pult self schema              print the manifest JSON Schema (draft-07) to stdout
 pult update [VERSION]         self-update to the latest (or given) release; needs no manifest
 pult --version / -V           engine version
 ```
 
+## Machine-readable output — the envelope
+
+Every `--json` output is exactly one JSON document on stdout, in the envelope
+shared by every Lonic tool. A success carries its payload under `data`:
+
+```json
+{ "lonic_json": 1, "tool": "pult", "schema": 2, "command": "list", "ok": true, "data": { … } }
+```
+
+and a failure an `error` instead (see [the error document](#machine-readable-failures--the-error-document)).
+`schema` is `2`. Changes within a schema are **additive only** (new fields,
+new error codes and new param kinds may appear; existing fields keep their
+meaning); a breaking change bumps `schema`. Check `ok` before reading
+`data`. The sections below show each command's `data`.
+
+`pult self schema` prints the manifest JSON Schema, not a document, and has
+no envelope. The run journal's own records (`events.jsonl`, `meta.json`)
+carry their own schema, which is still `1`.
+
 ## Machine-readable listing — `pult --list --json`
 
-The stable surface for tooling and agents. `schema` is `1`; changes within a
-schema version are **additive only** (new fields may appear; existing fields
-keep their meaning), breaking changes bump `schema`.
+The stable surface for tooling and agents. Its `data`:
 
 ```json
 {
-  "schema": 1,
   "pult_version": "0.1.0",
   "name": "demo",
   "manifest": "/repo/pult.yaml",
@@ -427,7 +494,9 @@ keep their meaning), breaking changes bump `schema`.
         { "name": "env", "kind": "pick", "options": ["dev", "uat", "pre"] },
         { "name": "customer", "kind": "pick",
           "source": "./bin/impl list --env {env}", "depends_on": ["env"] },
-        { "name": "note", "kind": "input", "default": "", "secret": false }
+        { "name": "note", "kind": "input", "default": "", "secret": false },
+        { "name": "force", "kind": "flag", "arg": "--force" },
+        { "name": "files", "kind": "repeat", "arg": null, "min": 1, "max": null, "secret": false }
       ],
       "check": "command -v aws",
       "interactive": true,
@@ -461,14 +530,30 @@ Field notes:
 - `description` — the raw `description:` value the author declared; `null` =
   none. One or two sentences explaining what the command does, for
   `--help`, `--list --json`, and UIs.
-- Params appear in **declared order**, which is also positional-argument
-  order: `pult <id> <first> <second> …`.
+- Params appear in **declared order**. How to pass each on the command line
+  follows from its kind, the same for `pult <id>` and `pult x <source> <id>`:
+  - `pick`, `input`, and `repeat` with `"arg": null` are positionals, in
+    declared order; the arg-less repeat is always last and takes every
+    remaining value (`pult <id> <pick> <input> <item> <item> …`);
+  - `flag` is the switch `--<name>`;
+  - `repeat` with a non-null `arg` is `--<name> <value>`, once per item.
+
+  `name` is what the command line uses; `arg` is the word the tool
+  receives, never something to pass to pult. Or skip argv entirely with
+  `--params-json` (below), keyed by `name`.
 - Param kinds: `pick` with `options` (static; CLI values are validated
   against it), `pick` with `source` (a shell-out; its stdout lines become
   options; `depends_on` lists params the source interpolates — supply those
-  first), and `input` (free text, `default` may be `null`). An input with
-  `"secret": true` must be rendered as a password field and never echoed,
-  logged, or persisted by tooling.
+  first), `input` (free text, `default` may be `null`), `flag` (a boolean;
+  `arg` is what it renders when set), and `repeat` (a list of `min` to `max`
+  items, `max` `null` meaning unbounded; with an `arg`, each item renders
+  after it). An input or repeat with `"secret": true` must be rendered as a
+  password field and never echoed, logged, or persisted by tooling.
+- **Kinds are open.** A later release may add a kind within schema 2. A
+  consumer that meets a `kind` it does not know cannot run that command
+  (it does not know how to pass the param), but should still list it and
+  can still run every other command. A new kind never takes a positional
+  slot, so the positions of the known kinds stay as described above.
 - `check` — the readiness probe (`null` = none declared); run it yourself or
   via `pult doctor` (`--json` for the machine-readable runner output — see
   below), don't assume pult ran it. `interactive` — the command needs a
@@ -478,7 +563,7 @@ Field notes:
   `status <name>` instead when the run inherited its `PULT_EVENTS` channel;
   see [Events protocol](#events-protocol--pult_events) below); `null` for a
   string-form `run:`, which has no steps to name.
-- `pult <id> <values…> --print` prints the composed script without running it —
+- `pult <id> <args…> --print` prints the composed script without running it —
   the natural dry-run step before an agent executes anything. It is fully
   side-effect-free: it does **not** prompt, run dynamic option sources, or
   require trust, so you can preview an untrusted command safely. Params you
@@ -487,12 +572,12 @@ Field notes:
 ## Machine-readable readiness — `pult doctor --json`
 
 Same trust gate and exit-code semantics as text-mode `pult doctor` (exit 1 if
-any declared check failed), but as a stable document for tooling instead of a
-printed table:
+any declared check failed, with `ok` still `true`: the report itself
+succeeded), but as a stable document for tooling instead of a printed table.
+Its `data`:
 
 ```json
 {
-  "schema": 1,
   "name": "demo",
   "manifest": "/repo/pult.yaml",
   "commands": [
@@ -505,6 +590,22 @@ printed table:
 `ready` and `exit_code` are `null` when the command declares no `check:` —
 there's nothing to run, not a failure.
 
+## Machine-readable runs — `pult runs list --json`, `pult runs tail --json`
+
+`runs list --json` has `data` `{ "runs": [ … ] }`, newest first: each run's
+`meta.json` record plus `crashed` (the run was left `running` by a process
+that is gone). In a record, `params` are strings: a flag is `"true"` or
+`"false"`, a repeat the JSON array text of its items, and a secret
+`"<redacted>"`.
+
+`runs tail <ID> --json` reads the run's events once and has `data`
+`{ "run_id": "…", "events": [ … ], "skipped": 0 }`: every complete event
+record in order, and the count of complete lines that were not a JSON
+object (a line still being written is left out, not counted). It cannot
+follow a live run, so `--json --follow` is a usage error. `runs tail <ID>
+--jsonl` writes the raw event lines instead, one record per line, and does
+combine with `--follow`.
+
 ## Machine-readable failures — the error document
 
 When `pult --list --json`, `pult doctor --json`, `pult runs list --json` or
@@ -516,7 +617,7 @@ Lonic tool:
 {
   "lonic_json": 1,
   "tool": "pult",
-  "schema": 1,
+  "schema": 2,
   "command": "list",
   "ok": false,
   "error": {
@@ -544,10 +645,10 @@ Lonic tool:
 - Classify by `error.code`, never by the exit status. Codes are stable within
   a `schema`; new ones may be added, so treat an unknown code as `generic`.
 - JSON mode is a bare `--json` argument before any `--`. Help and version
-  output stay plain text, and success documents keep their own shape (no
-  envelope header).
-- `runs tail --json` writes a document only when it fails before streaming its
-  first event line; a failure after that ends the stream with the prose line only.
+  output stay plain text.
+- `runs tail --jsonl` writes an error document only when it fails before
+  streaming its first event line; a failure after that ends the stream with the
+  prose line only.
 
 | Code | Exit | Meaning |
 |---|---|---|
@@ -561,19 +662,22 @@ Lonic tool:
 
 ## `--params-json` — param values without argv
 
-`pult <command> [values…] --params-json` reads the rest of a command's param
-values from **stdin**, as a flat JSON object of string values, instead of (or
-alongside) positional arguments — the channel the desktop app and scripts use
+`pult <command> [args…] --params-json` reads the rest of a command's param
+values from **stdin**, as a flat JSON object keyed by param name, instead of
+(or alongside) command-line arguments — the channel the desktop app and scripts use
 to avoid putting values on the command line:
 
 ```sh
 echo '{"token":"hunter2"}' | pult import --params-json
 ```
 
-Rules: stdin must be a JSON object whose values are all strings (anything
-else — invalid JSON, a non-object, a non-string value — is a load error);
+Rules: stdin must be a JSON object, and each value has its param's type: a
+string for a pick or an input, `true`/`false` for a flag, an array of
+strings for a repeat (invalid JSON or a non-object is an error; a value of
+the wrong type is a usage error, exit 2, naming the param and the type it
+needs);
 every key must be a param the invoked command declares (an unknown key names
-the valid ones, for typo safety); a param given both positionally and via
+the valid ones, for typo safety); a param given both on the command line and via
 `--params-json` is a conflict, not a silent override. Params in neither
 source are still prompted for as usual — and since stdin is now claimed by
 `--params-json`, an interactive terminal on stdin is rejected up front rather

@@ -808,8 +808,10 @@ fn check_binding(params: &IndexMap<String, ParamDef>) -> Result<()> {
             );
         }
     }
-    let positional: Vec<(&String, &ParamDef)> =
-        params.iter().filter(|(_, def)| def.is_positional()).collect();
+    let positional: Vec<(&String, &ParamDef)> = params
+        .iter()
+        .filter(|(_, def)| def.is_positional())
+        .collect();
     let mut trailing = positional.iter().filter(|(_, def)| def.repeat.is_some());
     if let Some((first, _)) = trailing.next() {
         if let Some((second, _)) = trailing.next() {

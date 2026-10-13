@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
 
-use crate::value::{self, Values};
 use crate::interp;
 use crate::resolver::{ResolvedCommand, ResolvedEntry, ResolvedRun, ResolvedSeg};
+use crate::value::{self, Values};
 
 /// Compile a step-list run into one bash script: named steps become shell
 /// functions, the run list becomes the calls, declared outputs get runtime

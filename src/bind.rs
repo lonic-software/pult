@@ -42,7 +42,9 @@ pub fn args(cmd: &ResolvedCommand) -> Vec<Arg> {
                     arg.help("secret; prompted without echo if omitted")
                 }
                 ParamKind::Input(_) => arg.help("free text; prompted if omitted"),
-                ParamKind::Flag(_) => arg.action(ArgAction::SetTrue).help("switch; off if omitted"),
+                ParamKind::Flag(_) => arg
+                    .action(ArgAction::SetTrue)
+                    .help("switch; off if omitted"),
                 ParamKind::Repeat(repeat) => {
                     let arg = arg.action(ArgAction::Append).help(repeat_help(repeat));
                     if def.is_positional() {
@@ -167,7 +169,9 @@ pub fn merge_params_json(
             )));
         };
         if provided.contains_key(key) {
-            bail!("param `{key}` was given both on the command line and via --params-json — pick one");
+            bail!(
+                "param `{key}` was given both on the command line and via --params-json — pick one"
+            );
         }
         provided.insert(key.clone(), typed);
     }
@@ -301,7 +305,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(provided["dry"], Value::Flag(true));
-        assert_eq!(provided["only"], Value::List(vec!["a".into(), String::new()]));
+        assert_eq!(
+            provided["only"],
+            Value::List(vec!["a".into(), String::new()])
+        );
         assert_eq!(provided["env"], Value::Text("dev".into()));
     }
 
