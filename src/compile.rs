@@ -493,10 +493,11 @@ mod tests {
     #[test]
     fn a_truncated_label_has_no_trailing_space() {
         let entry = ResolvedEntry::Pipe(vec![
-            ResolvedSeg::Inline("a".repeat(38)),
+            ResolvedSeg::Inline("a".repeat(39)),
             ResolvedSeg::Inline("sort".into()),
         ]);
-        assert_eq!(step_label(1, &entry), format!("{} |", "a".repeat(38)));
+        // The cut at 40 lands on the space before ` | sort`.
+        assert_eq!(step_label(1, &entry), "a".repeat(39));
     }
 
     /// The compiled guard uses the fallback, so an entry with nothing to name
