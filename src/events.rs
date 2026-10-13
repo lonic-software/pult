@@ -116,15 +116,35 @@ pub fn is_valid_events_fd(s: &str) -> bool {
         && s.parse::<u32>().is_ok_and(|n| n <= 4096)
 }
 
-/// Whether this process inherited a `PULT_EVENTS` channel that someone
-/// upstream owns — a valid value already in pult's own environment. Such a
-/// channel is passed through to the child untouched, and pult injects no
-/// `step` lines onto it: only a channel's owner emits `step`, and a parent
-/// that set the variable is that owner. Decided before compiling, from the
-/// same rule the runner applies when it later chooses passthrough, so the
-/// two cannot disagree.
-pub fn inherited_channel() -> bool {
-    std::env::var_os("PULT_EVENTS").is_some_and(|v| v.to_str().is_some_and(is_valid_events_fd))
+/// What pult found in its own environment's `PULT_EVENTS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InheritedChannel {
+    /// Unset: pult may own a channel itself.
+    Absent,
+    /// A valid fd number: someone upstream owns the channel. It is passed
+    /// through to the child untouched, and pult injects no `step` lines onto
+    /// it — only a channel's owner emits `step`.
+    Owned,
+    /// Set, but not a bare fd number. The runner strips it from the child's
+    /// environment and warns; pult then behaves as if it were unset.
+    Invalid(String),
+}
+
+/// Read `PULT_EVENTS` once per run. `exec.rs` asks this before compiling and
+/// hands the answer to the runner, so the choice of step guards and the
+/// choice of passthrough come from one reading.
+pub fn inherited_channel() -> InheritedChannel {
+    match std::env::var_os("PULT_EVENTS") {
+        None => InheritedChannel::Absent,
+        Some(val) => {
+            let val = val.to_string_lossy().into_owned();
+            if is_valid_events_fd(&val) {
+                InheritedChannel::Owned
+            } else {
+                InheritedChannel::Invalid(val)
+            }
+        }
+    }
 }
 
 /// A `progress` percentage mapped onto the whole run: the band of the step
@@ -135,8 +155,11 @@ pub fn inherited_channel() -> bool {
 /// draws.
 pub fn run_pct(step: Option<(u32, u32)>, pct: u8) -> u8 {
     match step {
-        Some((k, n)) => ((u64::from(k - 1) * 100 + u64::from(pct)) / u64::from(n)) as u8,
-        None => pct,
+        // `parse_step` admits only 1 <= k <= n; anything else is one band.
+        Some((k, n)) if k >= 1 && k <= n => {
+            ((u64::from(k - 1) * 100 + u64::from(pct)) / u64::from(n)) as u8
+        }
+        _ => pct,
     }
 }
 
@@ -405,6 +428,10 @@ mod tests {
         assert_eq!(run_pct(Some((1, 4)), 100), 25);
         assert_eq!(run_pct(Some((4, 4)), 100), 100);
         assert_eq!(run_pct(Some((3, 4)), 0), 50);
+        // Never panics on a step `parse` would have refused.
+        assert_eq!(run_pct(Some((0, 4)), 42), 42);
+        assert_eq!(run_pct(Some((1, 0)), 42), 42);
+        assert_eq!(run_pct(Some((5, 4)), 42), 42);
     }
 
     #[test]
@@ -462,5 +489,37 @@ mod tests {
         );
         assert!(wrote);
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn accepts_plain_fd_numbers() {
+        assert!(is_valid_events_fd("3"));
+        assert!(is_valid_events_fd("0"));
+        assert!(is_valid_events_fd("4096"));
+    }
+
+    #[test]
+    fn rejects_a_file_path() {
+        assert!(!is_valid_events_fd("events.log"));
+        assert!(!is_valid_events_fd("/tmp/events.log"));
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        assert!(!is_valid_events_fd(""));
+    }
+
+    #[test]
+    fn rejects_signs_and_whitespace() {
+        assert!(!is_valid_events_fd("+3"));
+        assert!(!is_valid_events_fd("-1"));
+        assert!(!is_valid_events_fd(" 3"));
+        assert!(!is_valid_events_fd("3 "));
+    }
+
+    #[test]
+    fn rejects_a_number_too_large_to_be_an_fd() {
+        assert!(!is_valid_events_fd("4097"));
+        assert!(!is_valid_events_fd("99999999999999999999"));
     }
 }

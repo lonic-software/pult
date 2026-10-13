@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::Context;
 use anyhow::Result;
 
-use crate::events::Event;
+use crate::events::{Event, InheritedChannel};
 use crate::journal::Journal;
 use crate::mask::Masker;
 
@@ -50,34 +50,69 @@ pub enum Journaling {
 ///
 /// `display` is the line shown in the banner and any error — the caller passes
 /// a secret-redacted rendering, so `cmdline` itself is never written anywhere.
-pub fn run_sh(cmdline: &str, display: &str, dir: &Path, journaling: Journaling) -> Result<i32> {
+pub fn run_sh(
+    cmdline: &str,
+    display: &str,
+    dir: &Path,
+    journaling: Journaling,
+    channel: InheritedChannel,
+) -> Result<i32> {
     eprintln!("└  running: {display}");
     execute(
         crate::shell::sh()?.arg("-c").arg(cmdline).current_dir(dir),
         display,
         journaling,
+        channel,
     )
 }
 
 /// Run a compiled step script via bash (the composed scripts rely on
 /// `set -o pipefail`). Same journaling contract as [`run_sh`].
-pub fn run_bash(script: &str, label: &str, dir: &Path, journaling: Journaling) -> Result<i32> {
+pub fn run_bash(
+    script: &str,
+    label: &str,
+    dir: &Path,
+    journaling: Journaling,
+    channel: InheritedChannel,
+) -> Result<i32> {
     eprintln!("└  running: {label} (compiled steps — `--print` shows the script)");
     execute(
         crate::shell::bash()?.arg("-c").arg(script).current_dir(dir),
         label,
         journaling,
+        channel,
     )
 }
 
-fn execute(command: &mut Command, what: &str, journaling: Journaling) -> Result<i32> {
+/// `channel` is the caller's one reading of `PULT_EVENTS` (the same one it
+/// compiled step guards from): an inherited channel is passed through, and an
+/// invalid value is stripped here on every target, before any path runs.
+fn execute(
+    command: &mut Command,
+    what: &str,
+    journaling: Journaling,
+    channel: InheritedChannel,
+) -> Result<i32> {
+    // Only honor a value that could plausibly be an fd: bash's `>&word`
+    // redirects to a *file* named `word` when `word` isn't a bare number, so
+    // a forwarded `PULT_EVENTS=events.log` would make every injected `step`
+    // guard truncate a file by that name.
+    let inherited = match channel {
+        InheritedChannel::Owned => true,
+        InheritedChannel::Absent => false,
+        InheritedChannel::Invalid(val) => {
+            eprintln!("pult: ignoring invalid PULT_EVENTS={val}");
+            command.env_remove("PULT_EVENTS");
+            false
+        }
+    };
     match journaling {
-        Journaling::Off => execute_inherited(command, what),
+        Journaling::Off => execute_inherited(command, what, inherited),
         Journaling::MetaOnly(journal) => {
             // Journaling must never change how the run behaves, and must
             // record spawn-level failure (exit code null) as well as a
             // normal exit before the error propagates.
-            match execute_inherited(command, what) {
+            match execute_inherited(command, what, inherited) {
                 Ok(code) => {
                     journal.finish(Some(code), false);
                     Ok(code)
@@ -89,7 +124,7 @@ fn execute(command: &mut Command, what: &str, journaling: Journaling) -> Result<
             }
         }
         Journaling::Full(journal, masker) => {
-            match journaled::execute(command, what, &journal, &masker) {
+            match journaled::execute(command, what, &journal, &masker, inherited) {
                 Ok((code, stopped)) => {
                     journal.finish(Some(code), stopped);
                     Ok(code)
@@ -106,12 +141,12 @@ fn execute(command: &mut Command, what: &str, journaling: Journaling) -> Result<
 /// The pre-journal execution path, unchanged: inherited stdio, and (unix)
 /// a `PULT_EVENTS` transport only when stderr is a terminal.
 #[cfg(unix)]
-fn execute_inherited(command: &mut Command, what: &str) -> Result<i32> {
-    events_unix::execute(command, what)
+fn execute_inherited(command: &mut Command, what: &str, inherited: bool) -> Result<i32> {
+    events_unix::execute(command, what, inherited)
 }
 
 #[cfg(not(unix))]
-fn execute_inherited(command: &mut Command, what: &str) -> Result<i32> {
+fn execute_inherited(command: &mut Command, what: &str, _inherited: bool) -> Result<i32> {
     let status = command
         .status()
         .with_context(|| format!("failed to run `{what}`"))?;
@@ -139,6 +174,7 @@ mod journaled {
         what: &str,
         journal: &Journal,
         masker: &Masker,
+        inherited: bool,
     ) -> Result<(i32, bool)> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -152,8 +188,12 @@ mod journaled {
         #[cfg(unix)]
         super::events_unix::install_stop_flag();
         #[cfg(unix)]
-        let events =
-            super::events_unix::claim_events_channel(command, journal.clone(), masker.clone());
+        let events = super::events_unix::claim_events_channel(
+            command,
+            inherited,
+            journal.clone(),
+            masker.clone(),
+        );
 
         let spawn_result = command.spawn();
         #[cfg(unix)]
@@ -594,7 +634,7 @@ mod journaled {
                 .arg("-c")
                 .arg(r#"echo "step 1/1 done" >&$PULT_EVENTS"#);
             let masker = Masker::new(std::iter::empty::<String>());
-            let (code, stopped) = execute(&mut command, "test", &journal, &masker).unwrap();
+            let (code, stopped) = execute(&mut command, "test", &journal, &masker, false).unwrap();
             assert_eq!(code, 0);
             assert!(!stopped);
 
@@ -686,28 +726,15 @@ mod events_unix {
 
     /// The legacy (unjournaled) execution path, unchanged in behavior:
     /// inherited stdio, and an events transport chosen from three cases.
-    pub(super) fn execute(command: &mut Command, what: &str) -> Result<i32> {
+    pub(super) fn execute(command: &mut Command, what: &str, inherited: bool) -> Result<i32> {
         // 1. Passthrough: a parent (e.g. the desktop app, pre-journal) owns
         // the channel — its env var and fd inherit through on their own.
         // pult must not create its own pipe or translate anything, and
-        // `exec.rs` already compiled a step list without its `step` guards
-        // (`events::inherited_channel`, the same validity rule as here).
-        //
-        // But only honor a value that could plausibly be an fd: bash's
-        // `>&word` redirects to a *file* named `word` when `word` isn't a
-        // bare number, so an inherited `PULT_EVENTS=events.log` would make
-        // every injected `step` guard truncate a file by that name instead
-        // of writing to a channel. If the value doesn't parse as an fd
-        // number, strip it before falling through so the child never sees
-        // the garbage (the own-channel path below sets its own numeric
-        // value, which is always valid).
-        if let Some(val) = std::env::var_os("PULT_EVENTS") {
-            let val = val.to_string_lossy().into_owned();
-            if events::is_valid_events_fd(&val) {
-                return run_plain(command, what);
-            }
-            eprintln!("pult: ignoring invalid PULT_EVENTS={val}");
-            command.env_remove("PULT_EVENTS");
+        // `exec.rs` already compiled a step list without its `step` guards,
+        // from the same reading of `PULT_EVENTS` (`super::execute` stripped an
+        // invalid value before reaching here).
+        if inherited {
+            return run_plain(command, what);
         }
 
         // 3. Neither: non-tty (CI, pipes) — zero behavior change.
@@ -775,16 +802,12 @@ mod events_unix {
     /// for this run — the spec's documented passthrough tradeoff.
     pub(super) fn claim_events_channel(
         command: &mut Command,
+        inherited: bool,
         journal: Journal,
         masker: Masker,
     ) -> EventsClaim {
-        if let Some(val) = std::env::var_os("PULT_EVENTS") {
-            let val = val.to_string_lossy().into_owned();
-            if events::is_valid_events_fd(&val) {
-                return EventsClaim::Passthrough;
-            }
-            eprintln!("pult: ignoring invalid PULT_EVENTS={val}");
-            command.env_remove("PULT_EVENTS");
+        if inherited {
+            return EventsClaim::Passthrough;
         }
         let Some(channel) = wire_up_own_fd(command) else {
             return EventsClaim::None;
@@ -1084,42 +1107,5 @@ mod mask_event_tests {
                 text: None
             }
         );
-    }
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use crate::events::is_valid_events_fd;
-
-    #[test]
-    fn accepts_plain_fd_numbers() {
-        assert!(is_valid_events_fd("3"));
-        assert!(is_valid_events_fd("0"));
-        assert!(is_valid_events_fd("4096"));
-    }
-
-    #[test]
-    fn rejects_a_file_path() {
-        assert!(!is_valid_events_fd("events.log"));
-        assert!(!is_valid_events_fd("/tmp/events.log"));
-    }
-
-    #[test]
-    fn rejects_empty_string() {
-        assert!(!is_valid_events_fd(""));
-    }
-
-    #[test]
-    fn rejects_signs_and_whitespace() {
-        assert!(!is_valid_events_fd("+3"));
-        assert!(!is_valid_events_fd("-1"));
-        assert!(!is_valid_events_fd(" 3"));
-        assert!(!is_valid_events_fd("3 "));
-    }
-
-    #[test]
-    fn rejects_a_number_too_large_to_be_an_fd() {
-        assert!(!is_valid_events_fd("4097"));
-        assert!(!is_valid_events_fd("99999999999999999999"));
     }
 }

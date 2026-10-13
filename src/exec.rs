@@ -5,13 +5,14 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
+use crate::events::{self, InheritedChannel};
 use crate::journal;
 use crate::label;
 use crate::manifest::{ParamDef, ParamKind};
 use crate::mask::{self, Masker};
 use crate::resolver::{Resolved, ResolvedCommand, ResolvedRun};
 use crate::runner::Journaling;
-use crate::{compile, events, interp, options, prompt, runner, shell, trust};
+use crate::{compile, interp, options, prompt, runner, shell, trust};
 
 /// Execute one command: fill its params (from provided values or interactive
 /// prompts, in declared order — which is what makes dependent `from:` sources
@@ -141,6 +142,7 @@ pub fn execute(
         warn_unmaskable(&unmaskable);
     }
 
+    let channel = events::inherited_channel();
     match &cmd.run {
         ResolvedRun::Script(template) => {
             // The `running:` banner (and any error message) shows a line
@@ -164,16 +166,18 @@ pub fn execute(
                 &display,
                 &resolved.run_dir,
                 journaling,
+                channel,
             )
         }
         // A channel inherited from upstream belongs to whoever set it, and
         // only a channel's owner emits `step`: inject the guards only when
         // pult may own the channel itself.
         ResolvedRun::Steps(_) => runner::run_bash(
-            &compile::compile(cmd, &values, !events::inherited_channel())?,
+            &compile::compile(cmd, &values, channel != InheritedChannel::Owned)?,
             &cmd.id,
             &resolved.run_dir,
             journaling,
+            channel,
         ),
     }
 }

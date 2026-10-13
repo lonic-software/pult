@@ -21,13 +21,22 @@ commands:
       - "echo three"
 "#;
 
-fn run_pult(repo: &Path, state: &Path, trust: &Path, events_file: Option<&Path>) -> Output {
+/// How the run's `PULT_EVENTS` is set up by whoever starts pult.
+enum Upstream<'a> {
+    /// Unset: pult may own the channel.
+    None,
+    /// fd 5, opened onto this file by a parent shell — the shape of a parent
+    /// that owns `PULT_EVENTS` and reads it itself.
+    Channel(&'a Path),
+    /// A value that is not an fd number.
+    Invalid(&'a str),
+}
+
+fn run_pult(repo: &Path, state: &Path, trust: &Path, upstream: Upstream) -> Output {
     std::fs::write(repo.join("pult.yaml"), MANIFEST).unwrap();
     let pult = env!("CARGO_BIN_EXE_pult");
-    // An inherited channel is fd 5 opened onto a file by a parent shell —
-    // the shape of a parent that owns `PULT_EVENTS` and reads it itself.
-    let mut command = match events_file {
-        Some(file) => {
+    let mut command = match upstream {
+        Upstream::Channel(file) => {
             let mut c = Command::new("sh");
             c.args(["-c", r#"exec 5>"$0"; exec "$@""#])
                 .arg(file)
@@ -35,7 +44,12 @@ fn run_pult(repo: &Path, state: &Path, trust: &Path, events_file: Option<&Path>)
                 .env("PULT_EVENTS", "5");
             c
         }
-        None => {
+        Upstream::Invalid(value) => {
+            let mut c = Command::new(pult);
+            c.env("PULT_EVENTS", value);
+            c
+        }
+        Upstream::None => {
             let mut c = Command::new(pult);
             c.env_remove("PULT_EVENTS");
             c
@@ -45,6 +59,9 @@ fn run_pult(repo: &Path, state: &Path, trust: &Path, events_file: Option<&Path>)
         .current_dir(repo)
         .env("PULT_STATE_DIR", state)
         .env("PULT_TRUST_STORE", trust)
+        // Journaling is on by default; an exported `PULT_JOURNAL=0` must not
+        // turn these tests into a missing-journal failure.
+        .env_remove("PULT_JOURNAL")
         .args(["--trust", "--run-id", "events-run", "build"])
         .output()
         .expect("failed to run the pult binary");
@@ -94,7 +111,7 @@ fn an_inherited_channel_gets_no_step_lines_from_pult() {
         repo.path(),
         state.path(),
         &trust.path().join("trust.json"),
-        Some(&events_file),
+        Upstream::Channel(&events_file),
     );
 
     // The child's own line arrived, so the channel was live and inherited.
@@ -120,7 +137,7 @@ fn an_owned_channel_journals_steps_and_banded_progress() {
         repo.path(),
         state.path(),
         &trust.path().join("trust.json"),
-        None,
+        Upstream::None,
     );
 
     let records = journal_records(state.path());
@@ -136,4 +153,36 @@ fn an_owned_channel_journals_steps_and_banded_progress() {
     assert_eq!(progress.len(), 1, "records: {records:?}");
     assert_eq!(progress[0]["pct"], 60);
     assert_eq!(progress[0]["run_pct"], 53);
+}
+
+/// An invalid inherited value is not someone else's channel: pult warns,
+/// strips it, owns the channel itself and injects its steps, all from one
+/// reading of `PULT_EVENTS`. Goes red if the compile-time choice treats any
+/// set value as inherited (no `step` records, while the runner still claims
+/// the channel). The strip itself is pinned by the warning only: on a
+/// journaled run pult's own channel replaces the value anyway.
+#[test]
+fn an_invalid_inherited_value_is_stripped_and_pult_owns_the_channel() {
+    let state = tempfile::tempdir().unwrap();
+    let trust = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+
+    let output = run_pult(
+        repo.path(),
+        state.path(),
+        &trust.path().join("trust.json"),
+        Upstream::Invalid("events.log"),
+    );
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("pult: ignoring invalid PULT_EVENTS=events.log"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = journal_records(state.path());
+    let steps = records.iter().filter(|r| r["kind"] == "step").count();
+    assert_eq!(steps, 3, "records: {records:?}");
+    let progress = records.iter().find(|r| r["kind"] == "progress").unwrap();
+    assert_eq!(progress["run_pct"], 53);
 }

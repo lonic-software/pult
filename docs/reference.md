@@ -621,8 +621,9 @@ guarded `step k/n <name>` emission injected before each top-level entry at
 compile time — structure a command as steps and you get milestones for
 free, no manifest changes required. `--print` shows the script without these
 guards (they'd clutter the dry-run output you're meant to read); a live run
-compiles them in, unless it inherited the channel (see passthrough below). The same labels are exposed as `"steps"` in `--list --json`
-(below), so a surface can render milestones without parsing the script.
+compiles them in, unless it inherited the channel (see passthrough below).
+The same labels are exposed as `"steps"` in `--list --json` (below), so a
+surface can render milestones without parsing the script.
 
 **`PULT_EVENTS` passthrough**: if `PULT_EVENTS` is already set in pult's own
 environment when it runs a command, pult does nothing — no pipe, no
@@ -630,12 +631,17 @@ translation, and no `step` lines of its own: a step list is compiled without
 its guards, because only a channel's owner emits `step`. The var and its fd
 inherit through to the child as-is. This is for a parent process (another
 pult, or any tool that reads events) that owns the channel itself and wants
-to render events its own way. When nothing upstream claimed one, pult
-creates its own channel for a journaled run (the journal records events
-whether or not anyone is watching) or when stderr is a terminal, and does
-the OSC translation above only on a terminal. An unjournaled run with no
-terminal (`PULT_JOURNAL=0` in CI, say) gets no channel: `PULT_EVENTS` stays
-unset.
+to render events its own way. The owner then sees the command's `progress`
+and `status` lines but no step framing from this pult: each step's tool
+reports 0–100 of its own work, so the values restart at every step, and the
+owner draws them inside whatever band it gave this whole run.
+
+When nothing upstream claimed one, pult creates its own channel (unix only)
+for a run whose output it journals — the journal records events whether or
+not anyone is watching — or when stderr is a terminal, and does the OSC
+translation above only on a terminal. Any other run (an `interactive`
+command without a terminal, `PULT_JOURNAL=0` in CI) gets no channel:
+`PULT_EVENTS` stays unset.
 
 An inherited `PULT_EVENTS` is only honored if it's a bare fd number (plain
 decimal digits, no sign, no surrounding whitespace) — bash's `>&word`
