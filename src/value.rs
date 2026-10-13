@@ -42,8 +42,15 @@ impl Value {
 /// Each param's value rendered as the shell text its `{name}` placeholder
 /// becomes, which `interp` inserts verbatim. Only [`words`] builds one, so a
 /// raw value cannot reach a script unquoted.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Words(IndexMap<String, String>);
+
+/// Names only: the real map holds secrets in clear.
+impl std::fmt::Debug for Words {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.keys()).finish()
+    }
+}
 
 impl Words {
     pub fn get(&self, name: &str) -> Option<&str> {

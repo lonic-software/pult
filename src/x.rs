@@ -19,27 +19,8 @@ use crate::{exec, flow};
 /// "unseen code". Intercepted before discovery (like `init`/`update`) because
 /// the whole point is running where no local manifest exists yet.
 pub fn run_cli(rest: &[String]) -> Result<i32> {
-    let (head, tail) = split_at_command(rest);
-    let cli = clap::Command::new("pult x")
-        .bin_name("pult x")
-        .about("Run a command from a module source without adding it to a manifest")
-        .arg(Arg::new("source").required(true).value_name("SOURCE").help(
-            "./path, host.tld/org/repo[//sub][@pin], or git::<url>[//sub][@pin] — \
-                     a git source without a pin resolves to its latest version tag",
-        ))
-        .arg(
-            Arg::new("command")
-                .value_name("COMMAND")
-                .help("Which of the module's commands to run; omitted opens the guided menu"),
-        )
-        // Only documents the tail: `split_at_command` keeps it out of this
-        // parse, and `bind_tail` binds it once the command is resolved.
-        .arg(Arg::new("args").value_name("ARGS").num_args(0..).help(
-            "The command's arguments, exactly as `pult <command>` takes them; \
-                     `--help` here is the command's help",
-        ))
-        .arg(var_arg())
-        .args(own_args());
+    let cli = phase_one();
+    let (head, tail) = split_at_command(&cli, rest);
     let matches = crate::machine::get_matches(
         cli,
         std::iter::once("pult x".to_string()).chain(head.iter().cloned()),
@@ -69,6 +50,30 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
     )
 }
 
+/// Phase one's parser: `pult x`'s own arguments up to COMMAND.
+fn phase_one() -> clap::Command {
+    clap::Command::new("pult x")
+        .bin_name("pult x")
+        .about("Run a command from a module source without adding it to a manifest")
+        .arg(Arg::new("source").required(true).value_name("SOURCE").help(
+            "./path, host.tld/org/repo[//sub][@pin], or git::<url>[//sub][@pin] — \
+                     a git source without a pin resolves to its latest version tag",
+        ))
+        .arg(
+            Arg::new("command")
+                .value_name("COMMAND")
+                .help("Which of the module's commands to run; omitted opens the guided menu"),
+        )
+        // Only documents the tail: `split_at_command` keeps it out of this
+        // parse, and `bind_tail` binds it once the command is resolved.
+        .arg(Arg::new("args").value_name("ARGS").num_args(0..).help(
+            "The command's arguments, exactly as `pult <command>` takes them; \
+                     `--help` here is the command's help",
+        ))
+        .arg(var_arg())
+        .args(own_args())
+}
+
 fn var_arg() -> Arg {
     Arg::new("var")
         .long("var")
@@ -78,11 +83,21 @@ fn var_arg() -> Arg {
 }
 
 /// Split `pult x`'s argv after its COMMAND, the second positional. Only what
-/// comes before goes through phase one; the rest stays raw, `--` and all, for
-/// `bind_tail` to bind exactly as `pult <command>` would. Phase one's options
-/// are `--var NAME=VALUE`, `--trust[=HASH]`, `--print` and `--help`; only
-/// `--var` takes a separate value.
-fn split_at_command(rest: &[String]) -> (&[String], &[String]) {
+/// comes before goes through phase one (`cli`); the rest stays raw, `--` and
+/// all, for `bind_tail` to bind exactly as `pult <command>` would. Which of
+/// `cli`'s options take a separate value is read from `cli` itself.
+fn split_at_command<'a>(cli: &clap::Command, rest: &'a [String]) -> (&'a [String], &'a [String]) {
+    let takes_value = |arg: &str| {
+        cli.get_arguments().any(|a| {
+            !a.is_positional()
+                && !a.is_require_equals_set()
+                && a.get_action().takes_values()
+                && (a
+                    .get_long()
+                    .is_some_and(|l| arg.strip_prefix("--") == Some(l))
+                    || a.get_short().is_some_and(|c| arg == format!("-{c}")))
+        })
+    };
     let mut positionals = 0;
     let mut only_positionals = false;
     let mut i = 0;
@@ -95,7 +110,7 @@ fn split_at_command(rest: &[String]) -> (&[String], &[String]) {
             }
         } else if arg == "--" {
             only_positionals = true;
-        } else if arg == "--var" {
+        } else if takes_value(arg) {
             i += 1;
         }
         i += 1;
@@ -321,6 +336,27 @@ fn short(sha: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn split_at_command_cuts_after_the_second_positional() {
+        let cases: &[(&[&str], usize)] = &[
+            (&["./m", "go", "a", "--var", "x=y"], 2),
+            (&["--var", "x=y", "./m", "go", "a"], 4),
+            (&["--var=x=y", "./m", "go", "a"], 3),
+            (&["./m", "--trust", "--print", "go", "--", "-a"], 4),
+            (&["--", "./m", "go", "a"], 3),
+            (&["./m", "--", "go", "--help"], 3),
+            (&["./m", "-", "a"], 2),
+            (&["./m", "--var"], 2),
+            (&["./m"], 1),
+        ];
+        let cli = super::phase_one();
+        for (argv, cut) in cases {
+            let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+            let (head, _) = super::split_at_command(&cli, &argv);
+            assert_eq!(head.len(), *cut, "{argv:?}");
+        }
+    }
+
     use super::*;
 
     /// A local directory module with one no-param command and one that takes a
