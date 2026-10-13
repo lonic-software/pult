@@ -44,12 +44,7 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
                 .action(ArgAction::Append)
                 .help("Bind a module var (repeatable) — for modules that declare `vars:`"),
         )
-        .arg(
-            Arg::new("trust")
-                .long("trust")
-                .action(ArgAction::SetTrue)
-                .help("Trust the module without prompting (for CI)"),
-        )
+        .arg(crate::trust::arg("the module"))
         .arg(
             Arg::new("print")
                 .long("print")
@@ -68,7 +63,7 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
         .map(|vs| vs.cloned().collect())
         .unwrap_or_default();
     let vars = parse_vars(&matches)?;
-    let assume_trusted = matches.get_flag("trust");
+    let grant = crate::trust::Grant::from_matches(&matches);
     let print = matches.get_flag("print");
 
     // Interactivity is decided once, here, and threaded down — the core never
@@ -82,7 +77,7 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
         &values,
         &vars,
         &cwd,
-        assume_trusted,
+        &grant,
         print,
         interactive,
         None,
@@ -115,7 +110,7 @@ pub fn run(
     values: &[String],
     vars: &[(String, String)],
     cwd: &Path,
-    assume_trusted: bool,
+    grant: &crate::trust::Grant,
     print: bool,
     interactive: bool,
     cache_root: Option<&Path>,
@@ -157,9 +152,9 @@ pub fn run(
                 let (name, _) = cmd.params.get_index(i).expect("bounds checked above");
                 provided.insert(name.clone(), value.clone());
             }
-            exec::execute(&resolved, cmd, &provided, assume_trusted, print, None)
+            exec::execute(&resolved, cmd, &provided, grant, print, None)
         }
-        None if interactive => flow::run(&resolved, assume_trusted, print, None),
+        None if interactive => flow::run(&resolved, grant, print, None),
         None => {
             eprintln!("specify a command:  pult x {source} <command> [values…]");
             eprintln!("commands:");
@@ -311,7 +306,7 @@ mod tests {
             &[],
             &[],
             dir.path(),
-            true,
+            &crate::trust::Grant::Current,
             false,
             false,
             None,
@@ -333,7 +328,7 @@ mod tests {
             &["surplus".to_string()],
             &[],
             dir.path(),
-            true,
+            &crate::trust::Grant::Current,
             false,
             false,
             None,

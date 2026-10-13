@@ -133,7 +133,7 @@ fn run(args: &[String]) -> Result<i32> {
     }
 
     let matches = machine::get_matches(build_cli(&resolved, scope), std::env::args_os());
-    let assume_trusted = matches.get_flag("trust");
+    let grant = trust::Grant::from_matches(&matches);
     let print = matches.get_flag("print");
     let params_json = matches.get_flag("params-json");
 
@@ -154,12 +154,12 @@ fn run(args: &[String]) -> Result<i32> {
 
     // `--trust` is an explicit act — record it even when this invocation
     // doesn't execute anything (e.g. `pult --trust --list`).
-    if assume_trusted {
+    if grant != trust::Grant::Ask {
         trust::ensure_trusted(
             &resolved.path,
             &resolved.trust_hash,
             &resolved.include_summary,
-            true,
+            &grant,
             None,
         )?;
     }
@@ -181,7 +181,7 @@ fn run(args: &[String]) -> Result<i32> {
     validate_run_id_arg(run_id)?;
 
     match matches.subcommand() {
-        Some(("doctor", sub)) => doctor::run(&resolved, assume_trusted, sub.get_flag("json")),
+        Some(("doctor", sub)) => doctor::run(&resolved, &grant, sub.get_flag("json")),
         Some(("runs", sub)) => runs::run_cli(&resolved, sub),
         Some(("includes", sub)) => match sub.subcommand() {
             Some(("verify", _)) => verify::run(&resolved),
@@ -211,9 +211,9 @@ fn run(args: &[String]) -> Result<i32> {
                     .context("failed to read stdin for --params-json")?;
                 merge_stdin_params(&raw, &cmd.params, &mut provided)?;
             }
-            exec::execute(&resolved, cmd, &provided, assume_trusted, print, run_id)
+            exec::execute(&resolved, cmd, &provided, &grant, print, run_id)
         }
-        None => flow::run(&resolved, assume_trusted, print, run_id),
+        None => flow::run(&resolved, &grant, print, run_id),
     }
 }
 
@@ -364,13 +364,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                 .action(ArgAction::SetTrue)
                 .help("With --list: machine-readable JSON (stable schema, for tooling/agents)"),
         )
-        .arg(
-            Arg::new("trust")
-                .long("trust")
-                .global(true)
-                .action(ArgAction::SetTrue)
-                .help("Trust this repo's manifest without prompting (for CI)"),
-        )
+        .arg(trust::arg("this repo's manifest").global(true))
         .arg(
             Arg::new("print")
                 .long("print")
@@ -645,6 +639,7 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
         "run_dir": resolved.run_dir,
         "scope": match scope { Scope::Repo => "repo", Scope::User => "user" },
         "trusted": trusted,
+        "trust_hash": resolved.trust_hash,
         "includes": includes,
         "commands": commands,
     })

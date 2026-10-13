@@ -32,7 +32,7 @@ pub fn execute(
     resolved: &Resolved,
     cmd: &ResolvedCommand,
     provided: &HashMap<String, String>,
-    assume_trusted: bool,
+    grant: &crate::trust::Grant,
     print: bool,
     run_id: Option<&str>,
 ) -> Result<i32> {
@@ -54,7 +54,7 @@ pub fn execute(
         &resolved.path,
         &resolved.trust_hash,
         &resolved.include_summary,
-        assume_trusted,
+        grant,
         about_to_run.as_deref(),
     )?;
 
@@ -523,7 +523,7 @@ mod tests {
             &resolved,
             &resolved.commands[0],
             &HashMap::new(),
-            false,
+            &crate::trust::Grant::Ask,
             true,
             None,
         )

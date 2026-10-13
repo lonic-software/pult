@@ -104,7 +104,8 @@ directory, and — because you're trusting a single ad-hoc source to run one
 command — the trust prompt shows you **the exact command it's about to run**:
 
 ```
-Trust the manifest github.com/some-org/forklift@v1.2.0?
+First contact: the manifest github.com/some-org/forklift@v1.2.0 is not trusted yet.
+  Trust hash: 7f3c1e0a9b2d4c6e8f0a1b3c5d7e9f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e
   About to run:
     …/forklift/bin/install full
  Commands in these files will be executed. Trust? [y/N]
@@ -126,7 +127,8 @@ changes (the yaml, or any file a local module directory ships, executables
 included) — `pult` shows you what resolved and asks once:
 
 ```
-Trust the manifest /repo/pult.yaml?
+First contact: the manifest /repo/pult.yaml is not trusted yet.
+  Trust hash: 7f3c1e0a9b2d4c6e8f0a1b3c5d7e9f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e
   It includes:
     · github.com/opskit/aws-common@v1.4.2 (commit 8a6e6fd4a4)
  Commands in these files will be executed. Trust? [y/N]
@@ -138,9 +140,15 @@ than any single command. (`pult x`, which trusts a single ad-hoc source, is the
 exception: there the prompt also shows the exact command about to run — see
 below.) Answers are remembered per file per user (nothing is stored in the
 repo). In
-non-interactive contexts (CI), an untrusted manifest is refused; pass
-`--trust` to accept explicitly — it records trust even on a non-executing
-invocation like `pult --trust --list`.
+non-interactive contexts (CI), an untrusted manifest is refused, and the refusal
+names its trust hash — the same hash the prompt shows. Pass `--trust=<hash>` to
+accept the manifest at exactly that hash; it records trust even on a
+non-executing invocation like `pult --trust=<hash> --list`, and refuses if the
+manifest has changed since. A bare `--trust` accepts whatever is current and
+warns with the hash it recorded — pin that hash rather than relying on it.
+
+When the manifest has changed since you trusted it, the first line says it
+**CHANGED** and a `Was:` line names the hash you trusted before.
 
 Treat this prompt like `curl | sh`: read it. If a manifest changed and you
 didn't expect it to, that's the moment to look. And know what the prompt is
@@ -186,7 +194,13 @@ already have (ssh keys, credential helpers) — there is nothing to log into.
 ## Troubleshooting
 
 - **"manifest … is not trusted"** in a script/CI → run interactively once, or
-  pass `--trust`.
+  review it and pass `--trust=<hash>` with the hash the message names.
+- **"--trust=… does not match"** → the manifest's trust hash is not the one
+  you named: it changed since that hash was reviewed, or the hash is wrong.
+  Review the manifest as it is now and pin the hash the message names.
+- **"invalid value … for '--trust[=<HASH>]'"** → the value is not a full trust hash
+  (64 hex characters); copy it from the prompt, the refusal, or
+  `pult --list --json`.
 - **"no pult.yaml found"** → you're not inside a repo that has one (it
   searches upward from the current directory), and you have no user manifest
   at `~/.config/pult/pult.yaml` to fall back to.

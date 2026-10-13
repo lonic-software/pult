@@ -21,7 +21,7 @@ use crate::resolver::{Resolved, ResolvedCommand, group_commands};
 /// the historical flat list.
 pub fn run(
     resolved: &Resolved,
-    assume_trusted: bool,
+    grant: &crate::trust::Grant,
     print: bool,
     run_id: Option<&str>,
 ) -> Result<i32> {
@@ -54,14 +54,7 @@ pub fn run(
             }
         }
     };
-    exec::execute(
-        resolved,
-        cmd,
-        &HashMap::new(),
-        assume_trusted,
-        print,
-        run_id,
-    )
+    exec::execute(resolved, cmd, &HashMap::new(), grant, print, run_id)
 }
 
 fn command_labels(cmds: &[ResolvedCommand], width: usize) -> Vec<String> {

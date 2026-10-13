@@ -241,7 +241,8 @@ include's pin, module yaml, and — for local directory modules — every file
 the module ships. What trust does **not** do is sandbox: a trusted command is
 ordinary shell with your credentials. The guarantees are change visibility
 and pin immutability — you always get a prompt before anything different runs. Non-interactive contexts refuse
-untrusted manifests; pass `--trust` to accept explicitly (e.g. CI).
+untrusted manifests and name the trust hash; pass `--trust=<hash>` to accept
+exactly that hash (e.g. CI), or a bare `--trust` to accept whatever is current.
 
 ## Layout
 
