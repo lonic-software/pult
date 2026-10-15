@@ -423,9 +423,15 @@ fn load_module(
         .context("module has no parent directory")?
         .canonicalize()
         .with_context(|| format!("failed to resolve {}", file.display()))?;
-    bound.insert("module.dir".to_string(), module_dir.display().to_string());
+    let mut module_dir = module_dir.display().to_string();
+    if cfg!(windows) {
+        module_dir = interp::windows_shell_path(&module_dir);
+    }
+    let paths = IndexMap::from([("module.dir".to_string(), module_dir)]);
 
-    visit_templates(&mut module, &|s| *s = interp::substitute_vars(s, &bound));
+    visit_templates(&mut module, &|s, shell| {
+        *s = interp::substitute_vars(s, &bound, &paths, shell)
+    });
 
     if let Some(prefix) = &inc.prefix {
         if !manifest::is_valid_name(prefix) {
@@ -541,9 +547,12 @@ fn insert_unique<T>(
 }
 
 /// Apply `${var}`-style substitution to every template-bearing string field.
-fn visit_templates(m: &mut Manifest, f: &dyn Fn(&mut String)) {
+/// `f`'s flag says whether the field is shell text (a script, `check`,
+/// `pick.from`, or a `with:` value spliced into one) rather than prose or a
+/// value pult quotes itself later.
+fn visit_templates(m: &mut Manifest, f: &dyn Fn(&mut String, bool)) {
     if let Some(name) = &mut m.name {
-        f(name);
+        f(name, false);
     }
     for def in m.params.values_mut() {
         visit_param(def, f);
@@ -552,37 +561,37 @@ fn visit_templates(m: &mut Manifest, f: &dyn Fn(&mut String)) {
         visit_step(step, f);
     }
     for cmd in &mut m.commands {
-        f(&mut cmd.title);
+        f(&mut cmd.title, false);
         if let Some(check) = &mut cmd.check {
-            f(check);
+            f(check, true);
         }
         if let Some(category) = &mut cmd.category {
-            f(category);
+            f(category, false);
         }
         if let Some(description) = &mut cmd.description {
-            f(description);
+            f(description, false);
         }
         for def in cmd.params.values_mut() {
             visit_param(def, f);
         }
         match &mut cmd.run {
-            RunSpec::Script(s) => f(s),
+            RunSpec::Script(s) => f(s, true),
             RunSpec::List(entries) => {
                 for entry in entries {
                     match entry {
-                        RunEntry::Inline(s) => f(s),
+                        RunEntry::Inline(s) => f(s, true),
                         RunEntry::Use(u) => {
                             for v in u.with.values_mut() {
-                                f(v);
+                                f(v, true);
                             }
                         }
                         RunEntry::Pipe(pg) => {
                             for seg in &mut pg.pipe {
                                 match seg {
-                                    PipeEntry::Inline(s) => f(s),
+                                    PipeEntry::Inline(s) => f(s, true),
                                     PipeEntry::Use(pu) => {
                                         for v in pu.with.values_mut() {
-                                            f(v);
+                                            f(v, true);
                                         }
                                     }
                                 }
@@ -595,19 +604,19 @@ fn visit_templates(m: &mut Manifest, f: &dyn Fn(&mut String)) {
     }
 }
 
-fn visit_param(def: &mut ParamDef, f: &dyn Fn(&mut String)) {
+fn visit_param(def: &mut ParamDef, f: &dyn Fn(&mut String, bool)) {
     if let Some(pick) = &mut def.pick {
         if let Some(from) = &mut pick.from {
-            f(from);
+            f(from, true);
         }
         if let Some(options) = &mut pick.options {
             for o in options {
                 match o {
-                    OptionDef::Plain(s) => f(s),
+                    OptionDef::Plain(s) => f(s, false),
                     OptionDef::Full(full) => {
-                        f(&mut full.value);
+                        f(&mut full.value, false);
                         if let Some(d) = &mut full.description {
-                            f(d);
+                            f(d, false);
                         }
                     }
                 }
@@ -617,24 +626,24 @@ fn visit_param(def: &mut ParamDef, f: &dyn Fn(&mut String)) {
     if let Some(input) = &mut def.input
         && let Some(d) = &mut input.default
     {
-        f(d);
+        f(d, false);
     }
     if let Some(flag) = &mut def.flag
         && let Some(arg) = &mut flag.arg
     {
-        f(arg);
+        f(arg, false);
     }
     if let Some(repeat) = &mut def.repeat
         && let Some(arg) = &mut repeat.arg
     {
-        f(arg);
+        f(arg, false);
     }
 }
 
-fn visit_step(step: &mut StepDef, f: &dyn Fn(&mut String)) {
+fn visit_step(step: &mut StepDef, f: &dyn Fn(&mut String, bool)) {
     match step {
-        StepDef::Plain(s) => f(s),
-        StepDef::Full(full) => f(&mut full.script),
+        StepDef::Plain(s) => f(s, true),
+        StepDef::Full(full) => f(&mut full.script, true),
     }
 }
 

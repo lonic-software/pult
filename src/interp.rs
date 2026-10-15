@@ -158,9 +158,27 @@ pub fn rename_placeholders(script: &str, map: &IndexMap<String, String>) -> Stri
 
 /// Load-time `${var}` substitution (module vars + `module.dir`): replaces
 /// `${name}` only when `name` is declared; any other `$…` is shell and passes
-/// through untouched. Values are inserted raw — they are compose-time
-/// constants authored in the manifest, not runtime data.
-pub fn substitute_vars(template: &str, vars: &IndexMap<String, String>) -> String {
+/// through untouched. `vars` are inserted raw — they are compose-time
+/// constants authored in the manifest, and may deliberately be shell.
+///
+/// `paths` (`module.dir`) are data, not shell: a module cached under
+/// `C:\Users\Máté Kolonics\…` must still reach its `bin/` as one word.
+/// With `shell` set, each is quoted for the shell context it lands in
+/// ([`shell_contexts`]), so `${module.dir}/bin/x`, `"${module.dir}/bin/x"`
+/// and a heredoc line all keep the path intact. Without it (prose, option
+/// values, `with:`-free value fields) the path goes in as is. One pass, so
+/// nothing substituted is ever rescanned.
+pub fn substitute_vars(
+    template: &str,
+    vars: &IndexMap<String, String>,
+    paths: &IndexMap<String, String>,
+    shell: bool,
+) -> String {
+    let contexts = if shell {
+        shell_contexts(template)
+    } else {
+        Vec::new()
+    };
     let bytes = template.as_bytes();
     let mut out = String::with_capacity(template.len());
     let mut i = 0;
@@ -172,9 +190,15 @@ pub fn substitute_vars(template: &str, vars: &IndexMap<String, String>) -> Strin
         {
             let end = i + 2 + off;
             let name = &template[i + 2..end];
-            if let Some(v) = vars.get(name) {
+            let value = match (vars.get(name), paths.get(name)) {
+                (Some(v), _) => Some(v.clone()),
+                (None, Some(p)) if shell => Some(quote_for(p, contexts[i])),
+                (None, Some(p)) => Some(p.clone()),
+                (None, None) => None,
+            };
+            if let Some(v) = value {
                 out.push_str(&template[last..i]);
-                out.push_str(v);
+                out.push_str(&v);
                 i = end + 1;
                 last = i;
                 continue;
@@ -184,6 +208,213 @@ pub fn substitute_vars(template: &str, vars: &IndexMap<String, String>) -> Strin
     }
     out.push_str(&template[last..]);
     out
+}
+
+/// The shell quoting in effect at a byte of a script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellContext {
+    /// Unquoted (top level, inside `$(…)` or backticks).
+    Bare,
+    /// Inside `"…"`.
+    Double,
+    /// Inside `'…'`.
+    Single,
+    /// Body of a heredoc with an unquoted delimiter: expansions happen, `"`
+    /// is ordinary.
+    Heredoc,
+    /// A comment or a quoted-delimiter heredoc body: nothing is interpreted.
+    Literal,
+}
+
+/// Insert `value` so the shell reads it back verbatim in context `ctx`.
+fn quote_for(value: &str, ctx: ShellContext) -> String {
+    let escape = |specials: &str| {
+        let mut out = String::with_capacity(value.len());
+        for c in value.chars() {
+            if specials.contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    };
+    match ctx {
+        ShellContext::Bare => shell_quote(value),
+        ShellContext::Double => escape("\\\"$`"),
+        ShellContext::Heredoc => escape("\\$`"),
+        ShellContext::Single => value.replace('\'', r"'\''"),
+        ShellContext::Literal => value.to_string(),
+    }
+}
+
+/// The [`ShellContext`] at every byte of `script` (plus one past the end), as
+/// sh would read it. A lexer, not a parser: it tracks exactly what decides
+/// how a spliced word must be quoted — quotes, `\` escapes, `$(…)` and
+/// backtick nesting, `#` comments and heredoc bodies — and nothing else. An
+/// apostrophe in a comment or heredoc must not flip the rest of the script
+/// into "single-quoted", which is why those two are tracked at all.
+pub fn shell_contexts(script: &str) -> Vec<ShellContext> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Frame {
+        /// Unquoted; `parens` counts `(` open inside a `$(…)`.
+        Bare {
+            parens: u32,
+        },
+        Double,
+        Backtick,
+    }
+    struct Heredoc {
+        delim: String,
+        strip_tabs: bool,
+        expand: bool,
+    }
+
+    let b = script.as_bytes();
+    let n = b.len();
+    let mut ctx = vec![ShellContext::Bare; n + 1];
+    let mut stack = vec![Frame::Bare { parens: 0 }];
+    let mut pending: Vec<Heredoc> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let top = *stack.last().expect("root frame is never popped");
+        let c = b[i];
+        if top == Frame::Double {
+            ctx[i] = ShellContext::Double;
+            match c {
+                b'\\' => {
+                    if i + 1 < n {
+                        ctx[i + 1] = ShellContext::Double;
+                    }
+                    i += 2;
+                    continue;
+                }
+                b'"' => {
+                    stack.pop();
+                }
+                b'`' => stack.push(Frame::Backtick),
+                b'$' if b.get(i + 1) == Some(&b'(') => {
+                    stack.push(Frame::Bare { parens: 0 });
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+
+        // Unquoted: the root, a `$(…)`, or backticks.
+        ctx[i] = ShellContext::Bare;
+        match c {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'\'' => {
+                let close = script[i + 1..].find('\'').map_or(n, |o| i + 1 + o);
+                ctx[i + 1..close].fill(ShellContext::Single);
+                i = close + 1;
+                continue;
+            }
+            b'"' => stack.push(Frame::Double),
+            b'`' if top == Frame::Backtick => {
+                stack.pop();
+            }
+            b'`' => stack.push(Frame::Backtick),
+            b'$' if b.get(i + 1) == Some(&b'(') => {
+                stack.push(Frame::Bare { parens: 0 });
+                i += 2;
+                continue;
+            }
+            b'(' if stack.len() > 1 => {
+                if let Some(Frame::Bare { parens }) = stack.last_mut() {
+                    *parens += 1;
+                }
+            }
+            b')' if stack.len() > 1 => match stack.last_mut() {
+                Some(Frame::Bare { parens: 0 }) => {
+                    stack.pop();
+                }
+                Some(Frame::Bare { parens }) => *parens -= 1,
+                _ => {}
+            },
+            b'#' if i == 0 || b" \t\n;&|(".contains(&b[i - 1]) => {
+                let end = script[i..].find('\n').map_or(n, |o| i + o);
+                ctx[i..end].fill(ShellContext::Literal);
+                i = end;
+                continue;
+            }
+            b'<' if b.get(i + 1) == Some(&b'<') && b.get(i + 2) != Some(&b'<') => {
+                let mut j = i + 2;
+                let strip_tabs = b.get(j) == Some(&b'-');
+                if strip_tabs {
+                    j += 1;
+                }
+                while j < n && (b[j] == b' ' || b[j] == b'\t') {
+                    j += 1;
+                }
+                let start = j;
+                while j < n && !b" \t\n;&|<>()".contains(&b[j]) {
+                    j += 1;
+                }
+                let word = &script[start..j];
+                if !word.is_empty() {
+                    pending.push(Heredoc {
+                        delim: word.replace(['\'', '"', '\\'], ""),
+                        strip_tabs,
+                        expand: !word.contains(['\'', '"', '\\']),
+                    });
+                }
+                i = j;
+                continue;
+            }
+            b'\n' if !pending.is_empty() => {
+                i += 1;
+                // Each pending heredoc's body follows, in order, line by line.
+                for doc in pending.drain(..) {
+                    while i < n {
+                        let end = script[i..].find('\n').map_or(n, |o| i + o);
+                        let line = &script[i..end];
+                        let line = if doc.strip_tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            line
+                        };
+                        if line == doc.delim {
+                            ctx[i..end].fill(ShellContext::Literal);
+                            i = end + 1;
+                            break;
+                        }
+                        ctx[i..end].fill(if doc.expand {
+                            ShellContext::Heredoc
+                        } else {
+                            ShellContext::Literal
+                        });
+                        i = end + 1;
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    ctx
+}
+
+/// `path` as a shell on Windows wants it: `canonicalize`'s verbatim prefix
+/// (`\\?\C:\…`, `\\?\UNC\server\…`) dropped and `\` turned into `/`, giving
+/// `C:/Users/…` — which Git for Windows's `sh` executes as is, and which
+/// can't be mangled by a stray `\` escape. Pure and string-based so it's
+/// testable on every host; only called on Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn windows_shell_path(path: &str) -> String {
+    let path = if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+    };
+    path.replace('\\', "/")
 }
 
 /// Quote a value for use in `sh -c`. Values that are plainly safe pass
@@ -302,7 +533,9 @@ mod tests {
     fn vars_substitute_declared_only() {
         let out = substitute_vars(
             "cluster ${prefix}-{env}; [ \"${TASK+x}\" ]; ${module.dir}/bin/x",
-            &vals(&[("prefix", "dirconn"), ("module.dir", "/mods/aws")]),
+            &vals(&[("prefix", "dirconn")]),
+            &vals(&[("module.dir", "/mods/aws")]),
+            true,
         );
         assert_eq!(
             out,
@@ -312,7 +545,71 @@ mod tests {
 
     #[test]
     fn vars_leave_plain_shell_dollars() {
-        let out = substitute_vars("echo $HOME ${undeclared}", &vals(&[]));
+        let out = substitute_vars("echo $HOME ${undeclared}", &vals(&[]), &vals(&[]), true);
         assert_eq!(out, "echo $HOME ${undeclared}");
+    }
+    fn dir(script: &str, path: &str) -> String {
+        substitute_vars(script, &vals(&[]), &vals(&[("module.dir", path)]), true)
+    }
+
+    #[test]
+    fn module_dir_with_a_space_stays_one_word_bare() {
+        let out = dir("${module.dir}/bin/words --all", "/Users/Máté Kolonics/m");
+        assert_eq!(out, "'/Users/Máté Kolonics/m'/bin/words --all");
+    }
+
+    #[test]
+    fn module_dir_inside_double_quotes_is_escaped_not_requoted() {
+        let out = dir(
+            r#"x="$(cat "${module.dir}/who.txt")" "${module.dir}""#,
+            r#"/a b/$x"#,
+        );
+        assert_eq!(out, r#"x="$(cat "/a b/\$x/who.txt")" "/a b/\$x""#);
+    }
+
+    #[test]
+    fn module_dir_inside_single_quotes_closes_and_reopens() {
+        assert_eq!(dir("echo '${module.dir}'", "/it's"), r"echo '/it'\''s'");
+    }
+
+    #[test]
+    fn module_dir_in_command_substitution_is_bare() {
+        let out = dir("T=$(${module.dir}/bin/x (y))\n${module.dir}", "/a b");
+        assert_eq!(out, "T=$('/a b'/bin/x (y))\n'/a b'");
+    }
+
+    #[test]
+    fn apostrophes_in_comments_and_heredocs_dont_flip_quoting() {
+        let script = "# don't\ncat <<EOF\nit's ${module.dir}\nEOF\ncat <<'X'\n${module.dir}\nX\n${module.dir}/b";
+        assert_eq!(
+            dir(script, "/a b"),
+            "# don't\ncat <<EOF\nit's /a b\nEOF\ncat <<'X'\n/a b\nX\n'/a b'/b"
+        );
+    }
+
+    #[test]
+    fn safe_module_dir_is_unchanged() {
+        assert_eq!(dir("${module.dir}/bin/x", "/mods/aws"), "/mods/aws/bin/x");
+    }
+
+    #[test]
+    fn module_dir_is_raw_outside_shell_fields() {
+        let out = substitute_vars(
+            "in ${module.dir}",
+            &vals(&[]),
+            &vals(&[("module.dir", "/a b")]),
+            false,
+        );
+        assert_eq!(out, "in /a b");
+    }
+
+    #[test]
+    fn windows_paths_lose_the_verbatim_prefix_and_backslashes() {
+        assert_eq!(
+            windows_shell_path(r"\\?\C:\Users\Máté Kolonics\.cache\pult"),
+            "C:/Users/Máté Kolonics/.cache/pult"
+        );
+        assert_eq!(windows_shell_path(r"\\?\UNC\srv\share\m"), "//srv/share/m");
+        assert_eq!(windows_shell_path(r"D:\m"), "D:/m");
     }
 }
