@@ -48,6 +48,8 @@ pub enum ErrorCode {
     TrustChanged,
     /// A git module could not be fetched.
     FetchFailed,
+    /// A tool the command declares in `requires:` failed its check.
+    MissingRequirements,
     /// The user cancelled at one of pult's own prompts.
     Cancelled,
     /// Any failure not otherwise classified.
@@ -62,6 +64,7 @@ impl ErrorCode {
             ErrorCode::InvalidManifest => "invalid_manifest",
             ErrorCode::TrustChanged => "trust_changed",
             ErrorCode::FetchFailed => "fetch_failed",
+            ErrorCode::MissingRequirements => "missing_requirements",
             ErrorCode::Cancelled => "cancelled",
             ErrorCode::Generic => "generic",
         }
@@ -147,7 +150,7 @@ fn existing_code(err: &anyhow::Error) -> Option<ErrorCode> {
 }
 
 /// The `details` attached with the error's code, if any.
-fn details(err: &anyhow::Error) -> Option<serde_json::Value> {
+pub fn details(err: &anyhow::Error) -> Option<serde_json::Value> {
     err.chain()
         .find_map(|e| e.downcast_ref::<Coded>())
         .and_then(|c| c.details.clone())

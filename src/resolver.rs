@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 use crate::fetch::{self, Source};
 use crate::interp;
 use crate::manifest::{
-    self, IncludeDef, Loaded, Manifest, OptionDef, ParamDef, ParamKind, PipeEntry, RunEntry,
-    RunSpec, StepDef,
+    self, IncludeDef, Loaded, Manifest, OptionDef, ParamDef, ParamKind, PipeEntry, RequirementDef,
+    RunEntry, RunSpec, StepDef,
 };
 
 /// Command ids the engine claims for its own subcommands — current and
@@ -63,6 +63,9 @@ pub struct Resolved {
     /// with `pins`/`include_summary`; `None` when that module declared none.
     pub include_names: Vec<Option<String>>,
     pub commands: Vec<ResolvedCommand>,
+    /// Every requirement definition that won (see [`Requirement`]), in the
+    /// order the files were read: the root's first, then each include's.
+    pub requirements: IndexMap<String, Requirement>,
     /// Set only by `pult x`: this is a single ephemeral source, not a durable
     /// manifest. Its one effect today is that the trust prompt shows the command
     /// about to run — honest here because the trust unit *is* that invocation;
@@ -109,6 +112,27 @@ pub struct ResolvedCommand {
     /// One or two sentences explaining what the command does;
     /// `${var}`-substituted like `title`. `None` when the author set none.
     pub description: Option<String>,
+    /// Effective requirement names: the command's own `requires:`, then the
+    /// whole `requires:` map of every module that declared the command or
+    /// contributes a step or param to it. Each names an entry of
+    /// [`Resolved::requirements`].
+    pub requires: Vec<String>,
+}
+
+/// A required tool, as the winning definition describes it. A name has one
+/// definition per resolved manifest: the root's beats every include's.
+/// Includes that define a name the root does not must define it alike —
+/// otherwise one module's commands would be gated on another module's check,
+/// which may point into that module's own `${module.dir}`.
+#[derive(Debug)]
+pub struct Requirement {
+    pub name: String,
+    /// `${var}`-substituted; `command -v '<name>'` when the author set none.
+    pub check: String,
+    /// The include source that defined it; `None` for the root manifest.
+    pub defined_in: Option<String>,
+    /// Include sources whose definition of this name the root's replaced.
+    pub shadowed: Vec<String>,
 }
 
 /// Grouping fallback label for commands declared directly in the root
@@ -203,6 +227,8 @@ pub enum ResolvedSeg {
 struct Namespaces {
     params: IndexMap<String, (ParamDef, Option<String>)>,
     steps: IndexMap<String, (StepDef, Option<String>)>,
+    /// Each file's own `requires:` names, keyed by origin (`None` = root).
+    requires_by_origin: IndexMap<Option<String>, Vec<String>>,
 }
 
 pub fn resolve(loaded: Loaded) -> Result<Resolved> {
@@ -241,15 +267,27 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
     let mut ns = Namespaces {
         params: IndexMap::new(),
         steps: IndexMap::new(),
+        requires_by_origin: IndexMap::new(),
     };
     let mut merged: Vec<(manifest::CommandDef, Option<String>, Option<String>)> = Vec::new();
 
+    // The root's definitions go in first so they win every name.
+    let mut requirements = IndexMap::new();
+    merge_requirements(&mut requirements, &mut ns, root.requires, None)?;
+
     for inc in &root.includes {
-        let loaded_module = load_module(inc, &dir, cache_root, &mut trust_input)
+        let mut loaded_module = load_module(inc, &dir, cache_root, &mut trust_input)
             .with_context(|| format!("include `{}`", inc.source))?;
         include_summary.push(loaded_module.summary);
         pins.push(loaded_module.pin);
         include_names.push(loaded_module.manifest.name.clone());
+        let module_requires = std::mem::take(&mut loaded_module.manifest.requires);
+        merge_requirements(
+            &mut requirements,
+            &mut ns,
+            module_requires,
+            Some(inc.source.clone()),
+        )?;
         merge_module(loaded_module.manifest, &inc.source, &mut ns, &mut merged)
             .with_context(|| format!("include `{}`", inc.source))?;
     }
@@ -280,7 +318,13 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
                 cmd.id
             );
         }
-        commands.push(resolve_command(cmd, origin, origin_name, &ns)?);
+        commands.push(resolve_command(
+            cmd,
+            origin,
+            origin_name,
+            &ns,
+            &requirements,
+        )?);
     }
     if commands.is_empty() {
         bail!("{}: no commands after resolving includes", path.display());
@@ -304,8 +348,56 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
         pins,
         include_names,
         commands,
+        requirements,
         ephemeral: false,
     })
+}
+
+/// Add one file's `requires:` to the resolved set. Callers merge the root
+/// first: a name it defines keeps the root's definition, and each include
+/// that also defines it is recorded as shadowed. Two includes may define a
+/// name the root does not only if they define it alike.
+fn merge_requirements(
+    requirements: &mut IndexMap<String, Requirement>,
+    ns: &mut Namespaces,
+    defs: IndexMap<String, RequirementDef>,
+    origin: Option<String>,
+) -> Result<()> {
+    let names: Vec<String> = defs.keys().cloned().collect();
+    for (name, def) in defs {
+        let check = def
+            .check
+            .unwrap_or_else(|| format!("command -v {}", interp::shell_quote(&name)));
+        let source = origin.clone().unwrap_or_default();
+        match requirements.get_mut(&name) {
+            Some(winner) if winner.defined_in.is_none() => {
+                if !winner.shadowed.contains(&source) {
+                    winner.shadowed.push(source);
+                }
+            }
+            Some(winner) if winner.check == check => {}
+            Some(winner) => bail!(
+                "requirement `{name}` is defined differently by include `{}` (check `{}`) and include `{source}` (check `{check}`) — define `{name}` in the root manifest's `requires:` to choose the check every command uses",
+                winner.defined_in.as_deref().unwrap_or_default(),
+                winner.check,
+            ),
+            None => {
+                requirements.insert(
+                    name.clone(),
+                    Requirement {
+                        name,
+                        check,
+                        defined_in: origin.clone(),
+                        shadowed: Vec::new(),
+                    },
+                );
+            }
+        }
+    }
+    // A source included twice defines the same names both times (the
+    // file is the same; only `vars` differ, and checks were compared above).
+    ns.requires_by_origin.insert(origin, names);
+    Ok(())
 }
 
 struct LoadedModule {
@@ -560,6 +652,11 @@ fn visit_templates(m: &mut Manifest, f: &dyn Fn(&mut String, bool)) {
     for step in m.steps.values_mut() {
         visit_step(step, f);
     }
+    for def in m.requires.values_mut() {
+        if let Some(check) = &mut def.check {
+            f(check, true);
+        }
+    }
     for cmd in &mut m.commands {
         f(&mut cmd.title, false);
         if let Some(check) = &mut cmd.check {
@@ -689,15 +786,21 @@ fn resolve_command(
     origin: Option<String>,
     origin_name: Option<String>,
     ns: &Namespaces,
+    requirements: &IndexMap<String, Requirement>,
 ) -> Result<ResolvedCommand> {
     let ctx = || format!("command `{}`", cmd.id);
+
+    // Modules whose whole `requires:` this command takes on: the one that
+    // declared it, and every one that lends it a param or step. The root's
+    // `requires:` is only definitions — a root command names what it needs.
+    let mut contributors: Vec<&Option<String>> = vec![&origin];
 
     // Inline `use:` params; everything downstream sees concrete definitions.
     let mut params: IndexMap<String, ParamDef> = IndexMap::new();
     for (name, def) in &cmd.params {
         let concrete = match def.kind() {
             ParamKind::Use(target) => {
-                let (named, _) = ns.params.get(target).with_context(|| {
+                let (named, param_origin) = ns.params.get(target).with_context(|| {
                     format!(
                         "{}: param `{name}` uses `{target}`, which no include exports — available: {}",
                         ctx(),
@@ -710,6 +813,7 @@ fn resolve_command(
                         ctx()
                     );
                 }
+                contributors.push(param_origin);
                 named.clone()
             }
             _ => def.clone(),
@@ -777,6 +881,53 @@ fn resolve_command(
             ResolvedRun::Steps(resolved)
         }
     };
+    if let RunSpec::List(entries) = &cmd.run {
+        for entry in entries {
+            let mut lend = |step: &str| {
+                if let Some((_, step_origin)) = ns.steps.get(step) {
+                    contributors.push(step_origin);
+                }
+            };
+            match entry {
+                RunEntry::Use(u) => lend(&u.use_),
+                RunEntry::Pipe(pg) => {
+                    for seg in &pg.pipe {
+                        if let PipeEntry::Use(pu) = seg {
+                            lend(&pu.use_);
+                        }
+                    }
+                }
+                RunEntry::Inline(_) => {}
+            }
+        }
+    }
+
+    // A command names requirements its own file defines — or, at the root,
+    // any file's: the root sees every include, a module only itself.
+    let visible: Vec<&String> = match &origin {
+        None => requirements.keys().collect(),
+        Some(_) => ns.requires_by_origin[&origin].iter().collect(),
+    };
+    for name in &cmd.requires {
+        if !visible.contains(&name) {
+            bail!(
+                "{}: requires `{name}`, which is not defined in `requires:` — available: {}",
+                ctx(),
+                available(visible.iter().copied())
+            );
+        }
+    }
+    let mut requires: Vec<String> = Vec::new();
+    let inherited = contributors
+        .into_iter()
+        .filter(|o| o.is_some())
+        .filter_map(|o| ns.requires_by_origin.get(o))
+        .flatten();
+    for name in cmd.requires.iter().chain(inherited) {
+        if !requires.contains(name) {
+            requires.push(name.clone());
+        }
+    }
 
     Ok(ResolvedCommand {
         id: cmd.id,
@@ -789,6 +940,7 @@ fn resolve_command(
         interactive: cmd.interactive,
         category: cmd.category,
         description: cmd.description,
+        requires,
     })
 }
 
@@ -1879,6 +2031,7 @@ commands:
             interactive: false,
             category: category.map(str::to_string),
             description: None,
+            requires: Vec::new(),
         }
     }
 
@@ -1931,5 +2084,176 @@ commands:
         let groups = group_commands(&cmds);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "local");
+    }
+
+    // --- requires: (design: pult-planning/design/requirements.md §3) ---
+
+    fn requires_of<'a>(r: &'a Resolved, id: &str) -> &'a [String] {
+        &r.commands.iter().find(|c| c.id == id).unwrap().requires
+    }
+
+    const REQ_MODULE: &str = "version: 2\nrequires:\n  nope: {}\n  py: { check: \"python3 -V\" }\n\
+        steps:\n  greet: echo hi\nparams:\n  who: { input: {} }\n\
+        commands:\n  - { id: own, title: Own, run: \"true\" }\n";
+
+    #[test]
+    fn module_requirements_reach_a_root_command_that_uses_its_step() {
+        // T6: §3.2 clause 2 — a module that lends a step lends its `requires:`.
+        let root = "version: 2\nincludes:\n  - { source: ./m, prefix: t }\ncommands:\n\
+            \x20 - { id: uses, title: U, run: [ { use: \"t:greet\" } ] }\n\
+            \x20 - { id: plain, title: P, run: \"true\" }\n";
+        let (_d, r) = setup(root, &[("m/pult.module.yaml", REQ_MODULE)]);
+        let r = r.unwrap();
+        assert_eq!(requires_of(&r, "uses"), ["nope", "py"]);
+        // Paired: a root command that takes nothing from the module needs nothing.
+        assert!(requires_of(&r, "plain").is_empty());
+        // The module's own command, under its prefix, keeps unprefixed names.
+        assert_eq!(requires_of(&r, "t:own"), ["nope", "py"]);
+    }
+
+    #[test]
+    fn module_requirements_reach_a_root_command_that_uses_its_param() {
+        let root = "version: 2\nincludes:\n  - { source: ./m, prefix: t }\ncommands:\n\
+            \x20 - { id: uses, title: U, params: { who: { use: \"t:who\" } }, run: \"echo {who}\" }\n";
+        let (_d, r) = setup(root, &[("m/pult.module.yaml", REQ_MODULE)]);
+        assert_eq!(requires_of(&r.unwrap(), "uses"), ["nope", "py"]);
+    }
+
+    #[test]
+    fn root_requires_map_is_definitions_not_a_blanket_requirement() {
+        let root = "version: 2\nrequires:\n  node: {}\ncommands:\n\
+            \x20 - { id: needs, title: N, requires: [node], run: \"true\" }\n\
+            \x20 - { id: free, title: F, run: \"true\" }\n";
+        let (_d, r) = setup(root, &[]);
+        let r = r.unwrap();
+        assert_eq!(requires_of(&r, "needs"), ["node"]);
+        assert!(requires_of(&r, "free").is_empty());
+    }
+
+    #[test]
+    fn a_v1_root_may_include_a_v2_module() {
+        // T7: the version rule is per file.
+        let root = "version: 1\nincludes:\n  - { source: ./m, prefix: t }\ncommands:\n\
+            \x20 - { id: uses, title: U, run: [ { use: \"t:greet\" } ] }\n";
+        let (_d, r) = setup(root, &[("m/pult.module.yaml", REQ_MODULE)]);
+        assert_eq!(requires_of(&r.unwrap(), "uses"), ["nope", "py"]);
+    }
+
+    #[test]
+    fn includes_must_agree_on_a_name_the_root_does_not_define() {
+        let module = |check: &str| {
+            format!("version: 2\nrequires:\n  node: {{ check: \"{check}\" }}\ncommands: []\n")
+        };
+        let two = "version: 2\nincludes:\n  - { source: ./a }\n  - { source: ./b }\n\
+            commands:\n  - { id: c, title: C, run: \"true\" }\n";
+        let (a, b) = (module("check-a"), module("check-b"));
+
+        // Differing definitions: neither module's commands may be gated on
+        // the other's check, so loading fails and names the fix.
+        let (_d, r) = setup(
+            two,
+            &[("a/pult.module.yaml", &a), ("b/pult.module.yaml", &b)],
+        );
+        let err = format!("{:#}", r.unwrap_err());
+        assert!(
+            err.contains("requirement `node` is defined differently by include `./a`")
+                && err.contains("define `node` in the root manifest"),
+            "{err}"
+        );
+
+        // Alike: one definition, nothing shadowed.
+        let (_d, r) = setup(
+            two,
+            &[("a/pult.module.yaml", &a), ("b/pult.module.yaml", &a)],
+        );
+        let r = r.unwrap();
+        assert_eq!(r.requirements["node"].check, "check-a");
+        assert_eq!(r.requirements["node"].defined_in.as_deref(), Some("./a"));
+        assert!(r.requirements["node"].shadowed.is_empty());
+
+        // The root's definition settles it, and replaces both.
+        let root = "version: 2\nincludes:\n  - { source: ./a }\n  - { source: ./b }\n\
+            requires:\n  node: { check: check-root }\n\
+            commands:\n  - { id: c, title: C, run: \"true\" }\n";
+        let (_d, r) = setup(
+            root,
+            &[("a/pult.module.yaml", &a), ("b/pult.module.yaml", &b)],
+        );
+        let r = r.unwrap();
+        let node = &r.requirements["node"];
+        assert_eq!(node.check, "check-root");
+        assert_eq!(node.defined_in, None);
+        assert_eq!(node.shadowed, ["./a", "./b"]);
+    }
+
+    #[test]
+    fn one_source_included_twice_with_different_vars_must_still_agree() {
+        let module = "version: 2\nvars:\n  bin: { required: true }\n\
+            requires:\n  tool: { check: \"${bin} --version\" }\n\
+            commands:\n  - { id: c, title: C, requires: [tool], run: \"true\" }\n";
+        let root = "version: 2\nincludes:\n\
+            \x20 - { source: ./m, prefix: x, vars: { bin: /opt/x } }\n\
+            \x20 - { source: ./m, prefix: y, vars: { bin: /opt/y } }\n\
+            commands: []\n";
+        let (_d, r) = setup(root, &[("m/pult.module.yaml", module)]);
+        let err = format!("{:#}", r.unwrap_err());
+        assert!(err.contains("defined differently"), "{err}");
+
+        // Same vars: one definition, both instances' commands need it, and
+        // the source does not shadow itself.
+        let root = root.replace("/opt/y", "/opt/x");
+        let (_d, r) = setup(&root, &[("m/pult.module.yaml", module)]);
+        let r = r.unwrap();
+        assert!(r.requirements["tool"].shadowed.is_empty());
+        assert_eq!(requires_of(&r, "y:c"), ["tool"]);
+    }
+
+    #[test]
+    fn default_check_and_var_substitution() {
+        // The module dir has a space: only shell-flagged substitution quotes
+        // `${module.dir}`, so the flag is visible in the result.
+        let module = "version: 2\nvars:\n  flag: { default: --version }\nrequires:\n\
+            \x20 node: {}\n  custom: { check: \"${module.dir}/bin/tool ${flag}\" }\ncommands: []\n";
+        let root = "version: 2\nincludes:\n  - { source: ./m dir }\n\
+            commands:\n  - { id: c, title: C, run: \"true\" }\n";
+        let (d, r) = setup(root, &[("m dir/pult.module.yaml", module)]);
+        let r = r.unwrap();
+        assert_eq!(r.requirements["node"].check, "command -v node");
+        let dir = manifest::canonicalize(&d.path().join("m dir")).unwrap();
+        assert_eq!(
+            r.requirements["custom"].check,
+            format!("'{}'/bin/tool --version", dir.display())
+        );
+    }
+
+    #[test]
+    fn undefined_or_invisible_requirement_names_are_load_errors() {
+        let root = "version: 2\nrequires:\n  node: {}\ncommands:\n\
+            \x20 - { id: c, title: C, requires: [nod], run: \"true\" }\n";
+        let (_d, r) = setup(root, &[]);
+        let err = format!("{:#}", r.unwrap_err());
+        assert!(
+            err.contains("requires `nod`") && err.contains("available: node"),
+            "{err}"
+        );
+
+        // A module command sees only its own file's definitions, not the root's.
+        let module =
+            "version: 2\ncommands:\n  - { id: m, title: M, requires: [node], run: \"true\" }\n";
+        let root = "version: 2\nincludes:\n  - { source: ./m }\nrequires:\n  node: {}\n\
+            commands: []\n";
+        let (_d, r) = setup(root, &[("m/pult.module.yaml", module)]);
+        let err = format!("{:#}", r.unwrap_err());
+        assert!(
+            err.contains("requires `node`") && err.contains("(none)"),
+            "{err}"
+        );
+
+        // A root command sees an include's definitions.
+        let module = "version: 2\nrequires:\n  node: {}\ncommands: []\n";
+        let root = "version: 2\nincludes:\n  - { source: ./m }\n\
+            commands:\n  - { id: c, title: C, requires: [node], run: \"true\" }\n";
+        let (_d, r) = setup(root, &[("m/pult.module.yaml", module)]);
+        assert_eq!(requires_of(&r.unwrap(), "c"), ["node"]);
     }
 }

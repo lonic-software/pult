@@ -74,6 +74,14 @@ pub fn execute(
         about_to_run.as_deref(),
     )?;
 
+    // Requirements before params: `fill` runs `pick.from` sources, which may
+    // need the very tools being checked.
+    crate::requirements::gate(
+        &cmd.id,
+        &crate::requirements::of(resolved, cmd),
+        &resolved.run_dir,
+    )?;
+
     // Trusted now — fill for real (prompting for and resolving any values not
     // given on the command line) and run.
     let values = fill(cmd, provided, Some(&resolved.run_dir), prompting)?;

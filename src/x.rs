@@ -288,6 +288,7 @@ fn resolve_ephemeral(
             sha256: None,
         }],
         registries: None,
+        requires: IndexMap::new(),
         vars: IndexMap::new(),
         params: IndexMap::new(),
         steps: IndexMap::new(),

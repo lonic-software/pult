@@ -8,7 +8,12 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
 /// The manifest schema version this binary understands.
-pub const SUPPORTED_VERSION: u32 = 1;
+pub const SUPPORTED_VERSION: u32 = 2;
+
+/// The first manifest version that may use `requires:`. An older pult
+/// rejects a v1 file containing it with an unknown-field error, but a v2 file
+/// with "upgrade pult" — so a file that uses it must say `version: 2`.
+const REQUIRES_VERSION: u32 = 2;
 
 /// A manifest together with where it came from.
 #[derive(Debug)]
@@ -54,8 +59,24 @@ pub struct Manifest {
     /// Named, reusable script fragments (referenced via `use:` in run lists).
     #[serde(default)]
     pub steps: IndexMap<String, StepDef>,
+    /// Tools the commands need on the machine, by name. Names are global:
+    /// one `node` per machine, whichever file defines it.
+    #[serde(default)]
+    pub requires: IndexMap<String, RequirementDef>,
     #[serde(default)]
     pub commands: Vec<CommandDef>,
+}
+
+/// One required tool.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RequirementDef {
+    /// Shell command whose exit 0 means the tool is present. Defaults to
+    /// `command -v <name>`, which assumes the executable has the
+    /// requirement's name.
+    #[serde(default)]
+    pub check: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +141,11 @@ pub struct CommandDef {
     /// description explains it.
     #[serde(default)]
     pub description: Option<String>,
+    /// Names of the tools this command needs, from `requires:` in this file
+    /// (or, for a root command, any file it includes). Checked before the
+    /// command's params are filled.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 /// A param is a picker, free input, a boolean switch, a list of values, or a
@@ -560,6 +586,13 @@ fn default_flag_args(manifest: &mut Manifest) {
     }
 }
 
+/// A valid requirement name: a [`is_valid_name`] that starts with a letter or
+/// digit. Pult builds `command -v '<name>'` from it, and a leading `-` would
+/// read as an option there.
+pub fn is_valid_requirement_name(s: &str) -> bool {
+    is_valid_name(s) && s.starts_with(|c: char| c.is_ascii_alphanumeric())
+}
+
 /// A valid name for params, steps, vars, outputs, prefixes.
 pub fn is_valid_name(s: &str) -> bool {
     !s.is_empty()
@@ -578,6 +611,26 @@ fn validate_file(manifest: &Manifest) -> Result<()> {
     }
     for (name, step) in &manifest.steps {
         validate_step(name, step)?;
+    }
+    let uses_requires =
+        !manifest.requires.is_empty() || manifest.commands.iter().any(|c| !c.requires.is_empty());
+    if uses_requires && manifest.version < REQUIRES_VERSION {
+        bail!(
+            "`requires:` needs `version: {REQUIRES_VERSION}` — older pult binaries can't read it, \
+             and the version makes them say \"upgrade pult\" instead of failing on an unknown field"
+        );
+    }
+    for (name, def) in &manifest.requires {
+        if !is_valid_requirement_name(name) {
+            bail!(
+                "invalid requirement name `{name}` — use letters, digits, `_`, `-` and `.`, starting with a letter or digit"
+            );
+        }
+        if let Some(check) = &def.check
+            && check.trim().is_empty()
+        {
+            bail!("requirement `{name}` has an empty check");
+        }
     }
     for (vname, vdef) in &manifest.vars {
         if !is_valid_name(vname) {
@@ -624,6 +677,12 @@ fn validate_file(manifest: &Manifest) -> Result<()> {
             && description.trim().is_empty()
         {
             bail!("command `{}` has an empty description", cmd.id);
+        }
+        let mut required = HashSet::new();
+        for name in &cmd.requires {
+            if !required.insert(name.as_str()) {
+                bail!("command `{}` lists requirement `{name}` twice", cmd.id);
+            }
         }
     }
     Ok(())
@@ -761,6 +820,63 @@ mod tests {
         assert_eq!(strip_verbatim(&long), None);
     }
     use std::io::Write;
+
+    fn parse_err(yaml: &str) -> String {
+        format!("{:#}", parse(yaml, Path::new("pult.yaml")).unwrap_err())
+    }
+
+    #[test]
+    fn requires_needs_version_2() {
+        // T9, for both places `requires:` can appear.
+        let top = "version: 1\nrequires:\n  node: {}\ncommands: []\n";
+        let on_cmd =
+            "version: 1\ncommands:\n  - { id: c, title: C, requires: [node], run: \"true\" }\n";
+        for yaml in [top, on_cmd] {
+            let err = parse_err(yaml);
+            assert!(err.contains("`requires:` needs `version: 2`"), "{err}");
+        }
+        // Paired: the same files at version 2 parse.
+        parse(
+            &top.replace("version: 1", "version: 2"),
+            Path::new("pult.yaml"),
+        )
+        .unwrap();
+        parse(
+            &on_cmd.replace("version: 1", "version: 2"),
+            Path::new("pult.yaml"),
+        )
+        .unwrap();
+        // A v1 file without `requires:` still parses.
+        parse("version: 1\ncommands: []\n", Path::new("pult.yaml")).unwrap();
+    }
+
+    #[test]
+    fn requirement_names_start_with_a_letter_or_digit() {
+        for bad in ["-p", ".hidden", "_x", "a b", "a/b"] {
+            let yaml = format!("version: 2\nrequires:\n  \"{bad}\": {{}}\ncommands: []\n");
+            let err = parse_err(&yaml);
+            assert!(err.contains("invalid requirement name"), "{bad}: {err}");
+        }
+        for good in ["node", "7zip", "python3.12", "aws-cli", "a_b"] {
+            let yaml = format!("version: 2\nrequires:\n  \"{good}\": {{}}\ncommands: []\n");
+            parse(&yaml, Path::new("pult.yaml")).unwrap();
+        }
+    }
+
+    #[test]
+    fn requirement_definitions_reject_empty_checks_and_unknown_fields() {
+        let err = parse_err("version: 2\nrequires:\n  node: { check: \" \" }\ncommands: []\n");
+        assert!(
+            err.contains("requirement `node` has an empty check"),
+            "{err}"
+        );
+        let err = parse_err("version: 2\nrequires:\n  node: { chek: x }\ncommands: []\n");
+        assert!(err.contains("unknown field `chek`"), "{err}");
+        let err = parse_err(
+            "version: 2\nrequires:\n  node: {}\ncommands:\n  - { id: c, title: C, requires: [node, node], run: \"true\" }\n",
+        );
+        assert!(err.contains("lists requirement `node` twice"), "{err}");
+    }
 
     #[test]
     fn committed_schema_is_current() {

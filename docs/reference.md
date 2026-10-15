@@ -21,7 +21,7 @@ manifest, and trust is per manifest path as usual.
 ## Manifest schema
 
 ```yaml
-version: 1                # required; must be ≤ the engine's supported version
+version: 1                # required; 1 or 2 (2 is needed by a file that uses `requires:`)
 name: my-project          # optional; defaults to the directory name
 description: …            # optional
 
@@ -29,6 +29,7 @@ includes: [ <include> ]   # root manifests only
 vars: { <name>: <var> }   # modules only
 params: { <name>: <param> }   # named params, referenced via `use:`
 steps: { <name>: <step> }     # named steps, referenced via `use:`
+requires: { <name>: <requirement> }  # tools commands need — see <requirement>
 commands: [ <command> ]
 ```
 
@@ -50,6 +51,7 @@ future phase and rejected with an explanatory error.
   interactive: true       # optional: `run:` needs a controlling terminal
   category: Deploy        # optional: display grouping — see below
   description: "Deploys the app to the given environment."  # optional — see below
+  requires: [aws, node]   # optional: tools checked before the run — see <requirement>
 ```
 
 - `category:` — an author-assigned display group ("Deploy", "Tests") for the
@@ -68,7 +70,7 @@ future phase and rejected with an explanatory error.
 - `check:` — a shell command whose exit 0 means "ready to run". It may not
   reference `{param}`s (it runs before any param exists); `${var}`s are
   substituted as usual. Run via `pult doctor` (all checks, trust-gated, exit 1
-  if any fail) and surfaced to UIs via `--list --json`; never run implicitly
+  if any command is not ready) and surfaced to UIs via `--list --json`; never run implicitly
   before `run:` — put real preflight/setup in the playbook itself.
 - `interactive:` — declares that `run:` requires a controlling terminal at
   runtime (a REPL, a TUI, a shell into a container). The contract: a command
@@ -84,6 +86,45 @@ future phase and rejected with an explanatory error.
   actual explanation in `description:` — every surface renders the title as
   the big label, and a long title just truncates and duplicates the
   description's job.
+- `requires:` — names from a `requires:` map (see below). A root command may
+  name a definition from the root or any include; a module's command only
+  one from its own file.
+
+### `<requirement>`
+
+```yaml
+requires:
+  node: {}                       # check defaults to `command -v node`
+  python:
+    check: "python3 --version"   # optional: exit 0 = present
+```
+
+A tool on the machine, checked before a command that needs it runs: after the
+trust gate and before any param is prompted or any `pick.from` source runs.
+If a check fails, the run stops with exit 1, naming each missing tool and
+its check, and nothing of the command runs. `pult doctor` checks every
+definition.
+
+- **Names** use letters, digits, `_`, `-` and `.`, and start with a letter or
+  digit. They are global, not prefixed: a module included with `prefix: t`
+  still says `node`, so two modules that both need node need one tool.
+- **One definition per name.** The root manifest's beats every include's
+  (this is how a consumer fixes a module's check without forking it); the
+  replaced ones are not merged, and `pult doctor` and `--list --json` show
+  them as `shadowed`. Includes that define the same name with the same check
+  share it. Includes that define it with *different* checks fail to load —
+  neither module's commands should be gated on the other's check — until the
+  root manifest defines the name itself.
+- **Which commands need what:** a command needs the names in its own
+  `requires:` list, plus the whole `requires:` map of every module that
+  declared the command or lends it a step or a param through `use:`. The
+  root manifest's map is only definitions: a root command needs a root
+  definition only by naming it.
+- `check:` runs like a command's `check:` (no `{param}`s; `${var}`s are
+  substituted), with no stdin and its output discarded.
+- A file that uses `requires:` must say `version: 2`, so an older pult
+  reports "upgrade pult" instead of an unknown-field error. A version 1 root
+  may include a version 2 module.
 
 ### `<param>` — exactly one of `pick`, `input`, `flag`, `repeat`, `use`
 
@@ -435,9 +476,9 @@ pult x [--var N=V] <SOURCE>   run a command from a module source, no manifest (n
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
-pult doctor [--json]          run every command's check: and report readiness (exit 1 if
-                                any fail; trust-gated — checks are manifest code; --json for
-                                the machine-readable form)
+pult doctor [--json]          run every command's check: and every requirement's check, and
+                                report readiness (exit 1 if any fail; trust-gated — checks
+                                are manifest code; --json for the machine-readable form)
 pult runs list [--json]       journaled runs, newest first
 pult runs tail <ID>           a run's journaled events (--follow to keep reading a live run;
      [--follow|--json|--jsonl]  --json for one document, --jsonl for the raw event lines)
@@ -504,8 +545,12 @@ The stable surface for tooling and agents. Its `data`:
       ],
       "check": "command -v aws",
       "interactive": true,
-      "steps": null
+      "steps": null,
+      "requires": ["aws"]
     }
+  ],
+  "requirements": [
+    { "name": "aws", "defined_in": null, "check": "command -v aws", "shadowed": [] }
   ]
 }
 ```
@@ -563,6 +608,12 @@ Field notes:
   below), don't assume pult ran it. `interactive` — the command needs a
   controlling terminal; non-terminal surfaces should treat it as
   terminal-only rather than capturing its output.
+- `requires` — the command's effective requirement names (its own and its
+  modules', see `<requirement>`), each the `name` of an entry in
+  `requirements`. `requirements` lists the winning definitions: `defined_in`
+  is the include source (`null` = the root manifest), `check` the command
+  pult runs, `shadowed` the include sources whose definition the root's replaced. Listing
+  runs no check; `pult doctor --json` reports readiness.
 - `steps` — the labels a live run emits as `step k/n <name>` events (as
   `status <name>` instead when the run inherited its `PULT_EVENTS` channel;
   see [Events protocol](#events-protocol--pult_events) below); `null` for a
@@ -576,7 +627,7 @@ Field notes:
 ## Machine-readable readiness — `pult doctor --json`
 
 Same trust gate and exit-code semantics as text-mode `pult doctor` (exit 1 if
-any declared check failed, with `ok` still `true`: the report itself
+any command is not ready, with `ok` still `true`: the report itself
 succeeded), but as a stable document for tooling instead of a printed table.
 Its `data`:
 
@@ -585,14 +636,32 @@ Its `data`:
   "name": "demo",
   "manifest": "/repo/pult.yaml",
   "commands": [
-    { "id": "import", "title": "Import data", "check": "command -v aws", "ready": true, "exit_code": 0 },
-    { "id": "shell", "title": "Open a shell", "check": null, "ready": null, "exit_code": null }
+    { "id": "import", "title": "Import data", "check": "command -v aws", "ready": true, "exit_code": 0, "missing": [] },
+    { "id": "deploy", "title": "Deploy", "check": null, "ready": false, "exit_code": null, "missing": ["node"] },
+    { "id": "shell", "title": "Open a shell", "check": null, "ready": null, "exit_code": null, "missing": [] }
+  ],
+  "requirements": [
+    { "name": "node", "defined_in": "./tools", "check": "node --version",
+      "ready": false, "exit_code": 127, "resolved_path": null, "install": null,
+      "shadowed": [], "needed_by": ["deploy"] }
   ]
 }
 ```
 
-`ready` and `exit_code` are `null` when the command declares no `check:` —
-there's nothing to run, not a failure.
+A command is `ready` when its `check:` passes and none of its requirements
+is missing; `missing` names the ones whose check failed. `exit_code` is
+`null` when the command declares no `check:`, and `ready` is `null` when it
+declares neither a `check:` nor any requirement — there's nothing to run,
+not a failure.
+
+`requirements` has one entry per winning definition (see `<requirement>`),
+whether or not a command needs it. `resolved_path` is what `command -v
+<name>` finds on `PATH`, or `null`; it is reported whatever the check
+returned, so a custom check can fail while the name resolves. `install` is
+always `null` in this release. `needed_by` lists the ids of the commands whose
+effective requirements include it. A failing requirement makes the exit
+status 1 through the commands that need it; one no command needs is
+reported, but does not fail `pult doctor`.
 
 ## Machine-readable runs — `pult runs list --json`, `pult runs tail --json`
 
@@ -663,6 +732,7 @@ Lonic tool:
 | `invalid_manifest` | 1 | the manifest, or something it includes, is unreadable, invalid or does not resolve |
 | `trust_changed` | 1 | the manifest is not trusted at its current content and nothing granted it, or `--trust=<hash>` named another hash |
 | `fetch_failed` | 1 | a git module could not be fetched |
+| `missing_requirements` | 1 | a tool a command declares in `requires:` failed its check. Runs take no `--json`, so today this reaches you as the prose line on stderr; check first with `pult doctor --json` |
 | `cancelled` | 130 | the user cancelled one of pult's own prompts |
 | `generic` | 1 | any other failure |
 
