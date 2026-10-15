@@ -108,8 +108,16 @@ fn a_first_contact_refusal_carries_the_full_hash_that_list_reports() {
     );
     let keys: Vec<_> = details.as_object().unwrap().keys().cloned().collect();
     assert_eq!(keys, ["subject", "current", "what_changed"]);
-    // The prose names the same full hash, for a human reading a CI log.
-    assert_eq!(hashes_in(&stderr(&out)), [hash, hash], "{}", stderr(&out));
+    // Under `--json` the document replaces the prose; without it, the prose
+    // names the same full hash, for a human reading a CI log.
+    assert_eq!(stderr(&out), "");
+    let prose = env.pult(&["doctor"]);
+    assert_eq!(
+        hashes_in(&stderr(&prose)),
+        [hash, hash],
+        "{}",
+        stderr(&prose)
+    );
 }
 
 #[test]

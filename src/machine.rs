@@ -1,8 +1,9 @@
 //! The machine-readable surface: under `--json`, pult writes exactly one JSON
 //! document on stdout, in the envelope shared by every Lonic tool. A success
 //! carries its payload in `data`; a failure pult controls itself carries an
-//! `error` — while the prose line on stderr stays exactly what it was, so a
-//! consumer matching that prose keeps working.
+//! `error`, and the document replaces the prose line pult prints on stderr
+//! without `--json`. When the document cannot be written (stdout is closed),
+//! the prose line is printed instead, so a failure never goes unreported.
 //!
 //! ```json
 //! {"lonic_json": 1, "tool": "pult", "schema": 2, "command": "list", "ok": true,
@@ -20,7 +21,6 @@
 //! why every code here exits 1 except `usage` (2) and `cancelled` (130).
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::prompt;
 
@@ -158,9 +158,9 @@ pub fn classify(err: &anyhow::Error) -> ErrorCode {
     existing_code(err).unwrap_or(ErrorCode::Generic)
 }
 
-/// A usage error with pult's own text — printed to stderr as-is (no
-/// `pult: error:` prefix, the way pult has always printed its usage lines),
-/// exit 2.
+/// A usage error with pult's own text, exit 2. Without `--json` it is printed
+/// to stderr as-is (no `pult: error:` prefix, the way pult has always printed
+/// its usage lines); under `--json` it is the document's `message`.
 pub fn usage(message: impl Into<String>) -> anyhow::Error {
     coded(ErrorCode::Usage, anyhow::anyhow!(message.into()))
 }
@@ -175,11 +175,6 @@ struct Mode {
 
 static MODE: OnceLock<Mode> = OnceLock::new();
 
-/// Set once, while a `--json` stream (`runs tail --json`) has written to
-/// stdout: an error document after part of a stream would not be the one
-/// document stdout carries, so none is written.
-static STDOUT_COMMITTED: AtomicBool = AtomicBool::new(false);
-
 /// Record the machine mode for this process from its arguments (argv[0]
 /// excluded). Called once, first thing.
 pub fn init(args: &[String]) {
@@ -187,11 +182,6 @@ pub fn init(args: &[String]) {
         json: wants_json(args),
         command: command_name(args),
     });
-}
-
-/// Mark stdout as carrying part of a `--json` stream.
-pub fn commit_stdout() {
-    STDOUT_COMMITTED.store(true, Ordering::Relaxed);
 }
 
 /// Whether the arguments ask for JSON: a bare `--json` token before any
@@ -265,38 +255,41 @@ pub fn success(command: &str, data: serde_json::Value) -> serde_json::Value {
     })
 }
 
-/// Print the error document, when this invocation is in JSON mode and has
-/// not already committed stdout to a stream.
-fn emit(code: ErrorCode, message: &str, details: Option<serde_json::Value>) {
-    let Some(mode) = MODE.get() else { return };
-    if !mode.json || STDOUT_COMMITTED.load(Ordering::Relaxed) {
-        return;
+/// Write the error document, if this invocation is in JSON mode and stdout
+/// can still carry one; returns whether it was written.
+fn emit(code: ErrorCode, message: &str, details: Option<serde_json::Value>) -> bool {
+    let Some(mode) = MODE.get() else { return false };
+    if !mode.json {
+        return false;
     }
     // Not `println!`: with stdout closed it panics, turning the failure's
-    // exit status into 101. A document nobody can read is simply dropped.
+    // exit status into 101. A document nobody can read falls back to prose,
+    // even one cut short when the reader left mid-write.
     use std::io::Write;
     let doc = document(mode.command.as_deref(), code, message, details);
-    let _ = writeln!(std::io::stdout().lock(), "{doc}");
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{doc}").and_then(|()| out.flush()).is_ok()
 }
 
-/// Report a failure that reached `main()` and return its exit status: the
-/// prose line on stderr, then (under `--json`) the error document on stdout.
-/// A cancellation prints no prose, as before.
+/// Report a failure that reached `main()` and return its exit status: under
+/// `--json` the error document on stdout, otherwise the prose line on
+/// stderr. A cancellation prints no prose.
 pub fn report(err: &anyhow::Error) -> i32 {
     let code = classify(err);
     let message = format!("{err:#}");
-    match code {
-        ErrorCode::Cancelled => {}
-        ErrorCode::Usage => eprintln!("{message}"),
-        _ => eprintln!("pult: error: {message}"),
+    if !emit(code, &message, details(err)) {
+        match code {
+            ErrorCode::Cancelled => {}
+            ErrorCode::Usage => eprintln!("{message}"),
+            _ => eprintln!("pult: error: {message}"),
+        }
     }
-    emit(code, &message, details(err));
     code.exit_code()
 }
 
 /// Parse `argv` (argv[0] included) with `cli`. A parse failure in JSON mode
-/// prints clap's own text to stderr as usual, then a `usage` document whose
-/// `details.usage` keeps that text, and exits 2. Help and version are not
+/// is a `usage` document whose `details.usage` keeps clap's own text, in place
+/// of printing that text to stderr, and exits 2. Help and version are not
 /// failures and are left to clap, as is everything outside JSON mode.
 pub fn get_matches<I, T>(cli: clap::Command, argv: I) -> clap::ArgMatches
 where
@@ -317,12 +310,13 @@ where
         err.exit();
     }
     let text = err.render().to_string();
-    let _ = err.print();
-    emit(
+    if !emit(
         ErrorCode::Usage,
         &clap_message(&text),
         Some(serde_json::json!({ "usage": text.trim_end() })),
-    );
+    ) {
+        let _ = err.print();
+    }
     std::process::exit(ErrorCode::Usage.exit_code());
 }
 
@@ -332,27 +326,6 @@ where
 fn clap_message(text: &str) -> String {
     let head = text.split("\n\n").next().unwrap_or_default().trim_end();
     head.strip_prefix("error: ").unwrap_or(head).to_string()
-}
-
-/// A stdout writer that marks stdout committed on its first write, for
-/// streams that must not be followed by an error document.
-pub struct StreamStdout<W = std::io::Stdout>(W);
-
-impl StreamStdout {
-    pub fn new() -> Self {
-        StreamStdout(std::io::stdout())
-    }
-}
-
-impl<W: std::io::Write> std::io::Write for StreamStdout<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        commit_stdout();
-        self.0.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0.flush()
-    }
 }
 
 #[cfg(test)]
@@ -408,8 +381,8 @@ mod tests {
         assert_eq!(command_name(&args("--json")), None);
     }
 
-    /// The prose line must not change when a code is attached — consumers
-    /// still match it. Reddens if `Coded`'s Display or `source` stop
+    /// The prose line and the document's `message` must not change when a
+    /// code is attached. Reddens if `Coded`'s Display or `source` stop
     /// delegating to the wrapped error.
     #[test]
     fn a_coded_error_prints_exactly_as_the_error_it_wraps() {
@@ -455,15 +428,6 @@ mod tests {
         let err = coded(ErrorCode::TrustChanged, prompt::Dismissed);
         assert_eq!(classify(&err), ErrorCode::Cancelled);
         assert_eq!(ErrorCode::Cancelled.exit_code(), 130);
-    }
-
-    #[test]
-    fn writing_a_stream_line_commits_stdout() {
-        use std::io::Write;
-        assert!(!STDOUT_COMMITTED.load(Ordering::Relaxed));
-        let mut out = StreamStdout(Vec::new());
-        out.write_all(b"{}\n").unwrap();
-        assert!(STDOUT_COMMITTED.load(Ordering::Relaxed));
     }
 
     #[test]
