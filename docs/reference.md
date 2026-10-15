@@ -121,7 +121,8 @@ tag:      { input: {}, description: Release tag to deploy }  # any kind may add 
   is shown in the prompt as `name? (description)`, it leads the param's line in
   `pult <command> --help`, and it is carried by `--list --json`. In a module,
   `${var}` is substituted in it, and a `use:` site's own `description`
-  replaces the named param's.
+  replaces the named param's. An empty description counts as none, so
+  `description: ""` on a `use:` site clears the inherited one.
 - `use` — must reference an existing named param, which must itself be
   concrete (a named param cannot be another `use:`).
 - `flag` — a boolean. Set, it renders as its `arg`; unset, as nothing at

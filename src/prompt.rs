@@ -51,6 +51,18 @@ fn map_inquire<T>(result: Result<T, InquireError>) -> Result<T> {
 }
 
 /// Select by index, for menus whose display labels differ from their values.
+/// The question a value is asked with: `name?`, plus one parenthesised
+/// group holding the description and any `extra` (an item counter), each
+/// only when present. Params and module vars share it.
+pub fn question(name: &str, description: Option<&str>, extra: Option<&str>) -> String {
+    let notes: Vec<&str> = description.into_iter().chain(extra).collect();
+    if notes.is_empty() {
+        format!("{name}?")
+    } else {
+        format!("{name}? ({})", notes.join("; "))
+    }
+}
+
 pub fn select_index(message: &str, labels: Vec<String>) -> Result<usize> {
     require_tty(&format!("`{message}` needs an interactive choice"))?;
     map_inquire(Select::new(message, labels).raw_prompt()).map(|choice| choice.index)

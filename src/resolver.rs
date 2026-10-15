@@ -807,7 +807,7 @@ fn resolve_command(
     // Inline `use:` params; everything downstream sees concrete definitions.
     let mut params: IndexMap<String, ParamDef> = IndexMap::new();
     for (name, def) in &cmd.params {
-        let concrete = match def.kind() {
+        let mut concrete = match def.kind() {
             ParamKind::Use(target) => {
                 let (named, _) = ns.params.get(target).with_context(|| {
                     format!(
@@ -830,6 +830,11 @@ fn resolve_command(
             }
             _ => def.clone(),
         };
+        // An empty description is none, so a `use:` site clears an
+        // inherited one with `description: ""`.
+        if concrete.description.as_deref() == Some("") {
+            concrete.description = None;
+        }
         params.insert(name.clone(), concrete);
     }
 
@@ -1275,7 +1280,8 @@ commands:
     params:
       env: { use: env }
       other: { use: env, description: "Somewhere else" }
-    run: "echo {env} {other}"
+      plain: { use: env, description: "" }
+    run: "echo {env} {other} {plain}"
 "#;
         let (_d, resolved) = setup(
             "version: 1\nincludes:\n  - source: ./mods/aws\n    vars: { cluster_prefix: dirconn }\ncommands:\n  - { id: local, title: L, run: \"true\" }\n",
@@ -1291,6 +1297,7 @@ commands:
             cmd.params["other"].description.as_deref(),
             Some("Somewhere else")
         );
+        assert_eq!(cmd.params["plain"].description, None);
     }
 
     #[test]

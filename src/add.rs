@@ -179,10 +179,7 @@ pub fn add_include(
                  with a `vars:` binding"
             );
         }
-        let message = match &def.description {
-            Some(d) => format!("{name}? ({d})"),
-            None => format!("{name}?"),
-        };
+        let message = prompt::question(name, def.description.as_deref(), None);
         vars.push((name.clone(), prompt::text(&message, None)?));
     }
 

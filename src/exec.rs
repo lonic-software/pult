@@ -487,13 +487,8 @@ fn check_count(name: &str, repeat: &RepeatDef, count: usize) -> Result<()> {
     Ok(())
 }
 
-/// A param's prompt: its name, and its description when it has one — the
-/// same shape `pult includes add` asks a module var with.
 fn question(name: &str, def: &ParamDef) -> String {
-    match &def.description {
-        Some(d) => format!("{name}? ({d})"),
-        None => format!("{name}?"),
-    }
+    prompt::question(name, def.description.as_deref(), None)
 }
 
 /// Ask for a repeat's items one per line. An empty line ends the list once
@@ -514,15 +509,12 @@ fn prompt_items(name: &str, def: &ParamDef, repeat: &RepeatDef) -> Result<Vec<St
             return Ok(items);
         }
         let done = items.len() >= repeat.min as usize;
-        let message = if done {
-            format!(
-                "{} (item {}, empty line to finish)",
-                question(name, def),
-                items.len() + 1
-            )
+        let counter = if done {
+            format!("item {}, empty line to finish", items.len() + 1)
         } else {
-            format!("{} (item {})", question(name, def), items.len() + 1)
+            format!("item {}", items.len() + 1)
         };
+        let message = prompt::question(name, def.description.as_deref(), Some(&counter));
         let item = if repeat.secret {
             prompt::password(&message)?
         } else {
@@ -689,6 +681,14 @@ mod tests {
         assert_eq!(
             question("env", &def("{ input: {}, description: Where it runs }")),
             "env? (Where it runs)"
+        );
+        assert_eq!(
+            prompt::question("only", Some("Targets"), Some("item 1")),
+            "only? (Targets; item 1)"
+        );
+        assert_eq!(
+            prompt::question("only", None, Some("item 1")),
+            "only? (item 1)"
         );
     }
 
