@@ -102,6 +102,36 @@ CLI today, and any future surface (pane runner, desktop app):
   lift that question into a param — every surface can render a param, but a
   mid-run prompt only works in a terminal.
 
+### Tools a command needs: `requires:`
+
+A command that shells out to `node`, `python3` or `aws` fails halfway through
+on a machine without them. Declare them instead, and pult checks before the
+run starts — before it asks for any param:
+
+```yaml
+version: 2                     # needed by any file that uses `requires:`
+
+requires:
+  node: {}                     # present when `command -v node` succeeds
+  aws:
+    check: "aws --version"     # or say how to tell
+
+commands:
+  - id: deploy
+    title: Deploy
+    requires: [aws, node]
+    run: ./bin/deploy
+```
+
+If a check fails, `pult deploy` stops before doing anything else and names
+what is missing. `pult doctor` checks every requirement, whichever commands
+need it.
+
+In a module, `requires:` covers more than the module's own commands: a
+consumer's command that uses one of the module's steps or params needs
+everything the module requires. The consumer can redefine a name in its own
+`requires:` to replace the module's check; the root's definition always wins.
+
 ### Switches and lists: `flag` and `repeat`
 
 Wrapping a CLI usually means passing switches and lists through. Two param
