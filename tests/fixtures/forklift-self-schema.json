@@ -27,7 +27,8 @@
           "name": {
             "repeat": {
               "max": 1
-            }
+            },
+            "description": "The alias name (default: \"fl\")"
           }
         },
         "run": "alias install -- {name}",
@@ -42,7 +43,8 @@
           "name": {
             "repeat": {
               "max": 1
-            }
+            },
+            "description": "The alias name (default: \"fl\")"
           }
         },
         "run": "alias uninstall -- {name}",
@@ -64,12 +66,14 @@
           "full": {
             "flag": {
               "arg": "--full"
-            }
+            },
+            "description": "Re-read and re-hash every present chunk, and re-assemble each chunked file to verify its content hash (a normal audit only presence-checks chunks)"
           },
           "pallet": {
             "repeat": {
               "max": 1
-            }
+            },
+            "description": "The pallet to audit (default: the current pallet)"
           }
         },
         "run": "audit {full} -- {pallet}",
@@ -93,15 +97,18 @@
           "scope": {
             "repeat": {
               "arg": "--scope"
-            }
+            },
+            "description": "Limit the bay to one or more subtree paths — a scoped (sparse) bay. Repeatable"
           },
           "name": {
-            "input": {}
+            "input": {},
+            "description": "The bay's name (also the name of the new pallet it checks out)"
           },
           "path": {
             "repeat": {
               "max": 1
-            }
+            },
+            "description": "Where to create the working directory (default: a sibling of the warehouse)"
           }
         },
         "run": "bay add {scope} -- {name} {path}",
@@ -114,7 +121,8 @@
         "description": "De-register a bay: remove its local state and the redirect in its working directory. The bay's pallet is a normal ref and is kept, and its materialized files are left in place — delete the directory yourself to reclaim the space.",
         "params": {
           "name": {
-            "input": {}
+            "input": {},
+            "description": "The bay to remove"
           }
         },
         "run": "bay remove -- {name}",
@@ -129,10 +137,12 @@
             "repeat": {
               "arg": "--rev",
               "max": 1
-            }
+            },
+            "description": "The revision to blame at: a pallet name or a parcel hash (default: the current pallet's head)"
           },
           "path": {
-            "input": {}
+            "input": {},
+            "description": "The file to blame"
           }
         },
         "run": "blame {rev} -- {path}",
@@ -147,10 +157,12 @@
             "repeat": {
               "arg": "--message",
               "max": 1
-            }
+            },
+            "description": "The new parcel's message (default: the source parcel's message)"
           },
           "revision": {
-            "input": {}
+            "input": {},
+            "description": "The parcel to cherry-pick: a pallet name, or a parcel hash / unique prefix"
           }
         },
         "run": "cherry-pick {message} -- {revision}",
@@ -164,12 +176,14 @@
           "all": {
             "flag": {
               "arg": "--all"
-            }
+            },
+            "description": "Repack existing packs too: drop unreachable objects and consolidate (a full repack)"
           },
           "redelta": {
             "flag": {
               "arg": "--redelta"
-            }
+            },
+            "description": "Re-encode every object to delta-compress across the whole store (only with --all)"
           }
         },
         "run": "compact {all} {redelta}",
@@ -183,18 +197,21 @@
           "global": {
             "flag": {
               "arg": "--global"
-            }
+            },
+            "description": "Operate on the per-user configuration that applies to all warehouses"
           },
           "unset": {
             "flag": {
               "arg": "--unset"
-            }
+            },
+            "description": "Remove the key from the configuration (e.g. \"config --unset remote.token\")"
           },
           "key-value": {
             "repeat": {
               "max": 2,
               "secret": true
-            }
+            },
+            "description": "key: The configuration key (e.g. \"operator.name\"); omit it to list every key | value: The value to set the key to; omit it to print the current value"
           }
         },
         "run": "config {global} {unset} -- {key-value}",
@@ -214,7 +231,8 @@
         "description": "Consolidate (merge) another pallet into the current one. Fast-forwards when possible; otherwise runs a three-way merge and stacks a merge parcel. Conflicts are marked in the affected files and must be resolved, loaded and stacked to complete the consolidation.",
         "params": {
           "pallet": {
-            "input": {}
+            "input": {},
+            "description": "The pallet whose head to merge into the current pallet"
           }
         },
         "run": "consolidate -- {pallet}",
@@ -229,10 +247,12 @@
             "repeat": {
               "arg": "--message",
               "max": 1
-            }
+            },
+            "description": "The delivered parcel's message"
           },
           "target": {
-            "input": {}
+            "input": {},
+            "description": "The pallet to deliver onto"
           }
         },
         "run": "deliver {message} -- {target}",
@@ -246,10 +266,12 @@
           "staged": {
             "flag": {
               "arg": "--staged"
-            }
+            },
+            "description": "Compare the inventory against the pallet head (what \"stack\" would record)"
           },
           "targets": {
-            "repeat": {}
+            "repeat": {},
+            "description": "[path], or <revision-a> <revision-b> [path] — \":empty\" is the empty tree"
           }
         },
         "run": "diff {staged} -- {targets}",
@@ -261,7 +283,8 @@
         "description": "One-way export of this warehouse's history into a new git repository: parcels become commits, trees become trees, blobs become blobs, and each user pallet becomes a branch. The escape hatch that makes trying forklift reversible — but lossy in this direction: git has no home for the signed office, the @manifest, or per-parcel signatures, so those are dropped. The path must be empty or new. Requires git on PATH.",
         "params": {
           "path": {
-            "input": {}
+            "input": {},
+            "description": "Where to create the git repository (must be empty or new)"
           }
         },
         "run": "export-git -- {path}",
@@ -276,31 +299,37 @@
             "repeat": {
               "arg": "--pallet",
               "max": 1
-            }
+            },
+            "description": "The pallet to check out (default: the remote's default pallet)"
           },
           "token": {
             "repeat": {
               "arg": "--token",
               "max": 1,
               "secret": true
-            }
+            },
+            "description": "The bearer token, when the remote requires one (remembered as \"remote.token\")"
           },
           "only": {
             "repeat": {
               "arg": "--only"
-            }
+            },
+            "description": "Franchise sparsely: fetch only the named subtree path(s) of content. Repeatable"
           },
           "expect": {
             "repeat": {
               "arg": "--expect",
               "max": 1
-            }
+            },
+            "description": "Refuse unless the remote's trust anchor is this genesis (an out-of-band pin)"
           },
           "url": {
-            "input": {}
+            "input": {},
+            "description": "The URL of the remote warehouse (e.g. http://forklift.example.com:9418)"
           },
           "directory": {
-            "input": {}
+            "input": {},
+            "description": "The directory to create the warehouse in (must be new or empty)"
           }
         },
         "run": "franchise {pallet} {token} {only} {expect} -- {url} {directory}",
@@ -325,26 +354,30 @@
               "arg": "--target",
               "min": 1,
               "max": 1
-            }
+            },
+            "description": "The pallet to merge into"
           },
           "source": {
             "repeat": {
               "arg": "--source",
               "max": 1
-            }
+            },
+            "description": "The pallet to merge from (default: the current pallet)"
           },
           "title": {
             "repeat": {
               "arg": "--title",
               "min": 1,
               "max": 1
-            }
+            },
+            "description": "A short title for the proposal"
           },
           "message": {
             "repeat": {
               "arg": "--message",
               "max": 1
-            }
+            },
+            "description": "A longer description"
           }
         },
         "run": "haul open {target} {source} {title} {message}",
@@ -359,7 +392,8 @@
             "repeat": {
               "arg": "--state",
               "max": 1
-            }
+            },
+            "description": "Which to show: open (default) | merged | closed | all"
           }
         },
         "run": "haul list {state}",
@@ -371,7 +405,8 @@
         "category": "haul",
         "params": {
           "id": {
-            "input": {}
+            "input": {},
+            "description": "The haul id (or a unique prefix)"
           }
         },
         "run": "haul show -- {id}",
@@ -387,10 +422,12 @@
               "arg": "--message",
               "min": 1,
               "max": 1
-            }
+            },
+            "description": "The comment text"
           },
           "id": {
-            "input": {}
+            "input": {},
+            "description": "The haul id (or a unique prefix)"
           }
         },
         "run": "haul comment {message} -- {id}",
@@ -405,21 +442,25 @@
           "request-changes": {
             "flag": {
               "arg": "--request-changes"
-            }
+            },
+            "description": "Request changes instead of approving"
           },
           "comment": {
             "flag": {
               "arg": "--comment"
-            }
+            },
+            "description": "A plain review comment (no approval)"
           },
           "message": {
             "repeat": {
               "arg": "--message",
               "max": 1
-            }
+            },
+            "description": "The review message"
           },
           "id": {
-            "input": {}
+            "input": {},
+            "description": "The haul id (or a unique prefix)"
           }
         },
         "run": "haul review {request-changes} {comment} {message} -- {id}",
@@ -431,7 +472,8 @@
         "category": "haul",
         "params": {
           "id": {
-            "input": {}
+            "input": {},
+            "description": "The haul id (or a unique prefix)"
           }
         },
         "run": "haul merge -- {id}",
@@ -443,7 +485,8 @@
         "category": "haul",
         "params": {
           "id": {
-            "input": {}
+            "input": {},
+            "description": "The haul id (or a unique prefix)"
           }
         },
         "run": "haul close -- {id}",
@@ -455,7 +498,8 @@
         "category": "haul",
         "params": {
           "id": {
-            "input": {}
+            "input": {},
+            "description": "The haul id (or a unique prefix)"
           }
         },
         "run": "haul reopen -- {id}",
@@ -478,29 +522,34 @@
             "repeat": {
               "arg": "--class",
               "max": 1
-            }
+            },
+            "description": "Show only parcels authored by this identity class: human | agent | bot | service"
           },
           "limit": {
             "repeat": {
               "arg": "--limit",
               "max": 1
-            }
+            },
+            "description": "Show at most this many parcels (newest first) — a bounded walk that never loads the whole history"
           },
           "after": {
             "repeat": {
               "arg": "--after",
               "max": 1
-            }
+            },
+            "description": "Resume paging from a cursor returned as `next` by a previous `--json` page (an opaque list of frontier parcels). Use with `-n` to read history in batches"
           },
           "oneline": {
             "flag": {
               "arg": "--oneline"
-            }
+            },
+            "description": "One line per parcel: the abbreviated hash and the description's first line only (git's `log --oneline`). Skips the author, timestamps and full message — and the office/display-name work behind them — so it is the fastest way to scan history"
           },
           "revision": {
             "repeat": {
               "max": 1
-            }
+            },
+            "description": "A pallet name or a parcel hash prefix (default: the current pallet)"
           }
         },
         "run": "history {class} {limit} {after} {oneline} -- {revision}",
@@ -514,10 +563,12 @@
           "no-compact": {
             "flag": {
               "arg": "--no-compact"
-            }
+            },
+            "description": "Store the imported objects loose instead of packing (and delta-compressing) them on the way in"
           },
           "path": {
-            "input": {}
+            "input": {},
+            "description": "The git repository to import from (e.g. \\\".\\\")"
           }
         },
         "run": "import-git {no-compact} -- {path}",
@@ -536,7 +587,8 @@
         "title": "Take the current state of a file or directory into the inventory (stage)",
         "params": {
           "path": {
-            "input": {}
+            "input": {},
+            "description": "The file or directory to load"
           }
         },
         "run": "load -- {path}",
@@ -551,7 +603,8 @@
             "repeat": {
               "arg": "--expect",
               "max": 1
-            }
+            },
+            "description": "Refuse unless the remote's trust anchor is this genesis (an out-of-band pin)"
           }
         },
         "run": "lower {expect}",
@@ -577,10 +630,12 @@
               "arg": "--message",
               "min": 1,
               "max": 1
-            }
+            },
+            "description": "The note text"
           },
           "revision": {
-            "input": {}
+            "input": {},
+            "description": "The parcel the note is about (a pallet name, or a parcel hash / unique prefix)"
           }
         },
         "run": "manifest note {message} -- {revision}",
@@ -596,10 +651,12 @@
             "repeat": {
               "arg": "--message",
               "max": 1
-            }
+            },
+            "description": "An optional message to attach to the approval"
           },
           "revision": {
-            "input": {}
+            "input": {},
+            "description": "The parcel to approve (a pallet name, or a parcel hash / unique prefix)"
           }
         },
         "run": "manifest approve {message} -- {revision}",
@@ -616,34 +673,40 @@
               "arg": "--model",
               "min": 1,
               "max": 1
-            }
+            },
+            "description": "The model that produced the change (e.g. claude-opus-4-8)"
           },
           "tool": {
             "repeat": {
               "arg": "--tool",
               "max": 1
-            }
+            },
+            "description": "The tool or agent that ran the model (e.g. claude-code)"
           },
           "session": {
             "repeat": {
               "arg": "--session",
               "max": 1
-            }
+            },
+            "description": "The session / conversation id the change came from"
           },
           "transcript": {
             "repeat": {
               "arg": "--transcript",
               "max": 1
-            }
+            },
+            "description": "A hash or fingerprint of the prompt / transcript"
           },
           "message": {
             "repeat": {
               "arg": "--message",
               "max": 1
-            }
+            },
+            "description": "An optional human-readable summary"
           },
           "revision": {
-            "input": {}
+            "input": {},
+            "description": "The parcel the provenance is about (a pallet name, or a parcel hash / prefix)"
           }
         },
         "run": "manifest provenance {model} {tool} {session} {transcript} {message} -- {revision}",
@@ -656,7 +719,8 @@
         "description": "Show every manifest entry (approvals, notes) attached to a parcel, oldest first, with who recorded each and when.",
         "params": {
           "revision": {
-            "input": {}
+            "input": {},
+            "description": "The parcel whose manifest to show (a pallet name, or a parcel hash / prefix)"
           }
         },
         "run": "manifest show -- {revision}",
@@ -680,12 +744,14 @@
           "offline": {
             "flag": {
               "arg": "--offline"
-            }
+            },
+            "description": "Skip the configured remote (its heads will not be in the trust boundary)"
           },
           "passphrase": {
             "flag": {
               "arg": "--passphrase"
-            }
+            },
+            "description": "Protect the new key with a passphrase (recommended for human operators)"
           }
         },
         "run": "office enroll {offline} {passphrase}",
@@ -700,7 +766,8 @@
           "passphrase": {
             "flag": {
               "arg": "--passphrase"
-            }
+            },
+            "description": "Protect the new key with a passphrase (recommended for human operators)"
           }
         },
         "run": "office keygen {passphrase}",
@@ -716,42 +783,51 @@
             "repeat": {
               "arg": "--role",
               "max": 1
-            }
+            },
+            "description": "The operator's role: admin, writer or reader"
           },
           "pallet": {
             "repeat": {
               "arg": "--pallet"
-            }
+            },
+            "description": "Restrict a writer to these pallets (repeatable; default: all pallets)"
           },
           "agent": {
             "flag": {
               "arg": "--agent"
-            }
+            },
+            "description": "Mark this operator as an AI agent (requires --supervisor)"
           },
           "bot": {
             "flag": {
               "arg": "--bot"
-            }
+            },
+            "description": "Mark this operator as an automation bot"
           },
           "service": {
             "flag": {
               "arg": "--service"
-            }
+            },
+            "description": "Mark this operator as a service / CI identity"
           },
           "supervisor": {
             "repeat": {
               "arg": "--supervisor",
               "max": 1
-            }
+            },
+            "description": "The supervising human operator (required for --agent)"
           },
           "operator-id": {
-            "input": {}
+            "input": {},
+            "description": "The operator's UUID (printed by their \"office keygen\")"
           },
           "public-key": {
-            "input": {}
+            "input": {},
+            "description": "The operator's public key (64 hex characters)"
           },
           "pop": {
-            "input": {}
+            "input": {},
+            "description": "The key's proof-of-possession (printed by their \"office keygen\")"
           }
         },
         "run": "office admit {role} {pallet} {agent} {bot} {service} {supervisor} -- {operator-id} {public-key} {pop}",
@@ -764,10 +840,12 @@
         "description": "Link another device's key to your own identity: a sigchain endorsement — the new key is trusted because a key you already hold signs for it, so every warehouse that trusts your identity accepts it automatically. Run \"forklift office keygen\" on the other device (configured with the same operator.uuid) and pass the printed public key and proof-of-possession here.",
         "params": {
           "public-key": {
-            "input": {}
+            "input": {},
+            "description": "The new key's public half (64 hex characters)"
           },
           "pop": {
-            "input": {}
+            "input": {},
+            "description": "The new key's proof-of-possession (printed by \"office keygen\")"
           }
         },
         "run": "office link -- {public-key} {pop}",
@@ -780,13 +858,16 @@
         "description": "Authorize a new key for an already-enrolled operator: the recovery path for someone who lost every device (the scope of a key-authorization equals the scope of the authorizer's authority, so an admin's endorsement is valid exactly here, in the office they administer). The operator runs \"forklift office keygen\" on their new machine and hands you the printed line over a channel where you can confirm it is really them; their proof-of-possession still co-signs the record, so you cannot attribute a key they do not hold. For your own devices use \"office link\"; for a new operator use \"office admit\".",
         "params": {
           "operator-id": {
-            "input": {}
+            "input": {},
+            "description": "The enrolled operator's UUID (printed by their \"office keygen\")"
           },
           "public-key": {
-            "input": {}
+            "input": {},
+            "description": "The new key's public half (64 hex characters)"
           },
           "pop": {
-            "input": {}
+            "input": {},
+            "description": "The new key's proof-of-possession (printed by \"office keygen\")"
           }
         },
         "run": "office authorize -- {operator-id} {public-key} {pop}",
@@ -801,13 +882,16 @@
           "pallet": {
             "repeat": {
               "arg": "--pallet"
-            }
+            },
+            "description": "Restrict a writer to these pallets (repeatable; default: all pallets)"
           },
           "identifier": {
-            "input": {}
+            "input": {},
+            "description": "The identifier of the user"
           },
           "role": {
-            "input": {}
+            "input": {},
+            "description": "The new role: admin, writer or reader"
           }
         },
         "run": "office role {pallet} -- {identifier} {role}",
@@ -822,12 +906,14 @@
           "offline": {
             "flag": {
               "arg": "--offline"
-            }
+            },
+            "description": "Skip the configured remote (its heads will not join the distrust boundary)"
           },
           "passphrase": {
             "flag": {
               "arg": "--passphrase"
-            }
+            },
+            "description": "Protect the new key with a passphrase (recommended for human operators)"
           }
         },
         "run": "office rotate {offline} {passphrase}",
@@ -842,15 +928,18 @@
           "compromised": {
             "flag": {
               "arg": "--compromised"
-            }
+            },
+            "description": "The key may be in someone else's hands (recorded as the revocation reason)"
           },
           "offline": {
             "flag": {
               "arg": "--offline"
-            }
+            },
+            "description": "Skip the configured remote (its heads will not join the distrust boundary)"
           },
           "key-id": {
-            "input": {}
+            "input": {},
+            "description": "The id of the key to revoke"
           }
         },
         "run": "office retire {compromised} {offline} -- {key-id}",
@@ -865,7 +954,8 @@
           "confirm": {
             "flag": {
               "arg": "--confirm"
-            }
+            },
+            "description": "Actually perform the reset (without it, a dry-run explanation is printed)"
           }
         },
         "run": "office regenesis {confirm}",
@@ -881,7 +971,8 @@
             "repeat": {
               "arg": "--confirm",
               "max": 1
-            }
+            },
+            "description": "Accept the new anchor, whose genesis must be this value (without it, the reset is only described)"
           }
         },
         "run": "office accept-regenesis {confirm}",
@@ -903,12 +994,14 @@
           "all": {
             "flag": {
               "arg": "--all"
-            }
+            },
+            "description": "When listing, also show the meta pallets (the office and other tracked metadata; reach them with the \"@\" qualifier, e.g. \"history @office\")"
           },
           "name-revision": {
             "repeat": {
               "max": 2
-            }
+            },
+            "description": "name: The name of the new pallet; omit it to list the pallets | revision: Where the new pallet starts: a pallet name or a parcel hash prefix (default: the current pallet's head)"
           }
         },
         "run": "palletize {all} -- {name-revision}",
@@ -948,12 +1041,14 @@
             "repeat": {
               "arg": "--inventory",
               "max": 1
-            }
+            },
+            "description": "Peek into the inventory of a working-directory folder instead of an object"
           },
           "object": {
             "repeat": {
               "max": 1
-            }
+            },
+            "description": "The hash of the object to peek into"
           }
         },
         "run": "peek {inventory} -- {object}",
@@ -993,16 +1088,19 @@
             "repeat": {
               "arg": "--display-name",
               "max": 1
-            }
+            },
+            "description": "The display name (local only; falls back to the operator id)"
           },
           "id": {
             "repeat": {
               "arg": "--id",
               "max": 1
-            }
+            },
+            "description": "The operator id (e.g. one issued by a hosting provider); minted when omitted"
           },
           "name": {
-            "input": {}
+            "input": {},
+            "description": "The profile name (e.g. \"work\")"
           }
         },
         "run": "profile create {display-name} {id} -- {name}",
@@ -1014,7 +1112,8 @@
         "category": "profile",
         "params": {
           "name": {
-            "input": {}
+            "input": {},
+            "description": "The profile name"
           }
         },
         "run": "profile use -- {name}",
@@ -1029,118 +1128,139 @@
             "repeat": {
               "arg": "--from",
               "max": 1
-            }
+            },
+            "description": "Exclude this revision and all its ancestors from the walk (git's A..B shape)"
           },
           "class": {
             "repeat": {
               "arg": "--class",
               "max": 1
-            }
+            },
+            "description": "Verified author identity class: human | agent | bot | service"
           },
           "unsupervised": {
             "flag": {
               "arg": "--unsupervised"
-            }
+            },
+            "description": "Verified author is automated (agent/bot/service) and has no supervisor"
           },
           "supervisor": {
             "repeat": {
               "arg": "--supervisor",
               "max": 1
-            }
+            },
+            "description": "Verified author is supervised by this operator id"
           },
           "signer": {
             "repeat": {
               "arg": "--signer",
               "max": 1
-            }
+            },
+            "description": "Verified signing key (id prefix)"
           },
           "author-after": {
             "repeat": {
               "arg": "--author-after",
               "max": 1
-            }
+            },
+            "description": "Only parcels authored after this RFC 3339 timestamp"
           },
           "author-before": {
             "repeat": {
               "arg": "--author-before",
               "max": 1
-            }
+            },
+            "description": "Only parcels authored before this RFC 3339 timestamp"
           },
           "merges": {
             "flag": {
               "arg": "--merges"
-            }
+            },
+            "description": "Only merge parcels (more than one parent)"
           },
           "no-merges": {
             "flag": {
               "arg": "--no-merges"
-            }
+            },
+            "description": "Only non-merge parcels"
           },
           "grep": {
             "repeat": {
               "arg": "--grep",
               "max": 1
-            }
+            },
+            "description": "Description matches this glob (*, ?) or contains it as a substring"
           },
           "model": {
             "repeat": {
               "arg": "--model",
               "max": 1
-            }
+            },
+            "description": "Recorded machine-authorship model matches this glob (*, ?) or contains it as a substring (from a manifest provenance entry; absence of any entry never matches)"
           },
           "tool": {
             "repeat": {
               "arg": "--tool",
               "max": 1
-            }
+            },
+            "description": "Recorded machine-authorship tool matches this glob (*, ?) or contains it as a substring (from a manifest provenance entry; absence of any entry never matches)"
           },
           "tag": {
             "repeat": {
               "arg": "--tag",
               "max": 1
-            }
+            },
+            "description": "Carries this signed tag (from the @tags meta pallet)"
           },
           "touches": {
             "repeat": {
               "arg": "--touches",
               "max": 1
-            }
+            },
+            "description": "Changed this warehouse path (or a path under it) versus the parcel's first parent only — a merge whose result at the path already matches its first parent (e.g. both sides added identical content) does not match, even if the other parent touched it (see \"forklift help query\")"
           },
           "verify": {
             "flag": {
               "arg": "--verify"
-            }
+            },
+            "description": "Verify identity answers (the default; the flag exists to say so explicitly)"
           },
           "recorded": {
             "flag": {
               "arg": "--recorded"
-            }
+            },
+            "description": "Use the recorded (self-declared, forgeable) identity instead of verifying: cheaper, prunes early, and every answer is labeled \"recorded\""
           },
           "where": {
             "repeat": {
               "arg": "--where",
               "max": 1
-            }
+            },
+            "description": "A JSON predicate tree (\"-\" reads it from stdin) AND-ed with the flags"
           },
           "limit": {
             "repeat": {
               "arg": "--limit",
               "max": 1
-            }
+            },
+            "description": "Show at most this many matches (bounds the output page, never the verification work — scope the walk with revisions or --from for that)"
           },
           "after": {
             "repeat": {
               "arg": "--after",
               "max": 1
-            }
+            },
+            "description": "Resume paging from a cursor returned as `next` by a previous `--json` page"
           },
           "oneline": {
             "flag": {
               "arg": "--oneline"
-            }
+            },
+            "description": "One line per match: the abbreviated hash and the description's first line"
           },
           "revisions": {
-            "repeat": {}
+            "repeat": {},
+            "description": "Walk from these revisions (pallet names or parcel hashes; default: the current pallet's head)"
           }
         },
         "run": "query {from} {class} {unsupervised} {supervisor} {signer} {author-after} {author-before} {merges} {no-merges} {grep} {model} {tool} {tag} {touches} {verify} {recorded} {where} {limit} {after} {oneline} -- {revisions}",
@@ -1152,7 +1272,8 @@
         "description": "Stage a file or directory for removal: its inventory entries are marked as deleted, so they will not be part of the next parcel. The working directory is not touched. To unstage changes instead (undo a \"load\"), use \"unload\".",
         "params": {
           "path": {
-            "input": {}
+            "input": {},
+            "description": "The file or directory to stage for removal"
           }
         },
         "run": "remove -- {path}",
@@ -1166,10 +1287,12 @@
           "staged": {
             "flag": {
               "arg": "--staged"
-            }
+            },
+            "description": "Reset the inventory entries to the pallet head instead (unstage)"
           },
           "path": {
-            "input": {}
+            "input": {},
+            "description": "The file or directory to restore"
           }
         },
         "run": "restore {staged} -- {path}",
@@ -1183,7 +1306,8 @@
           "check": {
             "flag": {
               "arg": "--check"
-            }
+            },
+            "description": "Only report whether an update is available and how to get it; change nothing"
           }
         },
         "run": "self-update {check}",
@@ -1195,7 +1319,8 @@
         "description": "Shift to another pallet: materialize its head parcel in the working directory and repopulate the inventory from it. Refuses to run while there are staged or unstaged changes (untracked files are tolerated).",
         "params": {
           "pallet": {
-            "input": {}
+            "input": {},
+            "description": "The pallet to shift to"
           }
         },
         "run": "shift -- {pallet}",
@@ -1207,7 +1332,8 @@
         "description": "Print a file's content at a revision in one invocation: \"<revision>:<path>\", split on the first \":\" (a revision — a pallet name, an \"@\"-qualified meta pallet, or a parcel hash prefix — can never contain \":\", so the split is unambiguous even when the path itself has one). A chunked large file reports its metadata (content hash, size, chunk count) instead of assembling it; non-text content is reported binary. With --json, the envelope carries the resolved parcel hash, the tree entry's own hash, the binary/chunked signal, and the content when it is text.",
         "params": {
           "target": {
-            "input": {}
+            "input": {},
+            "description": "\"<revision>:<path>\""
           }
         },
         "run": "show -- {target}",
@@ -1221,7 +1347,8 @@
           "description": {
             "repeat": {
               "max": 1
-            }
+            },
+            "description": "The description of the parcel"
           }
         },
         "run": "stack -- {description}",
@@ -1235,7 +1362,8 @@
           "summary": {
             "flag": {
               "arg": "--summary"
-            }
+            },
+            "description": "Report only the counts, not the per-path changes"
           }
         },
         "run": "stocktake {summary}",
@@ -1249,7 +1377,8 @@
           "paths": {
             "repeat": {
               "min": 1
-            }
+            },
+            "description": "The subtree path(s) to add to the fetch scope. Repeatable"
           }
         },
         "run": "expand -- {paths}",
@@ -1263,7 +1392,8 @@
           "paths": {
             "repeat": {
               "min": 1
-            }
+            },
+            "description": "The in-scope subtree path(s) to drop. Repeatable"
           }
         },
         "run": "narrow -- {paths}",
@@ -1294,12 +1424,14 @@
           "dry-run": {
             "flag": {
               "arg": "--dry-run"
-            }
+            },
+            "description": "Report what would be freed and change nothing"
           },
           "paths": {
             "repeat": {
               "min": 1
-            }
+            },
+            "description": "The fetched path(s) to prune. Repeatable; also accepts a path an earlier, interrupted prune already dropped from the fetch scope, to resume and finish freeing it"
           }
         },
         "run": "scope-prune {dry-run} -- {paths}",
@@ -1332,15 +1464,18 @@
             "repeat": {
               "arg": "--message",
               "max": 1
-            }
+            },
+            "description": "The tag message"
           },
           "name": {
-            "input": {}
+            "input": {},
+            "description": "The tag name (a release label, e.g. \"v1.2.0\")"
           },
           "revision": {
             "repeat": {
               "max": 1
-            }
+            },
+            "description": "The revision to tag: a pallet name or a parcel hash (default: the current pallet head)"
           }
         },
         "run": "tag create {message} -- {name} {revision}",
@@ -1352,7 +1487,8 @@
         "category": "tag",
         "params": {
           "name": {
-            "input": {}
+            "input": {},
+            "description": "The tag name"
           }
         },
         "run": "tag show -- {name}",
@@ -1380,7 +1516,8 @@
         "description": "Unstage a file or directory: reset its inventory entries to the pallet head, leaving the working directory untouched — the inverse of \"load\", and the same as \"restore --staged\". To stage a removal instead, use \"remove\".",
         "params": {
           "path": {
-            "input": {}
+            "input": {},
+            "description": "The file or directory to unstage"
           }
         },
         "run": "unload -- {path}",

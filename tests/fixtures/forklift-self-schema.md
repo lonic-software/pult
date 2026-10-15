@@ -6,7 +6,7 @@ contract between the two tools: every command loads, in Forklift's order, and
 composes to the argv Forklift's own CLI accepts.
 
 **Provenance.** Captured from lonic-software/lonic-forklift at commit
-`eb95db99856b587ac143258b61e60b12b1d8589a` (`forklift version` 0.3.0), debug
+`941e6fe6d2387e7a0095c5a8da3280e2aee5c7b8` (`forklift version` 0.3.0), debug
 build:
 
 ```sh

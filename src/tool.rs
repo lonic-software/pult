@@ -541,6 +541,16 @@ mod tests {
     }
 
     #[test]
+    fn forklift_params_carry_their_help_as_their_description() {
+        let resolved = forklift();
+        let diff = resolved.commands.iter().find(|c| c.id == "diff").unwrap();
+        assert_eq!(
+            diff.params["staged"].description.as_deref(),
+            Some("Compare the inventory against the pallet head (what \"stack\" would record)")
+        );
+    }
+
+    #[test]
     fn forklift_commands_compose_to_these_argvs() {
         let resolved = forklift();
         let table: &[(&str, &[&str], &[&str])] = &[
