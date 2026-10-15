@@ -15,7 +15,12 @@ fn pult() -> PathBuf {
 fn argv_echo() -> PathBuf {
     let exe = format!("argv_echo{}", std::env::consts::EXE_SUFFIX);
     let path = pult().parent().unwrap().join("examples").join(exe);
-    assert!(path.is_file(), "{} is not built", path.display());
+    assert!(
+        path.is_file(),
+        "{} is not built — `cargo test` builds it, `cargo test --test tool` alone does not \
+         (run `cargo build --example argv_echo` first)",
+        path.display()
+    );
     path
 }
 

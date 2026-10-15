@@ -42,4 +42,7 @@ jobs:
       # `pult tool` spawns its program directly, so this is where argv
       # quoting meets Windows' command-line rules (tests/tool.rs).
       - name: Tool argv tests
-        run: cargo test --locked --test tool
+        # `--test tool` alone builds no examples, and the tests spawn one.
+        run: |
+          cargo build --locked --example argv_echo
+          cargo test --locked --test tool
