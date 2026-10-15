@@ -44,9 +44,9 @@ fn probe_all(resolved: &Resolved) -> Result<Vec<Probe<'_>>> {
             let exit_code = match &cmd.check {
                 None => None,
                 Some(check) => {
-                    let status = crate::shell::sh()?
-                        .arg("-c")
-                        .arg(check)
+                    let mut script = crate::shell::sh_script(check)?;
+                    let status = script
+                        .command
                         .current_dir(&resolved.run_dir)
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())

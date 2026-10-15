@@ -406,8 +406,7 @@ pub fn shell_contexts(script: &str) -> Vec<ShellContext> {
 /// (`\\?\C:\…`, `\\?\UNC\server\…`) dropped and `\` turned into `/`, giving
 /// `C:/Users/…` — which Git for Windows's `sh` executes as is, and which
 /// can't be mangled by a stray `\` escape. Pure and string-based so it's
-/// testable on every host; only called on Windows.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// testable on every host.
 pub fn windows_shell_path(path: &str) -> String {
     let path = if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{rest}")

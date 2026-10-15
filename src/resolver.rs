@@ -420,8 +420,8 @@ fn load_module(
     }
     let module_dir = file
         .parent()
-        .context("module has no parent directory")?
-        .canonicalize()
+        .context("module has no parent directory")
+        .and_then(|d| Ok(manifest::canonicalize(d)?))
         .with_context(|| format!("failed to resolve {}", file.display()))?;
     let mut module_dir = module_dir.display().to_string();
     if cfg!(windows) {

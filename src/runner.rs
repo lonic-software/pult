@@ -58,8 +58,9 @@ pub fn run_sh(
     channel: InheritedChannel,
 ) -> Result<i32> {
     eprintln!("└  running: {display}");
+    let mut script = crate::shell::sh_script(cmdline)?;
     execute(
-        crate::shell::sh()?.arg("-c").arg(cmdline).current_dir(dir),
+        script.command.current_dir(dir),
         display,
         journaling,
         channel,
@@ -76,12 +77,8 @@ pub fn run_bash(
     channel: InheritedChannel,
 ) -> Result<i32> {
     eprintln!("└  running: {label} (compiled steps — `--print` shows the script)");
-    execute(
-        crate::shell::bash()?.arg("-c").arg(script).current_dir(dir),
-        label,
-        journaling,
-        channel,
-    )
+    let mut script = crate::shell::bash_script(script)?;
+    execute(script.command.current_dir(dir), label, journaling, channel)
 }
 
 /// `channel` is the caller's one reading of `PULT_EVENTS` (the same one it

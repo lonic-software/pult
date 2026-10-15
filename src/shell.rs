@@ -67,6 +67,67 @@ pub fn bash() -> Result<Command> {
     Ok(Command::new(resolved_path("bash")?))
 }
 
+/// A shell command set up to run one script, plus (on Windows) the file the
+/// script lives in, deleted when this is dropped — keep it alive until the
+/// child exits.
+pub struct Script {
+    pub command: Command,
+    _file: Option<ScriptFile>,
+}
+
+/// `sh` running `script`.
+pub fn sh_script(script: &str) -> Result<Script> {
+    with_script(sh()?, script)
+}
+
+/// `bash` running `script`.
+pub fn bash_script(script: &str) -> Result<Script> {
+    with_script(bash()?, script)
+}
+
+/// `-c <script>` on unix. On Windows the script goes in a file instead:
+/// Windows caps a whole command line at 32,767 UTF-16 units, which a
+/// compiled step list with inlined module steps can exceed, and Git for
+/// Windows's `bash` re-splits its command line with MSYS rules rather than
+/// the MSVC ones Rust quotes for, so a `\"` in a script isn't guaranteed to
+/// arrive intact. A file path is one short, backslash-free word.
+fn with_script(command: Command, script: &str) -> Result<Script> {
+    if cfg!(windows) {
+        via_file(command, script)
+    } else {
+        let mut command = command;
+        command.arg("-c").arg(script);
+        Ok(Script {
+            command,
+            _file: None,
+        })
+    }
+}
+
+fn via_file(mut command: Command, script: &str) -> Result<Script> {
+    let path = std::env::temp_dir().join(format!("pult-{}.sh", uuid::Uuid::now_v7()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, script.as_bytes()))
+        .map_err(|e| anyhow::anyhow!("failed to write script to {}: {e}", path.display()))?;
+    let file = ScriptFile(path);
+    command.arg(crate::interp::windows_shell_path(&file.0.to_string_lossy()));
+    Ok(Script {
+        command,
+        _file: Some(file),
+    })
+}
+
+struct ScriptFile(PathBuf);
+
+impl Drop for ScriptFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 // ---------------------------------------------------------------------
 // Pure decision logic — kept unconditional (compiled on every platform,
 // unix included) so it's testable from the ubuntu/macOS CI leg, not only
@@ -774,5 +835,34 @@ mod windows_behavioral_tests {
         let (success, stdout) = run(cmd, "echo probe");
         assert!(success);
         assert_eq!(stdout, "probe");
+    }
+}
+
+#[cfg(test)]
+mod script_tests {
+    #[test]
+    fn a_script_file_carries_quotes_and_length_intact() {
+        // The Windows path, exercised with the host's sh: a `\"` and a
+        // script far past Windows' 32,767-unit command-line cap.
+        let filler = format!("# {}\n", "x".repeat(40_000));
+        let mut script = super::via_file(
+            super::sh().unwrap(),
+            &format!("{filler}echo \"say \\\"hi\\\"\"\n"),
+        )
+        .unwrap();
+        let file = script._file.as_ref().unwrap().0.clone();
+        let out = script.command.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "say \"hi\"\n");
+        drop(script);
+        assert!(
+            !file.exists(),
+            "script file left behind: {}",
+            file.display()
+        );
     }
 }

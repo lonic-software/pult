@@ -307,10 +307,9 @@ fn resolve_ephemeral(
 
     resolved.path = match &resolved.pins[0] {
         PinInfo::Git { source, .. } => PathBuf::from(source),
-        PinInfo::Local { .. } => cwd
-            .join(source)
-            .canonicalize()
-            .unwrap_or_else(|_| cwd.join(source)),
+        PinInfo::Local { .. } => {
+            crate::manifest::canonicalize(&cwd.join(source)).unwrap_or_else(|_| cwd.join(source))
+        }
     };
     resolved.name = pinned_source;
     resolved.run_dir = cwd.to_path_buf();

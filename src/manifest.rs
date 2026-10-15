@@ -461,13 +461,49 @@ pub fn load(path: &Path) -> Result<Loaded> {
         .map_err(|e| crate::machine::coded(crate::machine::ErrorCode::InvalidManifest, e))
 }
 
+/// `fs::canonicalize`, minus the `\\?\` verbatim prefix it puts on every
+/// Windows path. The result becomes the working directory of every run,
+/// `check:` and `pick.from`, and `cmd.exe`-based children (`.bat`/`.cmd`
+/// files, `npm`) refuse a `\\?\` directory and start in `C:\Windows`
+/// instead. Elsewhere this is plain `canonicalize`.
+pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    let canonical = path.canonicalize()?;
+    if cfg!(windows)
+        && let Some(plain) = canonical.to_str().and_then(strip_verbatim)
+    {
+        return Ok(PathBuf::from(plain));
+    }
+    Ok(canonical)
+}
+
+/// `\\?\C:\x` → `C:\x`, `\\?\UNC\srv\share` → `\\srv\share`. `None` when there
+/// is no prefix, or the plain form would be unsafe: past `MAX_PATH` (only
+/// the verbatim form reaches those), or a component Win32 would reinterpret
+/// once the prefix stops protecting it (`.`/`..`, a trailing dot or space).
+fn strip_verbatim(path: &str) -> Option<String> {
+    let plain = if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        let rest = path.strip_prefix(r"\\?\")?;
+        let b = rest.as_bytes();
+        if !(b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\') {
+            return None;
+        }
+        rest.to_string()
+    };
+    let reinterpreted = plain
+        .split('\\')
+        .skip(1)
+        .any(|c| c == "." || c == ".." || c.ends_with('.') || c.ends_with(' '));
+    (plain.len() < 260 && !reinterpreted).then_some(plain)
+}
+
 fn load_inner(path: &Path) -> Result<Loaded> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let manifest = parse(&raw, path)?;
-    let path = path
-        .canonicalize()
-        .with_context(|| format!("failed to resolve {}", path.display()))?;
+    let path =
+        canonicalize(path).with_context(|| format!("failed to resolve {}", path.display()))?;
     let dir = path
         .parent()
         .context("manifest has no parent directory")?
@@ -702,6 +738,28 @@ const SCHEMA_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/pult.schema.json
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_prefixes_strip_to_plain_paths() {
+        assert_eq!(
+            strip_verbatim(r"\\?\C:\Users\Máté Kolonics\repo").as_deref(),
+            Some(r"C:\Users\Máté Kolonics\repo")
+        );
+        assert_eq!(
+            strip_verbatim(r"\\?\UNC\srv\share\repo").as_deref(),
+            Some(r"\\srv\share\repo")
+        );
+    }
+
+    #[test]
+    fn verbatim_prefixes_stay_when_the_plain_path_would_differ() {
+        assert_eq!(strip_verbatim(r"C:\already\plain"), None);
+        assert_eq!(strip_verbatim(r"\\?\Volume{1234}\x"), None);
+        assert_eq!(strip_verbatim(r"\\?\C:\trailing.\x"), None);
+        assert_eq!(strip_verbatim(r"\\?\C:\space \x"), None);
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        assert_eq!(strip_verbatim(&long), None);
+    }
     use std::io::Write;
 
     #[test]

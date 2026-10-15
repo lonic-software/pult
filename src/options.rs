@@ -89,9 +89,9 @@ pub fn resolve_pick(
         .masker
         .apply(&interp::interpolate(from, redaction.display_values)?)
         .into_owned();
-    let output = crate::shell::sh()?
-        .arg("-c")
-        .arg(&cmd)
+    let mut script = crate::shell::sh_script(&cmd)?;
+    let output = script
+        .command
         .current_dir(dir)
         .output()
         .with_context(|| format!("failed to run option source `{display}`"))?;
