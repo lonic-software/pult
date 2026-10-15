@@ -375,6 +375,7 @@ fn check_subset(m: &Manifest) -> Result<()> {
                 flag,
                 repeat,
                 use_,
+                description: _,
             } = def;
             if use_.is_some() {
                 return Err(refuse(&format!("{name}.use")));
@@ -469,6 +470,18 @@ mod tests {
         assert_eq!(
             exec::argv(cmd, words, &values, &shown),
             ["c", "--token=••••••"]
+        );
+    }
+
+    #[test]
+    fn a_tool_document_may_describe_its_params() {
+        let stdout = doc(
+            r#"{"id":"c","title":"T","run":"c -- {p}","params":{"p":{"input":{},"description":"What p is"}}}"#,
+        );
+        let resolved = from_envelope(&stdout, Path::new("/opt/t")).unwrap();
+        assert_eq!(
+            resolved.commands[0].params["p"].description.as_deref(),
+            Some("What p is")
         );
     }
 

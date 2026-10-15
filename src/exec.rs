@@ -9,7 +9,7 @@ use crate::compile::Guards;
 use crate::events::{self, InheritedChannel};
 use crate::journal;
 use crate::label;
-use crate::manifest::{ParamKind, RepeatDef};
+use crate::manifest::{ParamDef, ParamKind, RepeatDef};
 use crate::mask::{self, Masker};
 use crate::resolver::{ArgvWord, Origin, Resolved, ResolvedCommand, ResolvedRun};
 use crate::runner::Journaling;
@@ -410,8 +410,8 @@ pub(crate) fn fill(
             (None, ParamKind::Repeat(_)) if preview => Value::List(vec![format!("<{name}>")]),
             // Preview: show the slot instead of prompting or shelling out.
             (None, _) if preview => Value::Text(format!("<{name}>")),
-            (None, ParamKind::Flag(_)) => Value::Flag(prompt::yes_no(&format!("{name}?"))?),
-            (None, ParamKind::Repeat(repeat)) => Value::List(prompt_items(name, repeat)?),
+            (None, ParamKind::Flag(_)) => Value::Flag(prompt::yes_no(&question(name, def))?),
+            (None, ParamKind::Repeat(repeat)) => Value::List(prompt_items(name, def, repeat)?),
             (None, ParamKind::Pick(pick)) => {
                 // A throwaway `Redaction`, rebuilt from just the values
                 // answered so far (never the run's own masker — there isn't
@@ -452,15 +452,16 @@ pub(crate) fn fill(
                 // is masked, via the same throwaway masker used above.
                 let w = label::width();
                 let labels = masked_option_labels(&opts, &masker, w);
-                let i = prompt::select_index(&format!("{name}?"), labels)?;
+                let i = prompt::select_index(&question(name, def), labels)?;
                 Value::Text(pick_selection(&opts, i))
             }
             (None, ParamKind::Input(input)) if input.secret => {
-                Value::Text(prompt::password(&format!("{name}?"))?)
+                Value::Text(prompt::password(&question(name, def))?)
             }
-            (None, ParamKind::Input(input)) => {
-                Value::Text(prompt::text(&format!("{name}?"), input.default.as_deref())?)
-            }
+            (None, ParamKind::Input(input)) => Value::Text(prompt::text(
+                &question(name, def),
+                input.default.as_deref(),
+            )?),
             (_, ParamKind::Use(_)) => unreachable!("resolver inlines every use: param"),
         };
         values.insert(name.clone(), value);
@@ -486,11 +487,15 @@ fn check_count(name: &str, repeat: &RepeatDef, count: usize) -> Result<()> {
     Ok(())
 }
 
+fn question(name: &str, def: &ParamDef) -> String {
+    prompt::question(name, def.description.as_deref(), None)
+}
+
 /// Ask for a repeat's items one per line. An empty line ends the list once
 /// `min` items are in, and the list ends by itself at `max`, so an empty
 /// item can only be given on the command line or in `--params-json`. A
 /// secret repeat's items are asked without echo.
-fn prompt_items(name: &str, repeat: &RepeatDef) -> Result<Vec<String>> {
+fn prompt_items(name: &str, def: &ParamDef, repeat: &RepeatDef) -> Result<Vec<String>> {
     // Checked here rather than left to the first prompt, whose label would
     // name an item instead of the param.
     prompt::require_tty(&if repeat.min > 0 {
@@ -504,11 +509,12 @@ fn prompt_items(name: &str, repeat: &RepeatDef) -> Result<Vec<String>> {
             return Ok(items);
         }
         let done = items.len() >= repeat.min as usize;
-        let message = if done {
-            format!("{name}? (item {}, empty line to finish)", items.len() + 1)
+        let counter = if done {
+            format!("item {}, empty line to finish", items.len() + 1)
         } else {
-            format!("{name}? (item {})", items.len() + 1)
+            format!("item {}", items.len() + 1)
         };
+        let message = prompt::question(name, def.description.as_deref(), Some(&counter));
         let item = if repeat.secret {
             prompt::password(&message)?
         } else {
@@ -667,6 +673,26 @@ fn display_argv(program: &Path, args: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::{manifest, resolver};
+
+    #[test]
+    fn a_described_param_is_asked_with_its_description() {
+        let def = |yaml: &str| serde_yaml::from_str::<ParamDef>(yaml).unwrap();
+        assert_eq!(question("env", &def("input: {}")), "env?");
+        assert_eq!(
+            question("env", &def("{ input: {}, description: Where it runs }")),
+            "env? (Where it runs)"
+        );
+        assert_eq!(
+            prompt::question("only", Some("Targets"), Some("item 1")),
+            "only? (Targets; item 1)"
+        );
+        assert_eq!(
+            prompt::question("only", None, Some("item 1")),
+            "only? (item 1)"
+        );
+        // An empty description is none, for a module var as for a param.
+        assert_eq!(prompt::question("v", Some(""), None), "v?");
+    }
 
     /// Text values, as the argv binding builds them for pick and input params.
     fn text<C: FromIterator<(String, Value)>>(pairs: &[(&str, &str)]) -> C {

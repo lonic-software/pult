@@ -484,7 +484,8 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
             let params: Vec<_> = cmd
                 .params
                 .iter()
-                .map(|(name, def)| match def.kind() {
+                .map(|(name, def)| {
+                    let mut param = match def.kind() {
                     ParamKind::Pick(pick) => match (&pick.options, &pick.from) {
                         (Some(options), _) => {
                             let values: Vec<&str> = options.iter().map(OptionDef::value).collect();
@@ -538,6 +539,10 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                         "secret": repeat.secret,
                     }),
                     ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
+                    };
+                    // Every kind carries it; `null` when the param has none.
+                    param["description"] = json!(def.description);
+                    param
                 })
                 .collect();
             // Step names a live run emits as `step k/n <name>` events (see

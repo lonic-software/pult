@@ -59,6 +59,11 @@ against. Static entries use `{ value, description }` (e.g.
 first tab — e.g. `printf '%s\t%s\n' "$id" "$label"`, with a plain `value` line
 still working unchanged.
 
+**Any param can carry a description**, too: `tag: { input: {}, description:
+Release tag to deploy }`. It's asked as `tag? (Release tag to deploy)`, leads the
+param's line in `--help`, and reaches UIs through `--list --json`. Write it the
+way you'd write a command's description: what the value is for, not its kind.
+
 **Interpolation in `run:` strings and `from:` sources is strict**: `{env}`
 must be a declared param, unknown placeholders are load errors, `{{`/`}}` are
 literal braces. Interpolated values are shell-quoted — a user typing

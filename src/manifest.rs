@@ -142,6 +142,11 @@ pub struct ParamDef {
     pub repeat: Option<RepeatDef>,
     #[serde(default, rename = "use")]
     pub use_: Option<String>,
+    /// What the value is for, in a sentence: shown beside the prompt, in
+    /// `--help`, and by `--list --json`. Not a kind, so it sits beside any of
+    /// them; on a `use:` param it replaces the named param's own.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// A present key is `Some`, its `null` body included; an absent key is

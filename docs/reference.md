@@ -102,6 +102,7 @@ force:    { flag: {} }                             # switch: renders --force whe
 dry:      { flag: { arg: "-n" } }                  # switch with its own word
 only:     { repeat: { arg: "--only", max: 2 } }    # named option, up to twice
 files:    { repeat: { min: 1 } }                   # the trailing positionals
+tag:      { input: {}, description: Release tag to deploy }  # any kind may add a description
 ```
 
 - `pick.options` — a static list. Each entry is a bare value or a
@@ -116,6 +117,12 @@ files:    { repeat: { min: 1 } }                   # the trailing positionals
   tab-free line is a plain value. May reference only params declared earlier in
   the same command. An empty result or non-zero exit is an error (stderr shown).
   CLI-provided values are **not** validated against dynamic sources.
+- `description` — optional, beside any kind. It says what the value is for: it
+  is shown in the prompt as `name? (description)`, it leads the param's line in
+  `pult <command> --help`, and it is carried by `--list --json`. In a module,
+  `${var}` is substituted in it, and a `use:` site's own `description`
+  replaces the named param's. An empty description counts as none, so
+  `description: ""` on a `use:` site clears the inherited one.
 - `use` — must reference an existing named param, which must itself be
   concrete (a named param cannot be another `use:`).
 - `flag` — a boolean. Set, it renders as its `arg`; unset, as nothing at
@@ -550,12 +557,14 @@ The stable surface for tooling and agents. Its `data`:
       "category": null,
       "description": "Opens an interactive shell for the given customer and environment.",
       "params": [
-        { "name": "env", "kind": "pick", "options": ["dev", "uat", "pre"] },
+        { "name": "env", "kind": "pick", "options": ["dev", "uat", "pre"],
+          "description": "Target environment" },
         { "name": "customer", "kind": "pick",
-          "source": "./bin/impl list --env {env}", "depends_on": ["env"] },
-        { "name": "note", "kind": "input", "default": "", "secret": false },
-        { "name": "force", "kind": "flag", "arg": "--force" },
-        { "name": "files", "kind": "repeat", "arg": null, "min": 1, "max": null, "secret": false }
+          "source": "./bin/impl list --env {env}", "depends_on": ["env"], "description": null },
+        { "name": "note", "kind": "input", "default": "", "secret": false, "description": null },
+        { "name": "force", "kind": "flag", "arg": "--force", "description": null },
+        { "name": "files", "kind": "repeat", "arg": null, "min": 1, "max": null, "secret": false,
+          "description": null }
       ],
       "check": "command -v aws",
       "interactive": true,
@@ -608,6 +617,8 @@ Field notes:
   items, `max` `null` meaning unbounded; with an `arg`, each item renders
   after it). An input or repeat with `"secret": true` must be rendered as a
   password field and never echoed, logged, or persisted by tooling.
+- Every param carries `description`: the author's sentence on what the value
+  is for, or `null`. Show it beside the control; it is display-only.
 - **Kinds are open.** A later release may add a kind within schema 2. A
   consumer that meets a `kind` it does not know cannot run that command
   (it does not know how to pass the param), but should still list it and

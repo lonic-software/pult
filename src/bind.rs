@@ -30,31 +30,38 @@ pub fn args(cmd: &ResolvedCommand) -> Vec<Arg> {
             } else {
                 arg.long(name.clone())
             };
-            match def.kind() {
+            let (arg, hint) = match def.kind() {
                 ParamKind::Pick(pick) => match &pick.options {
                     Some(opts) => {
                         let values: Vec<&str> = opts.iter().map(OptionDef::value).collect();
-                        arg.help(format!("one of: {}", values.join(", ")))
+                        (arg, format!("one of: {}", values.join(", ")))
                     }
-                    None => arg.help("picked from a dynamic option source if omitted"),
+                    None => (arg, "picked from a dynamic option source if omitted".into()),
                 },
                 ParamKind::Input(input) if input.secret => {
-                    arg.help("secret; prompted without echo if omitted")
+                    (arg, "secret; prompted without echo if omitted".into())
                 }
-                ParamKind::Input(_) => arg.help("free text; prompted if omitted"),
-                ParamKind::Flag(_) => arg
-                    .action(ArgAction::SetTrue)
-                    .help("switch; off if omitted"),
+                ParamKind::Input(_) => (arg, "free text; prompted if omitted".into()),
+                ParamKind::Flag(_) => (
+                    arg.action(ArgAction::SetTrue),
+                    "switch; off if omitted".into(),
+                ),
                 ParamKind::Repeat(repeat) => {
-                    let arg = arg.action(ArgAction::Append).help(repeat_help(repeat));
-                    if def.is_positional() {
+                    let arg = arg.action(ArgAction::Append);
+                    let arg = if def.is_positional() {
                         arg.num_args(1..)
                     } else {
                         arg.num_args(1)
-                    }
+                    };
+                    (arg, repeat_help(repeat))
                 }
                 ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
-            }
+            };
+            // The description leads; the kind's own hint stays after it.
+            arg.help(match &def.description {
+                Some(d) => format!("{d} ({hint})"),
+                None => hint,
+            })
         })
         .collect()
 }
