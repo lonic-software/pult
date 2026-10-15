@@ -4,7 +4,7 @@ Forklift's real `forklift self-schema --json` envelope, verbatim — the documen
 `pult tool forklift` reads. The unit tests in `src/tool.rs` parse it as the
 contract between the two tools: every command loads, in Forklift's order, and
 composes to the argv Forklift's own CLI accepts, and every param carries its
-help as its description (one is pinned, so a help-text change shows up there).
+help as its description (one is pinned, so a change to that help shows up there).
 
 **Provenance.** Captured from lonic-software/forklift at commit
 `941e6fe6d2387e7a0095c5a8da3280e2aee5c7b8` (`forklift version` 0.3.0), debug

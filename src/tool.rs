@@ -323,7 +323,7 @@ fn stderr_tail(stderr: &[u8]) -> String {
 /// `version`, `name`, `description`, `commands`; per command `id`, `title`,
 /// `category`, `description`, `interactive`, `params` and a one-line `run`;
 /// per param `input`, `flag`, `repeat`, or `pick` with static `options`, and
-/// a `description`.
+/// an optional `description`.
 /// Every struct is destructured in full, with no `..`, so a field the
 /// vocabulary grows fails to compile here until it is placed on one side.
 fn check_subset(m: &Manifest) -> Result<()> {
