@@ -1,6 +1,6 @@
 //! Under `--json`, a failure ends in exactly one error document on stdout,
-//! classified by `error.code` — while stderr keeps the very prose line it
-//! always had. Each case drives the real binary, because most of these
+//! classified by `error.code`, in place of the prose line pult prints on
+//! stderr without `--json`. Each case drives the real binary, because most of these
 //! failures happen before (or inside) the argument parse that would
 //! otherwise tell pult whether JSON was asked for.
 
@@ -77,15 +77,24 @@ fn error_doc(out: &Output, command: Option<&str>, code: &str, exit: i32) -> serd
     doc
 }
 
-/// The prose on stderr is the same with and without `--json`, and without
-/// `--json` stdout stays empty — the document is purely additive.
-fn assert_prose_unchanged(env: &Env, args: &[&str]) {
+/// The document replaces the prose: under `--json` stderr stays empty, and
+/// without it the same failure is the prose line `prose(message)` on stderr,
+/// with stdout empty and the same exit status.
+fn assert_document_replaces_prose(env: &Env, args: &[&str], prose: impl Fn(&str) -> String) {
     let with = env.pult(args);
+    assert!(
+        with.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&with.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&with.stdout).trim()).unwrap();
+    let message = doc["error"]["message"].as_str().unwrap();
     let without: Vec<&str> = args.iter().copied().filter(|a| *a != "--json").collect();
     let without = env.pult(&without);
     assert_eq!(
-        String::from_utf8_lossy(&with.stderr),
-        String::from_utf8_lossy(&without.stderr)
+        String::from_utf8_lossy(&without.stderr).trim_end(),
+        prose(message)
     );
     assert_eq!(with.status.code(), without.status.code());
     assert!(
@@ -93,6 +102,10 @@ fn assert_prose_unchanged(env: &Env, args: &[&str]) {
         "{}",
         String::from_utf8_lossy(&without.stdout)
     );
+}
+
+fn pult_error(message: &str) -> String {
+    format!("pult: error: {message}")
 }
 
 #[test]
@@ -106,12 +119,10 @@ fn no_manifest_is_classified_on_every_machine_surface() {
     ] {
         let out = env.pult(args);
         let doc = error_doc(&out, Some(command), "no_manifest", 1);
-        // `message` carries the same text as the prose line.
-        let stderr = String::from_utf8_lossy(&out.stderr);
         let message = doc["error"]["message"].as_str().unwrap();
-        assert_eq!(stderr.trim_end(), format!("pult: error: {message}"));
         assert!(message.starts_with("no pult.yaml found"), "{message}");
-        assert_prose_unchanged(&env, args);
+        // `message` carries the same text as the prose line it replaces.
+        assert_document_replaces_prose(&env, args, pult_error);
     }
 }
 
@@ -125,7 +136,7 @@ fn an_invalid_manifest_is_classified_whether_it_fails_to_parse_or_to_resolve() {
         "invalid_manifest",
         1,
     );
-    assert_prose_unchanged(&env, &["--list", "--json"]);
+    assert_document_replaces_prose(&env, &["--list", "--json"], pult_error);
 
     // Parses, but fails in resolution (an include that does not exist).
     let env = Env::new(Some(
@@ -137,7 +148,7 @@ fn an_invalid_manifest_is_classified_whether_it_fails_to_parse_or_to_resolve() {
         "invalid_manifest",
         1,
     );
-    assert_prose_unchanged(&env, &["doctor", "--json"]);
+    assert_document_replaces_prose(&env, &["doctor", "--json"], pult_error);
 }
 
 /// A fetch failure is raised inside manifest resolution, whose boundary marks
@@ -159,7 +170,7 @@ fn a_git_module_that_cannot_be_fetched_is_fetch_failed_not_invalid_manifest() {
             .contains("failed to fetch git module"),
         "{doc}"
     );
-    assert_prose_unchanged(&env, &["--list", "--json"]);
+    assert_document_replaces_prose(&env, &["--list", "--json"], pult_error);
 }
 
 #[test]
@@ -174,7 +185,7 @@ fn an_untrusted_manifest_without_a_terminal_is_trust_changed() {
             .contains("is not trusted"),
         "{doc}"
     );
-    assert_prose_unchanged(&env, &["doctor", "--json"]);
+    assert_document_replaces_prose(&env, &["doctor", "--json"], pult_error);
 }
 
 #[test]
@@ -184,9 +195,23 @@ fn a_command_line_clap_rejects_is_a_usage_document_with_clap_text() {
     let doc = error_doc(&out, Some("list"), "usage", 2);
     let usage = doc["error"]["details"]["usage"].as_str().unwrap();
     assert!(usage.contains("--bogus"), "{doc}");
-    // clap's own text still reaches stderr, as it always did, and the
-    // document keeps all of it.
-    assert_eq!(String::from_utf8_lossy(&out.stderr).trim_end(), usage);
+    // The document keeps all of clap's own text in place of printing it.
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Without `--json` that text is printed (its usage line echoes the
+    // arguments, so only the failure itself is compared).
+    let without = env.pult(&["--list", "--bogus"]);
+    assert_eq!(without.status.code(), Some(2));
+    assert!(without.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&without.stderr)
+            .split("\n\n")
+            .next(),
+        usage.split("\n\n").next()
+    );
     assert_eq!(
         doc["error"]["message"],
         "unexpected argument '--bogus' found"
@@ -211,12 +236,9 @@ fn pults_own_usage_lines_are_usage_documents_and_keep_their_prose() {
     // `self` names no machine surface.
     let doc = error_doc(&out, None, "usage", 2);
     assert_eq!(doc["error"]["message"], "usage: pult self schema");
-    // Printed bare, as pult always has — no `pult: error:` prefix.
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "usage: pult self schema\n"
-    );
-    assert_prose_unchanged(&env, &["self", "--json"]);
+    // Without `--json` it is printed bare, as pult always has — no
+    // `pult: error:` prefix.
+    assert_document_replaces_prose(&env, &["self", "--json"], str::to_string);
 }
 
 #[test]
@@ -224,7 +246,7 @@ fn an_unknown_run_is_generic_and_reported_before_any_stream() {
     let env = Env::new(Some(MANIFEST));
     let out = env.pult(&["runs", "tail", "nope", "--json"]);
     error_doc(&out, Some("runs tail"), "generic", 1);
-    assert_prose_unchanged(&env, &["runs", "tail", "nope", "--json"]);
+    assert_document_replaces_prose(&env, &["runs", "tail", "nope", "--json"], pult_error);
 }
 
 /// A `--json` after `--` belongs to the command, not to pult.
@@ -241,7 +263,8 @@ fn json_after_the_separator_does_not_ask_for_a_document() {
 }
 
 /// With stdout closed, the document cannot be written; the failure still
-/// exits with its own status and prose rather than a panic (exit 101).
+/// exits with its own status rather than a panic (exit 101), and is reported
+/// as the prose line instead.
 #[test]
 fn a_closed_stdout_does_not_turn_the_failure_into_a_panic() {
     let env = Env::new(None);
@@ -254,6 +277,10 @@ fn a_closed_stdout_does_not_turn_the_failure_into_a_panic() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(
+        stderr.starts_with("pult: error: no pult.yaml found"),
+        "{stderr}"
+    );
 }
 
 /// A damaged module cache is a fetch problem, not an authoring one.

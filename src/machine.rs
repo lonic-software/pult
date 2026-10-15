@@ -1,8 +1,10 @@
 //! The machine-readable surface: under `--json`, pult writes exactly one JSON
 //! document on stdout, in the envelope shared by every Lonic tool. A success
 //! carries its payload in `data`; a failure pult controls itself carries an
-//! `error` — while the prose line on stderr stays exactly what it was, so a
-//! consumer matching that prose keeps working.
+//! `error`, and the document replaces the prose line pult prints on stderr
+//! without `--json`. When no document can be written — part of a stream is
+//! already on stdout, or stdout is closed — the prose line is printed instead,
+//! so a failure never goes unreported.
 //!
 //! ```json
 //! {"lonic_json": 1, "tool": "pult", "schema": 2, "command": "list", "ok": true,
@@ -267,36 +269,40 @@ pub fn success(command: &str, data: serde_json::Value) -> serde_json::Value {
 
 /// Print the error document, when this invocation is in JSON mode and has
 /// not already committed stdout to a stream.
-fn emit(code: ErrorCode, message: &str, details: Option<serde_json::Value>) {
-    let Some(mode) = MODE.get() else { return };
+/// Write the error document, if this invocation is in JSON mode and stdout
+/// can still carry one; returns whether it was written.
+fn emit(code: ErrorCode, message: &str, details: Option<serde_json::Value>) -> bool {
+    let Some(mode) = MODE.get() else { return false };
     if !mode.json || STDOUT_COMMITTED.load(Ordering::Relaxed) {
-        return;
+        return false;
     }
     // Not `println!`: with stdout closed it panics, turning the failure's
-    // exit status into 101. A document nobody can read is simply dropped.
+    // exit status into 101. A document nobody can read falls back to prose.
     use std::io::Write;
     let doc = document(mode.command.as_deref(), code, message, details);
-    let _ = writeln!(std::io::stdout().lock(), "{doc}");
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{doc}").and_then(|()| out.flush()).is_ok()
 }
 
-/// Report a failure that reached `main()` and return its exit status: the
-/// prose line on stderr, then (under `--json`) the error document on stdout.
-/// A cancellation prints no prose, as before.
+/// Report a failure that reached `main()` and return its exit status: under
+/// `--json` the error document on stdout, otherwise the prose line on
+/// stderr. A cancellation prints no prose.
 pub fn report(err: &anyhow::Error) -> i32 {
     let code = classify(err);
     let message = format!("{err:#}");
-    match code {
-        ErrorCode::Cancelled => {}
-        ErrorCode::Usage => eprintln!("{message}"),
-        _ => eprintln!("pult: error: {message}"),
+    if !emit(code, &message, details(err)) {
+        match code {
+            ErrorCode::Cancelled => {}
+            ErrorCode::Usage => eprintln!("{message}"),
+            _ => eprintln!("pult: error: {message}"),
+        }
     }
-    emit(code, &message, details(err));
     code.exit_code()
 }
 
 /// Parse `argv` (argv[0] included) with `cli`. A parse failure in JSON mode
-/// prints clap's own text to stderr as usual, then a `usage` document whose
-/// `details.usage` keeps that text, and exits 2. Help and version are not
+/// is a `usage` document whose `details.usage` keeps clap's own text, in place
+/// of printing that text to stderr, and exits 2. Help and version are not
 /// failures and are left to clap, as is everything outside JSON mode.
 pub fn get_matches<I, T>(cli: clap::Command, argv: I) -> clap::ArgMatches
 where
@@ -317,12 +323,13 @@ where
         err.exit();
     }
     let text = err.render().to_string();
-    let _ = err.print();
-    emit(
+    if !emit(
         ErrorCode::Usage,
         &clap_message(&text),
         Some(serde_json::json!({ "usage": text.trim_end() })),
-    );
+    ) {
+        let _ = err.print();
+    }
     std::process::exit(ErrorCode::Usage.exit_code());
 }
 
@@ -408,8 +415,8 @@ mod tests {
         assert_eq!(command_name(&args("--json")), None);
     }
 
-    /// The prose line must not change when a code is attached — consumers
-    /// still match it. Reddens if `Coded`'s Display or `source` stop
+    /// The prose line and the document's `message` must not change when a
+    /// code is attached. Reddens if `Coded`'s Display or `source` stop
     /// delegating to the wrapped error.
     #[test]
     fn a_coded_error_prints_exactly_as_the_error_it_wraps() {

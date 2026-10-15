@@ -628,9 +628,12 @@ Lonic tool:
 }
 ```
 
-- The prose on stderr is exactly what it is without `--json`; the document is
-  purely additive. `message` is the same text, without the `pult: error:` prefix
-  (for an argument-parsing failure, the parser's description of what failed).
+- The document replaces the prose line pult prints on stderr without `--json`:
+  `message` is that text, without the `pult: error:` prefix (for an
+  argument-parsing failure, the parser's description of what failed, with its
+  full text in `details.usage`). When no document can be written — stdout is
+  closed, or a stream already started on it — the prose line is printed
+  instead. Warnings and a command's own output on stderr are unaffected.
 - `command` is `"list"`, `"doctor"`, `"runs list"` or `"runs tail"`, or `null`
   when the command line names none of them (or could not be parsed that far).
 - `error.details` is present only where a code defines it:
@@ -649,7 +652,7 @@ Lonic tool:
   output stay plain text.
 - `runs tail --jsonl` writes an error document only when it fails before
   streaming its first event line; a failure after that ends the stream with the
-  prose line only.
+  prose line on stderr.
 
 | Code | Exit | Meaning |
 |---|---|---|
