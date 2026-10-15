@@ -7,6 +7,9 @@
 //! step <k>/<n> <name>          # entering step k of n
 //! ```
 //!
+//! A percentage over 100 saturates at any magnitude, and one `+` may lead it
+//! (`parse_progress`; the rule is stated in docs/reference.md).
+//!
 //! Unknown verbs and malformed lines are silently ignored — never an error.
 //! This is load-bearing for forward compatibility: a script or surface built
 //! against a later vocabulary must never break an older pult, and vice versa.
@@ -70,12 +73,18 @@ fn parse_progress(rest: &str) -> Option<Event> {
     if pct_str == "?" {
         return Some(Event::Progress { pct: None, text });
     }
-    // Parsed as u32 (not u8): a percent above 255 (e.g. `300`) must still
-    // clamp to 100 rather than fail the parse and drop the event entirely —
-    // a stuck progress bar is worse than an over-clamped one.
-    let pct: u32 = pct_str.parse().ok()?;
+    // ASCII digits after at most one `+`; anything else is malformed. A value
+    // over 100 saturates at any magnitude rather than failing an integer
+    // parse and dropping the event: a stuck progress bar is worse than an
+    // over-clamped one. So with the digits checked, a failed parse can only
+    // mean overflow.
+    let digits = pct_str.strip_prefix('+').unwrap_or(pct_str);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let pct = digits.parse::<u8>().map_or(100, |p| p.min(100));
     Some(Event::Progress {
-        pct: Some(pct.min(100) as u8),
+        pct: Some(pct),
         text,
     })
 }
@@ -455,17 +464,42 @@ mod tests {
     }
 
     #[test]
-    fn clamps_percent_far_over_100() {
-        // `300` doesn't fit in a u8, so parsing it as one used to fail the
-        // event entirely (a frozen progress bar); parsed as u32 first, it
-        // clamps to 100 like any other over-range value.
-        assert_eq!(
-            parse("progress 300 uploading"),
-            Some(Event::Progress {
-                pct: Some(100),
-                text: Some("uploading".to_string())
-            })
-        );
+    fn a_percent_saturates_at_any_magnitude_and_a_non_digit_is_malformed() {
+        let pct = |line: &str| match parse(line) {
+            Some(Event::Progress { pct, .. }) => pct,
+            other => panic!("{line:?} parsed as {other:?}"),
+        };
+        for (line, want) in [
+            ("progress 101", 100),
+            ("progress 300", 100),
+            ("progress +101", 100),
+            // Above u32::MAX, then above u64::MAX: no integer width saves a
+            // parse-then-clamp reader from dropping these.
+            ("progress 99999999999", 100),
+            ("progress 99999999999999999999999999", 100),
+            ("progress +50", 50),
+            ("progress 007", 7),
+            // Padding is not magnitude: a length shortcut would read 100 here.
+            ("progress 0000000000050", 50),
+            ("progress 0000000000101", 100),
+        ] {
+            assert_eq!(pct(line), Some(want), "{line}");
+        }
+        for line in [
+            "progress -1",
+            "progress -0",
+            "progress 1.5",
+            "progress x",
+            "progress +",
+            "progress ++5",
+            "progress +-5",
+            // Non-ASCII digits: once a parse fails it reads as overflow, so a
+            // looser digit check would turn these into a full bar.
+            "progress \u{663}",
+            "progress \u{ff15}",
+        ] {
+            assert_eq!(parse(line), None, "{line}");
+        }
     }
 
     #[test]
