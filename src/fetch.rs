@@ -434,9 +434,15 @@ fn is_full_sha(rev: &str) -> bool {
 /// `core.autocrlf=true`, which would check a module out with CRLF endings —
 /// and a shipped `bin/` script with CRLF fails in sh (`$'\r': command not
 /// found`, `bad interpreter`). Modules get exactly the bytes they committed.
+///
+/// `core.longpaths=true` too: without it Git for Windows refuses any
+/// checkout path past 260 characters ("Filename too long"), and a module
+/// cache under `%LOCALAPPDATA%` spends a good part of that budget before
+/// the repo's own tree starts. Other platforms' git ignores the key.
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
     let mut cmd = Command::new("git");
     cmd.args(["-c", "core.autocrlf=false", "-c", "core.eol=lf"])
+        .args(["-c", "core.longpaths=true"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0");
     if let Some(dir) = cwd {
