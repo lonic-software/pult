@@ -305,9 +305,10 @@ The pieces:
   `${var}` is substituted when the module loads; any `${…}` that isn't a
   declared var passes through as shell (so `${TASK+x}` is safe).
 - **`${module.dir}`** is the absolute path of the module's own directory —
-  how you address shipped executables. Ship real logic as executables next to
-  the yaml, in any language; the step is the interface, the executable is the
-  implementation. You can rewrite `bin/find-task` from bash to Rust and no
+  how you address shipped executables. pult quotes it for you, so
+  `${module.dir}/bin/x` works even under `C:\Users\Jane Doe\…`. Ship real
+  logic as executables next to the yaml, in any language; the step is the
+  interface, the executable is the implementation. You can rewrite `bin/find-task` from bash to Rust and no
   consumer changes anything.
 - **Shipped files are part of the trust unit.** For a local directory module,
   the whole tree is hashed — editing `bin/find-task` re-triggers the trust

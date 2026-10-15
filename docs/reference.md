@@ -287,6 +287,9 @@ cluster_prefix:
 The include site binds vars; binding an undeclared var, or omitting a
 required one, is a load error. `module.dir` is implicitly defined as the
 module's absolute directory; the `module.*` namespace is reserved.
+In shell text it is quoted for wherever it lands (bare, inside `"…"`,
+inside `'…'`, in a heredoc), so a directory with spaces stays one word; on
+Windows it is written with forward slashes (`C:/Users/…`).
 
 ### `<include>` (root manifests only)
 
