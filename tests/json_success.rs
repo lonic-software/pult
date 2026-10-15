@@ -255,6 +255,12 @@ fn a_failure_with_json_first_stays_a_usage_error() {
         assert_eq!(doc["ok"], false, "{args:?}: {doc}");
         assert_eq!(doc["error"]["code"], "usage", "{args:?}: {doc}");
     }
+    // The failure reported is the original one, not the retry's.
+    let doc: serde_json::Value =
+        serde_json::from_slice(&env.pult(&["hello", "--json", "--bogus", "--help"]).stdout)
+            .unwrap();
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(message.contains("'--json'"), "{doc}");
 }
 
 /// With no manifest, only a top-level help or version is pult's to answer:
@@ -288,6 +294,7 @@ fn without_a_manifest_only_a_top_level_flag_is_answered_and_the_first_wins() {
             &["hello", "--json", "--", "-h"][..],
             serde_json::Value::Null,
         ),
+        (&["--json", "--", "-h"][..], serde_json::Value::Null),
         (
             &["doctor", "--help", "--json"][..],
             serde_json::json!("doctor"),
