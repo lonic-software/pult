@@ -46,10 +46,12 @@ impl Env {
     }
 
     /// The `--list --json` document, which never needs trust.
+    /// The `--list --json` document's `data`.
     fn list(&self) -> serde_json::Value {
         let out = self.pult(&["--list", "--json"]);
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        serde_json::from_slice(&out.stdout).unwrap()
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        doc["data"].clone()
     }
 }
 

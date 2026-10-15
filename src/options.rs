@@ -1,11 +1,10 @@
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
-use indexmap::IndexMap;
-
 use crate::interp;
 use crate::manifest::PickDef;
 use crate::mask::Masker;
+use crate::value::Words;
+use anyhow::{Context, Result, bail};
 
 /// Bundles all three of `resolve_pick`'s value/redaction inputs so a call
 /// site can't silently swap two of them — see the field docs and
@@ -24,14 +23,14 @@ use crate::mask::Masker;
 /// positional transposition. That's the property this type actually
 /// provides now; see `resolve_pick` for how each field is used.
 pub struct Redaction<'a> {
-    /// The real param values — used to build the command that actually
-    /// executes.
-    pub values: &'a IndexMap<String, String>,
+    /// The real param values, rendered (see `value::words`) — used to build
+    /// the command that actually executes.
+    pub values: &'a Words,
     /// The `redact()`-masked param values — secrets replaced with the fixed,
     /// human-facing `••••••` (issue #7's other layer, `exec.rs`'s `redact`).
     /// Used to build the *display* copy of the interpolated `from:` command
     /// that every error string in this module embeds.
-    pub display_values: &'a IndexMap<String, String>,
+    pub display_values: &'a Words,
     /// The run's throwaway `Masker`, built from the same values (see
     /// `exec.rs`'s `fill` call site for why it's throwaway and per-call).
     /// Applied to both `display` (on top of `redact` — catches a secret's
@@ -116,8 +115,8 @@ pub fn resolve_pick(
         //     recognize it there by name; `masker` won't touch anything
         //     that short). Fixing it would mean giving `redact` a floor
         //     too, or removing `masker`'s — don't.
-        //   - Quote-mangling: `interp::interpolate` shell-quotes every
-        //     substituted value, and `shell_quote` (interp.rs) rewrites a
+        //   - Quote-mangling: `value::words` shell-quotes every value before
+        //     `interp::interpolate` inserts it, and `shell_quote` (interp.rs) rewrites a
         //     `'` inside a quoted value to `'\''`. A secret containing a
         //     single quote, cross-leaked into a non-secret param, is no
         //     longer a contiguous copy of itself by the time it's embedded
@@ -206,6 +205,7 @@ fn parse_dynamic_line(line: &str, cmd: &str) -> Result<Option<PickOption>> {
 mod tests {
     use super::*;
     use crate::manifest::OptionDef;
+    use crate::value::text_words;
 
     fn values(opts: &[PickOption]) -> Vec<&str> {
         opts.iter().map(|o| o.value.as_str()).collect()
@@ -214,7 +214,7 @@ mod tests {
     /// A no-op `Redaction` for tests that aren't exercising secret handling:
     /// the display map is the same map as the real one (nothing to redact),
     /// and the masker has no needles loaded.
-    fn no_redaction<'a>(values: &'a IndexMap<String, String>, masker: &'a Masker) -> Redaction<'a> {
+    fn no_redaction<'a>(values: &'a Words, masker: &'a Masker) -> Redaction<'a> {
         Redaction {
             values,
             display_values: values,
@@ -233,7 +233,7 @@ mod tests {
             ]),
             from: None,
         };
-        let vals = IndexMap::new();
+        let vals = text_words(&[]);
         let masker = Masker::new(Vec::<String>::new());
         let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(values(&opts), ["dev", "uat"]);
@@ -252,7 +252,7 @@ mod tests {
             ]),
             from: None,
         };
-        let vals = IndexMap::new();
+        let vals = text_words(&[]);
         let masker = Masker::new(Vec::<String>::new());
         let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(opts[0].description, None);
@@ -269,7 +269,7 @@ mod tests {
             options: None,
             from: Some("printf 'alpha\\n  beta  \\n\\n \\t \\n'".into()),
         };
-        let vals = IndexMap::new();
+        let vals = text_words(&[]);
         let masker = Masker::new(Vec::<String>::new());
         let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(values(&opts), ["alpha", "beta"]);
@@ -284,7 +284,7 @@ mod tests {
             options: None,
             from: Some("printf 'a\\tb\\tc\\n'".into()),
         };
-        let vals = IndexMap::new();
+        let vals = text_words(&[]);
         let masker = Masker::new(Vec::<String>::new());
         let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(opts.len(), 1);
@@ -300,7 +300,7 @@ mod tests {
             options: None,
             from: Some("printf 'a\\t\\n'".into()),
         };
-        let vals = IndexMap::new();
+        let vals = text_words(&[]);
         let masker = Masker::new(Vec::<String>::new());
         let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(opts[0].value, "a");
@@ -315,7 +315,7 @@ mod tests {
             options: None,
             from: Some("printf '\\tdesc\\n'".into()),
         };
-        let vals = IndexMap::new();
+        let vals = text_words(&[]);
         let masker = Masker::new(Vec::<String>::new());
         let err = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new("."))
             .unwrap_err()
@@ -330,8 +330,7 @@ mod tests {
             options: None,
             from: Some("echo {env}-customer".into()),
         };
-        let mut vals = IndexMap::new();
-        vals.insert("env".to_string(), "dev".to_string());
+        let vals = text_words(&[("env", "dev")]);
         let masker = Masker::new(Vec::<String>::new());
         let opts = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new(".")).unwrap();
         assert_eq!(values(&opts), ["dev-customer"]);
@@ -347,7 +346,7 @@ mod tests {
             options: None,
             from: Some("echo boom >&2; exit 3".into()),
         };
-        let vals = IndexMap::new();
+        let vals = text_words(&[]);
         let masker = Masker::new(Vec::<String>::new());
         let err = resolve_pick(&pick, &no_redaction(&vals, &masker), Path::new("."))
             .unwrap_err()
@@ -372,7 +371,7 @@ mod tests {
             options: None,
             from: Some(format!("printf 'tok={secret}\\n' >&2; exit 1")),
         };
-        let vals = IndexMap::new();
+        let vals = text_words(&[]);
         let masker = Masker::new([secret]);
         let redaction = Redaction {
             values: &vals,
@@ -398,10 +397,8 @@ mod tests {
             options: None,
             from: Some("echo {token}".into()),
         };
-        let mut real = IndexMap::new();
-        real.insert("token".to_string(), "hunter2-secret".to_string());
-        let mut display = IndexMap::new();
-        display.insert("token".to_string(), "••••••".to_string());
+        let real = text_words(&[("token", "hunter2-secret")]);
+        let display = text_words(&[("token", "••••••")]);
         let masker = Masker::new(Vec::<String>::new());
         let redaction = Redaction {
             values: &real,

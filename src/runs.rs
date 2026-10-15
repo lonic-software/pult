@@ -24,15 +24,24 @@ const FOLLOW_POLL: Duration = Duration::from_millis(150);
 pub fn run_cli(resolved: &Resolved, matches: &clap::ArgMatches) -> Result<i32> {
     match matches.subcommand() {
         Some(("list", sub)) => list(resolved, sub.get_flag("json")),
-        Some(("tail", sub)) => tail(
-            resolved,
-            sub.get_one::<String>("run_id").expect("clap: required"),
-            sub.get_flag("follow"),
-            sub.get_flag("json"),
-        ),
+        Some(("tail", sub)) => {
+            let run_id = sub.get_one::<String>("run_id").expect("clap: required");
+            let follow = sub.get_flag("follow");
+            if sub.get_flag("json") {
+                // A live stream cannot be one document.
+                if follow {
+                    return Err(crate::machine::usage(
+                        "--json reads a run as one document and can't --follow it — \
+                         use --jsonl --follow for the live event stream",
+                    ));
+                }
+                return tail_document(resolved, run_id);
+            }
+            tail(resolved, run_id, follow, sub.get_flag("jsonl"))
+        }
         Some(("prune", _)) => prune(resolved),
         _ => Err(crate::machine::usage(
-            "usage: pult runs <list [--json] | tail <RUN_ID> [--follow] [--json] | prune>",
+            "usage: pult runs <list [--json] | tail <RUN_ID> [--follow] [--json | --jsonl] | prune>",
         )),
     }
 }
@@ -97,7 +106,8 @@ fn list(resolved: &Resolved, json: bool) -> Result<i32> {
                 doc
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&docs)?);
+        let doc = crate::machine::success("runs list", serde_json::json!({ "runs": docs }));
+        println!("{}", serde_json::to_string_pretty(&doc)?);
         return Ok(0);
     }
     if runs.is_empty() {
@@ -140,12 +150,53 @@ fn run_dir_for(runs_root: &std::path::Path, run_id: &str) -> Result<PathBuf> {
     Ok(runs_root.join(run_id))
 }
 
-fn tail(resolved: &Resolved, run_id: &str, follow: bool, json: bool) -> Result<i32> {
+/// One run's `events.jsonl`, which must exist.
+fn events_path(resolved: &Resolved, run_id: &str) -> Result<(PathBuf, PathBuf)> {
     let run_dir = run_dir_for(&runs_root(resolved)?, run_id)?;
     let events_path = run_dir.join("events.jsonl");
     if !events_path.exists() {
         bail!("no journaled run `{run_id}` for this repo (see `pult runs list`)");
     }
+    Ok((run_dir, events_path))
+}
+
+/// `runs tail <ID> --json`: the events journaled so far, as one document.
+fn tail_document(resolved: &Resolved, run_id: &str) -> Result<i32> {
+    let (_, events_path) = events_path(resolved, run_id)?;
+    let raw = std::fs::read(&events_path)
+        .with_context(|| format!("failed to read {}", events_path.display()))?;
+    let (events, skipped) = collect_events(&raw);
+    let doc = crate::machine::success(
+        "runs tail",
+        serde_json::json!({ "run_id": run_id, "events": events, "skipped": skipped }),
+    );
+    println!("{}", serde_json::to_string_pretty(&doc)?);
+    Ok(0)
+}
+
+/// Split journal bytes into the events they hold and a count of the complete
+/// lines that are not one: every newline-terminated line that is a JSON
+/// object is an event, in order; any other complete line is counted in
+/// `skipped`, so a damaged journal says so instead of losing lines silently.
+/// A final line with no newline is not yet written (the journal's own rule),
+/// so it is neither.
+fn collect_events(raw: &[u8]) -> (Vec<serde_json::Value>, usize) {
+    let mut events = Vec::new();
+    let mut skipped = 0;
+    let Some(last) = raw.iter().rposition(|b| *b == b'\n') else {
+        return (events, skipped);
+    };
+    for line in raw[..last].split(|b| *b == b'\n') {
+        match serde_json::from_slice::<serde_json::Value>(line) {
+            Ok(v @ serde_json::Value::Object(_)) => events.push(v),
+            _ => skipped += 1,
+        }
+    }
+    (events, skipped)
+}
+
+fn tail(resolved: &Resolved, run_id: &str, follow: bool, jsonl: bool) -> Result<i32> {
+    let (run_dir, events_path) = events_path(resolved, run_id)?;
 
     let mut file = std::fs::File::open(&events_path)
         .with_context(|| format!("failed to open {}", events_path.display()))?;
@@ -154,7 +205,7 @@ fn tail(resolved: &Resolved, run_id: &str, follow: bool, json: bool) -> Result<i
     // append an error document to it.
     let mut stdout = crate::machine::StreamStdout::new();
 
-    follow_events(&mut file, &mut offset, follow, json, &mut stdout, || {
+    follow_events(&mut file, &mut offset, follow, jsonl, &mut stdout, || {
         journal::read_meta(&run_dir)
     })
     .map(|()| 0)
@@ -176,12 +227,12 @@ fn follow_events(
     file: &mut std::fs::File,
     offset: &mut u64,
     follow: bool,
-    json: bool,
+    jsonl: bool,
     out: &mut impl Write,
     mut observe: impl FnMut() -> Option<Meta>,
 ) -> Result<()> {
     loop {
-        drain_events(file, offset, json, out)?;
+        drain_events(file, offset, jsonl, out)?;
 
         if !follow {
             return Ok(());
@@ -194,7 +245,7 @@ fn follow_events(
                 std::thread::sleep(FOLLOW_POLL);
             }
             _ => {
-                drain_events(file, offset, json, out)?;
+                drain_events(file, offset, jsonl, out)?;
                 return Ok(());
             }
         }
@@ -208,7 +259,7 @@ fn follow_events(
 fn drain_events(
     file: &mut std::fs::File,
     offset: &mut u64,
-    json: bool,
+    jsonl: bool,
     out: &mut impl Write,
 ) -> Result<()> {
     file.seek(SeekFrom::Start(*offset))?;
@@ -225,7 +276,7 @@ fn drain_events(
         }
         *offset += n as u64;
         let trimmed = line.trim_end();
-        if json {
+        if jsonl {
             writeln!(out, "{trimmed}")?;
         } else if let Some(rendered) = render_event(trimmed) {
             writeln!(out, "{rendered}")?;
@@ -380,6 +431,25 @@ mod tests {
         ] {
             assert_eq!(run_dir_for(root.path(), ok).unwrap(), root.path().join(ok));
         }
+    }
+
+    /// Every complete line is either an event or counted; the torn tail is
+    /// neither. Reddens if `skipped` stops counting a damaged line, if a
+    /// non-object line becomes an event, or if the torn tail is read.
+    #[test]
+    fn collect_events_counts_what_it_cannot_read_and_waits_for_a_torn_tail() {
+        let raw = b"{\"kind\":\"line\"}\nnot json\n\n[1]\n{\"kind\":\"exit\"}\n{\"kind\":\"li";
+        let (events, skipped) = collect_events(raw);
+        assert_eq!(
+            events,
+            [
+                serde_json::json!({"kind": "line"}),
+                serde_json::json!({"kind": "exit"})
+            ]
+        );
+        assert_eq!(skipped, 3);
+        assert_eq!(collect_events(b"{\"kind\":\"li"), (Vec::new(), 0));
+        assert_eq!(collect_events(b""), (Vec::new(), 0));
     }
 
     #[test]

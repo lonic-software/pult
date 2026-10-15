@@ -49,6 +49,7 @@ pult --list       # what does this repo offer? (with argument names and origins)
 pult --list --json             # the same, machine-readable (tooling, agents)
 pult shell demo-leeds dev      # direct: values in declared order
 pult shell demo-leeds          # partial: missing values are prompted
+pult test --verbose --only a x/ y/   # switches and lists, as the command's --help shows
 pult shell --help              # per-command help, generated from the manifest
 pult deploy --print            # show the exact script it would run, don't run it
 ```

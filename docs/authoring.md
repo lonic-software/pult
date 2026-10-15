@@ -102,6 +102,39 @@ CLI today, and any future surface (pane runner, desktop app):
   lift that question into a param — every surface can render a param, but a
   mid-run prompt only works in a terminal.
 
+### Switches and lists: `flag` and `repeat`
+
+Wrapping a CLI usually means passing switches and lists through. Two param
+kinds do that without string-building in the script:
+
+```yaml
+- id: test
+  title: Test
+  params:
+    verbose: { flag: {} }                     # pult test --verbose  → --verbose
+    quiet:   { flag: { arg: "-q" } }          # pult test --quiet    → -q
+    only:    { repeat: { arg: "--only" } }    # --only a --only b    → --only a --only b
+    paths:   { repeat: { min: 1 } }           # the trailing values  → each its own word
+  run: "cargo test {verbose} {quiet} {only} -- {paths}"
+```
+
+- A **flag** renders as its `arg` when set and as nothing when not — no empty
+  `''` word for the tool to trip over. `arg` defaults to `--` plus the param's
+  key where you declared it, so a consumer that includes your module under a
+  `prefix:`, or `use:`s the param under another name, still sends the tool
+  the word you meant.
+- A **repeat** renders each item as its own quoted word, after `arg` when it
+  has one. Bound it with `min:`/`max:`; `secret: true` treats each item as a
+  secret input.
+- On the command line a flag is `--<name>`, a repeat with an `arg` is
+  `--<name> <value>` once per item, and a repeat without one takes the
+  trailing values — so a command has at most one of those, declared last
+  among the positional params. Run directly, an absent flag is off and an
+  absent optional repeat is empty; the guided flow asks for both.
+- Pick option sources (`from:`) can reference only pick and input params.
+- Names pult uses for its own options (`trust`, `print`, `params-json`,
+  `run-id`, `help`, `json`, `var`) can't be param names.
+
 ### Grouping commands with `category:`
 
 An include-heavy manifest reaches 30+ commands fast, and a flat list stops

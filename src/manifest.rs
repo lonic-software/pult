@@ -122,8 +122,9 @@ pub struct CommandDef {
     pub description: Option<String>,
 }
 
-/// A param is a picker, free input, or a reference to a named param; exactly
-/// one of the three must be set (validated at load, so `kind()` is infallible).
+/// A param is a picker, free input, a boolean switch, a list of values, or a
+/// reference to a named param; exactly one of the five must be set
+/// (validated at load, so `kind()` is infallible).
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -132,25 +133,107 @@ pub struct ParamDef {
     pub pick: Option<PickDef>,
     #[serde(default)]
     pub input: Option<InputDef>,
+    /// `flag:` with no body is a flag with every default, so `null` counts
+    /// as set.
+    #[serde(default, deserialize_with = "set_even_if_null")]
+    pub flag: Option<FlagDef>,
+    #[serde(default, deserialize_with = "set_even_if_null")]
+    pub repeat: Option<RepeatDef>,
     #[serde(default, rename = "use")]
     pub use_: Option<String>,
+}
+
+/// A present key is `Some`, its `null` body included; an absent key is
+/// `None` (via `#[serde(default)]`).
+fn set_even_if_null<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Some(Option::<T>::deserialize(d)?.unwrap_or_default()))
 }
 
 pub enum ParamKind<'a> {
     Pick(&'a PickDef),
     Input(&'a InputDef),
+    Flag(&'a FlagDef),
+    Repeat(&'a RepeatDef),
     Use(&'a str),
 }
 
 impl ParamDef {
     pub fn kind(&self) -> ParamKind<'_> {
-        match (&self.pick, &self.input, &self.use_) {
-            (Some(pick), None, None) => ParamKind::Pick(pick),
-            (None, Some(input), None) => ParamKind::Input(input),
-            (None, None, Some(name)) => ParamKind::Use(name),
-            _ => unreachable!("validated at load: exactly one of pick/input/use"),
+        match (
+            &self.pick,
+            &self.input,
+            &self.flag,
+            &self.repeat,
+            &self.use_,
+        ) {
+            (Some(pick), None, None, None, None) => ParamKind::Pick(pick),
+            (None, Some(input), None, None, None) => ParamKind::Input(input),
+            (None, None, Some(flag), None, None) => ParamKind::Flag(flag),
+            (None, None, None, Some(repeat), None) => ParamKind::Repeat(repeat),
+            (None, None, None, None, Some(name)) => ParamKind::Use(name),
+            _ => unreachable!("validated at load: exactly one of pick/input/flag/repeat/use"),
         }
     }
+
+    /// Whether this param takes a positional slot on the command line: pick,
+    /// input and an arg-less repeat do; a flag and an option repeat are
+    /// supplied by name.
+    pub fn is_positional(&self) -> bool {
+        match self.kind() {
+            ParamKind::Pick(_) | ParamKind::Input(_) => true,
+            ParamKind::Repeat(repeat) => repeat.arg.is_none(),
+            ParamKind::Flag(_) => false,
+            ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
+        }
+    }
+
+    /// Whether this param's value is a credential: a secret input, or a
+    /// secret repeat (every item).
+    pub fn is_secret(&self) -> bool {
+        match self.kind() {
+            ParamKind::Input(input) => input.secret,
+            ParamKind::Repeat(repeat) => repeat.secret,
+            _ => false,
+        }
+    }
+}
+
+/// A boolean switch: true renders `arg`, false renders nothing.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct FlagDef {
+    /// The word the tool receives when the flag is set. Defaults to
+    /// `--<key>`, the key this param has in the file that declares it, so
+    /// prefixing or `use:` renaming never changes it. Every resolved flag
+    /// has one (filled in at parse).
+    #[serde(default)]
+    pub arg: Option<String>,
+}
+
+/// A list of values, each rendered as its own word. With `arg`, each item is
+/// preceded by it (`--only a --only b`) and the param is a named option;
+/// without, the items are the command's trailing positionals.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RepeatDef {
+    #[serde(default)]
+    pub arg: Option<String>,
+    /// The fewest items accepted.
+    #[serde(default)]
+    pub min: u32,
+    /// The most items accepted; unbounded when absent. `max: 1` with an
+    /// `arg` is an optional valued option.
+    #[serde(default)]
+    pub max: Option<u32>,
+    /// Every item is a credential, treated exactly as a secret input.
+    #[serde(default)]
+    pub secret: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -415,10 +498,30 @@ pub fn parse(raw: &str, origin: &Path) -> Result<Manifest> {
         Some(v) if v < 1 => bail!("{} has invalid manifest version {v}", origin.display()),
         Some(_) => {}
     }
-    let manifest: Manifest = serde_yaml::from_str(raw)
+    let mut manifest: Manifest = serde_yaml::from_str(raw)
         .with_context(|| format!("failed to parse {}", origin.display()))?;
     validate_file(&manifest).with_context(|| format!("invalid manifest {}", origin.display()))?;
+    default_flag_args(&mut manifest);
     Ok(manifest)
+}
+
+/// Give every flag without an `arg` its default, `--<key>`. Runs at parse,
+/// before the resolver prefixes an include's params or inlines a `use:`, so
+/// the key is always the one in the declaring file.
+fn default_flag_args(manifest: &mut Manifest) {
+    let params = manifest.params.iter_mut().chain(
+        manifest
+            .commands
+            .iter_mut()
+            .flat_map(|c| c.params.iter_mut()),
+    );
+    for (key, def) in params {
+        if let Some(flag) = &mut def.flag
+            && flag.arg.is_none()
+        {
+            flag.arg = Some(format!("--{key}"));
+        }
+    }
 }
 
 /// A valid name for params, steps, vars, outputs, prefixes.
@@ -494,9 +597,36 @@ fn validate_param(name: &str, def: &ParamDef) -> Result<()> {
     if !is_valid_name(name) {
         bail!("invalid param name `{name}`");
     }
-    let set = [def.pick.is_some(), def.input.is_some(), def.use_.is_some()];
+    let set = [
+        def.pick.is_some(),
+        def.input.is_some(),
+        def.flag.is_some(),
+        def.repeat.is_some(),
+        def.use_.is_some(),
+    ];
     if set.iter().filter(|b| **b).count() != 1 {
-        bail!("param `{name}`: needs exactly one of `pick`, `input`, or `use`");
+        bail!("param `{name}`: needs exactly one of `pick`, `input`, `flag`, `repeat`, or `use`");
+    }
+    if let Some(flag) = &def.flag
+        && flag.arg.as_deref().is_some_and(|a| a.trim().is_empty())
+    {
+        bail!("param `{name}`: a flag's `arg` can't be empty");
+    }
+    if let Some(repeat) = &def.repeat {
+        if repeat.arg.as_deref().is_some_and(|a| a.trim().is_empty()) {
+            bail!("param `{name}`: a repeat's `arg` can't be empty");
+        }
+        if let Some(max) = repeat.max {
+            if max == 0 {
+                bail!("param `{name}`: a repeat's `max` must be at least 1");
+            }
+            if max < repeat.min {
+                bail!(
+                    "param `{name}`: a repeat's `max` ({max}) is below its `min` ({})",
+                    repeat.min
+                );
+            }
+        }
     }
     if let Some(pick) = &def.pick {
         match (&pick.options, &pick.from) {

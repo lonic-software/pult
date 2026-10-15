@@ -1,20 +1,23 @@
-//! The machine-readable failure surface: under `--json`, a failure pult
-//! controls itself ends in exactly one JSON error document on stdout, in the
-//! envelope shared by every Lonic tool — while the prose line on stderr stays
-//! exactly what it was, so a consumer matching that prose keeps working.
+//! The machine-readable surface: under `--json`, pult writes exactly one JSON
+//! document on stdout, in the envelope shared by every Lonic tool. A success
+//! carries its payload in `data`; a failure pult controls itself carries an
+//! `error` — while the prose line on stderr stays exactly what it was, so a
+//! consumer matching that prose keeps working.
 //!
 //! ```json
-//! {"lonic_json": 1, "tool": "pult", "schema": 1, "command": "list", "ok": false,
+//! {"lonic_json": 1, "tool": "pult", "schema": 2, "command": "list", "ok": true,
+//!  "data": {"pult_version": "…", "name": "…", "commands": […], …}}
+//! {"lonic_json": 1, "tool": "pult", "schema": 2, "command": "list", "ok": false,
 //!  "error": {"code": "no_manifest", "message": "no pult.yaml found …"}}
 //! ```
+//!
+//! `ok` says whether pult produced its result, not whether that result is
+//! good news: `doctor` with failing checks exits 1 and still says `ok: true`.
 //!
 //! A consumer classifies a failure by `error.code`, never by the exit status:
 //! pult hands a command's own exit code straight through, so every number
 //! except 0, 1, 2, 130 and 128+n may belong to whatever pult ran. That is
 //! why every code here exits 1 except `usage` (2) and `cancelled` (130).
-//!
-//! Success documents are unchanged (bare, schema 1) — wrapping them in the
-//! envelope is an incompatible change and waits for a schema bump.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,8 +27,11 @@ use crate::prompt;
 /// The version of the envelope every Lonic tool shares.
 const LONIC_JSON: u32 = 1;
 const TOOL: &str = "pult";
-/// The version of pult's own payloads — the `schema` its JSON documents carry.
-const SCHEMA: u32 = 1;
+/// The version of pult's own payloads — the `schema` its JSON documents
+/// carry. Bumped only on an incompatible change; a new param kind is not one
+/// (see docs/reference.md on unknown kinds). The run journal versions its
+/// on-disk records with its own counter (journal.rs).
+pub const SCHEMA: u32 = 2;
 
 /// Pult's error-code registry. A code never changes meaning within one
 /// `schema`; new codes may be added.
@@ -244,6 +250,18 @@ fn document(
         "command": command,
         "ok": false,
         "error": error,
+    })
+}
+
+/// The success document for `command`, carrying `data`.
+pub fn success(command: &str, data: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "lonic_json": LONIC_JSON,
+        "tool": TOOL,
+        "schema": SCHEMA,
+        "command": command,
+        "ok": true,
+        "data": data,
     })
 }
 
@@ -487,7 +505,7 @@ mod tests {
         );
         assert_eq!(doc["lonic_json"], 1);
         assert_eq!(doc["tool"], "pult");
-        assert_eq!(doc["schema"], 1);
+        assert_eq!(doc["schema"], 2);
         assert_eq!(doc["ok"], false);
         assert_eq!(doc["error"]["code"], "no_manifest");
         assert!(doc["error"].get("details").is_none());
@@ -499,5 +517,24 @@ mod tests {
         );
         assert_eq!(doc["command"], serde_json::Value::Null);
         assert_eq!(doc["error"]["details"]["usage"], "u");
+    }
+
+    #[test]
+    fn a_success_document_carries_the_same_header_and_its_data() {
+        let doc = success("runs list", serde_json::json!({"runs": []}));
+        let keys: Vec<&str> = doc
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["lonic_json", "tool", "schema", "command", "ok", "data"]
+        );
+        assert_eq!(doc["schema"], 2);
+        assert_eq!(doc["command"], "runs list");
+        assert_eq!(doc["ok"], true);
+        assert_eq!(doc["data"]["runs"], serde_json::json!([]));
     }
 }

@@ -124,6 +124,21 @@
       },
       "additionalProperties": false
     },
+    "FlagDef": {
+      "description": "A boolean switch: true renders `arg`, false renders nothing.",
+      "type": "object",
+      "properties": {
+        "arg": {
+          "description": "The word the tool receives when the flag is set. Defaults to `--<key>`, the key this param has in the file that declares it, so prefixing or `use:` renaming never changes it. Every resolved flag has one (filled in at parse).",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "FullOption": {
       "type": "object",
       "required": [
@@ -227,9 +242,20 @@
       ]
     },
     "ParamDef": {
-      "description": "A param is a picker, free input, or a reference to a named param; exactly one of the three must be set (validated at load, so `kind()` is infallible).",
+      "description": "A param is a picker, free input, a boolean switch, a list of values, or a reference to a named param; exactly one of the five must be set (validated at load, so `kind()` is infallible).",
       "type": "object",
       "properties": {
+        "flag": {
+          "description": "`flag:` with no body is a flag with every default, so `null` counts as set.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FlagDef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "input": {
           "anyOf": [
             {
@@ -244,6 +270,16 @@
           "anyOf": [
             {
               "$ref": "#/definitions/PickDef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repeat": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RepeatDef"
             },
             {
               "type": "null"
@@ -325,6 +361,42 @@
           "additionalProperties": {
             "type": "string"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RepeatDef": {
+      "description": "A list of values, each rendered as its own word. With `arg`, each item is preceded by it (`--only a --only b`) and the param is a named option; without, the items are the command's trailing positionals.",
+      "type": "object",
+      "properties": {
+        "arg": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max": {
+          "description": "The most items accepted; unbounded when absent. `max: 1` with an `arg` is an optional valued option.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "min": {
+          "description": "The fewest items accepted.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "secret": {
+          "description": "Every item is a credential, treated exactly as a secret input.",
+          "default": false,
+          "type": "boolean"
         }
       },
       "additionalProperties": false

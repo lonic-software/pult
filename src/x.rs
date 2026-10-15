@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use clap::{Arg, ArgAction};
 use indexmap::IndexMap;
 
@@ -11,7 +11,7 @@ use crate::manifest::{self, IncludeDef, Loaded, Manifest};
 use crate::resolver::{self, PinInfo, Resolved};
 use crate::{exec, flow};
 
-/// `pult x <source> [command] [values…]` — ephemeral execution: run a command
+/// `pult x <source> [command] [args…]` — ephemeral execution: run a command
 /// straight from a module source without pinning it into any manifest (the npx
 /// of pult). The source is pinned exactly as an include is (a bare git source
 /// resolves to its latest version tag), fetched into the immutable cache, and
@@ -19,49 +19,15 @@ use crate::{exec, flow};
 /// "unseen code". Intercepted before discovery (like `init`/`update`) because
 /// the whole point is running where no local manifest exists yet.
 pub fn run_cli(rest: &[String]) -> Result<i32> {
-    let cli = clap::Command::new("pult x")
-        .bin_name("pult x")
-        .about("Run a command from a module source without adding it to a manifest")
-        .arg(Arg::new("source").required(true).value_name("SOURCE").help(
-            "./path, host.tld/org/repo[//sub][@pin], or git::<url>[//sub][@pin] — \
-                     a git source without a pin resolves to its latest version tag",
-        ))
-        .arg(
-            Arg::new("command")
-                .value_name("COMMAND")
-                .help("Which of the module's commands to run; omitted opens the guided menu"),
-        )
-        .arg(
-            Arg::new("values")
-                .value_name("VALUES")
-                .num_args(0..)
-                .help("Positional values for the command's params, in declared order"),
-        )
-        .arg(
-            Arg::new("var")
-                .long("var")
-                .value_name("NAME=VALUE")
-                .action(ArgAction::Append)
-                .help("Bind a module var (repeatable) — for modules that declare `vars:`"),
-        )
-        .arg(crate::trust::arg("the module"))
-        .arg(
-            Arg::new("print")
-                .long("print")
-                .action(ArgAction::SetTrue)
-                .help("Print the composed script instead of running it"),
-        );
+    let cli = phase_one();
+    let (head, tail) = split_at_command(&cli, rest);
     let matches = crate::machine::get_matches(
         cli,
-        std::iter::once("pult x".to_string()).chain(rest.iter().cloned()),
+        std::iter::once("pult x".to_string()).chain(head.iter().cloned()),
     );
 
     let source = matches.get_one::<String>("source").expect("required");
     let command = matches.get_one::<String>("command").map(String::as_str);
-    let values: Vec<String> = matches
-        .get_many::<String>("values")
-        .map(|vs| vs.cloned().collect())
-        .unwrap_or_default();
     let vars = parse_vars(&matches)?;
     let grant = crate::trust::Grant::from_matches(&matches);
     let print = matches.get_flag("print");
@@ -74,7 +40,7 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
     run(
         source,
         command,
-        &values,
+        tail,
         &vars,
         &cwd,
         &grant,
@@ -82,6 +48,112 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
         interactive,
         None,
     )
+}
+
+/// Phase one's parser: `pult x`'s own arguments up to COMMAND.
+fn phase_one() -> clap::Command {
+    clap::Command::new("pult x")
+        .bin_name("pult x")
+        .about("Run a command from a module source without adding it to a manifest")
+        .arg(Arg::new("source").required(true).value_name("SOURCE").help(
+            "./path, host.tld/org/repo[//sub][@pin], or git::<url>[//sub][@pin] — \
+                     a git source without a pin resolves to its latest version tag",
+        ))
+        .arg(
+            Arg::new("command")
+                .value_name("COMMAND")
+                .help("Which of the module's commands to run; omitted opens the guided menu"),
+        )
+        // Only documents the tail: `split_at_command` keeps it out of this
+        // parse, and `bind_tail` binds it once the command is resolved.
+        .arg(Arg::new("args").value_name("ARGS").num_args(0..).help(
+            "The command's arguments, exactly as `pult <command>` takes them; \
+                     `--help` here is the command's help",
+        ))
+        .arg(var_arg())
+        .args(own_args())
+}
+
+fn var_arg() -> Arg {
+    Arg::new("var")
+        .long("var")
+        .value_name("NAME=VALUE")
+        .action(ArgAction::Append)
+        .help("Bind a module var (repeatable) — for modules that declare `vars:`")
+}
+
+/// Split `pult x`'s argv after its COMMAND, the second positional. Only what
+/// comes before goes through phase one (`cli`); the rest stays raw, `--` and
+/// all, for `bind_tail` to bind exactly as `pult <command>` would. Which of
+/// `cli`'s options take a separate value is read from `cli` itself.
+fn split_at_command<'a>(cli: &clap::Command, rest: &'a [String]) -> (&'a [String], &'a [String]) {
+    let takes_value = |arg: &str| {
+        cli.get_arguments().any(|a| {
+            !a.is_positional()
+                && !a.is_require_equals_set()
+                && a.get_action().takes_values()
+                && (a
+                    .get_long()
+                    .is_some_and(|l| arg.strip_prefix("--") == Some(l))
+                    || a.get_short().is_some_and(|c| arg == format!("-{c}")))
+        })
+    };
+    let mut positionals = 0;
+    let mut only_positionals = false;
+    let mut i = 0;
+    while i < rest.len() {
+        let arg = rest[i].as_str();
+        if only_positionals || arg == "-" || !arg.starts_with('-') {
+            positionals += 1;
+            if positionals == 2 {
+                return rest.split_at(i + 1);
+            }
+        } else if arg == "--" {
+            only_positionals = true;
+        } else if takes_value(arg) {
+            i += 1;
+        }
+        i += 1;
+    }
+    (rest, &[])
+}
+
+/// `pult x`'s own switches that may also follow the command (`--var` binds
+/// before the module resolves, so it must come before the command).
+fn own_args() -> [Arg; 2] {
+    [
+        crate::trust::arg("the module"),
+        Arg::new("print")
+            .long("print")
+            .action(ArgAction::SetTrue)
+            .help("Print the composed script instead of running it"),
+    ]
+}
+
+/// Phase two: bind the command's raw arguments with the per-command surface
+/// `pult <command>` uses. `pult x`'s own `--print`/`--trust` may appear among
+/// them too; a `--var` there is refused, since the module has already been
+/// resolved by then.
+fn bind_tail(
+    source: &str,
+    cmd: &resolver::ResolvedCommand,
+    tail: &[String],
+) -> Result<(HashMap<String, crate::value::Value>, clap::ArgMatches)> {
+    let cli = clap::Command::new(format!("pult x {source} {}", cmd.id))
+        .no_binary_name(true)
+        .about(cmd.title.clone())
+        .args(crate::bind::args(cmd))
+        // Only so a late `--var` gets a pointed refusal instead of clap's.
+        .arg(var_arg().hide(true))
+        .args(own_args());
+    let matches = crate::machine::get_matches(cli, tail.iter().cloned());
+    if matches.get_many::<String>("var").is_some() {
+        return Err(crate::machine::usage(format!(
+            "--var must come before the command: pult x {source} --var NAME=VALUE {} …",
+            cmd.id
+        )));
+    }
+    Ok((crate::bind::provided(cmd, &matches), matches))
 }
 
 /// `--var name=value` → pairs; a missing `=` is a usage error, not a silent drop.
@@ -107,7 +179,7 @@ fn parse_vars(matches: &clap::ArgMatches) -> Result<Vec<(String, String)>> {
 pub fn run(
     source: &str,
     command: Option<&str>,
-    values: &[String],
+    tail: &[String],
     vars: &[(String, String)],
     cwd: &Path,
     grant: &crate::trust::Grant,
@@ -138,25 +210,27 @@ pub fn run(
                         command_ids(&resolved)
                     )
                 })?;
-            if values.len() > cmd.params.len() {
-                bail!(
-                    "command `{id}` takes at most {} value(s), but {} were given",
-                    cmd.params.len(),
-                    values.len()
-                );
-            }
-            // Positional values bind to params in declared order; anything not
-            // supplied is prompted for by the executor (same as `pult <cmd>`).
-            let mut provided = HashMap::new();
-            for (i, value) in values.iter().enumerate() {
-                let (name, _) = cmd.params.get_index(i).expect("bounds checked above");
-                provided.insert(name.clone(), value.clone());
-            }
-            exec::execute(&resolved, cmd, &provided, grant, print, None)
+            // Bound exactly as `pult <cmd>` binds; anything not supplied is
+            // filled by the executor the same way too.
+            let (provided, matches) = bind_tail(source, cmd, tail)?;
+            let grant = match crate::trust::Grant::from_matches(&matches) {
+                crate::trust::Grant::Ask => grant.clone(),
+                after => after,
+            };
+            let print = print || matches.get_flag("print");
+            exec::execute(
+                &resolved,
+                cmd,
+                &provided,
+                exec::Prompting::Direct,
+                &grant,
+                print,
+                None,
+            )
         }
         None if interactive => flow::run(&resolved, grant, print, None),
         None => {
-            eprintln!("specify a command:  pult x {source} <command> [values…]");
+            eprintln!("specify a command:  pult x {source} <command> [args…]");
             eprintln!("commands:");
             for c in &resolved.commands {
                 eprintln!("  {}  {}", c.id, c.title);
@@ -262,6 +336,27 @@ fn short(sha: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn split_at_command_cuts_after_the_second_positional() {
+        let cases: &[(&[&str], usize)] = &[
+            (&["./m", "go", "a", "--var", "x=y"], 2),
+            (&["--var", "x=y", "./m", "go", "a"], 4),
+            (&["--var=x=y", "./m", "go", "a"], 3),
+            (&["./m", "--trust", "--print", "go", "--", "-a"], 4),
+            (&["--", "./m", "go", "a"], 3),
+            (&["./m", "--", "go", "--help"], 3),
+            (&["./m", "-", "a"], 2),
+            (&["./m", "--var"], 2),
+            (&["./m"], 1),
+        ];
+        let cli = super::phase_one();
+        for (argv, cut) in cases {
+            let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+            let (head, _) = super::split_at_command(&cli, &argv);
+            assert_eq!(head.len(), *cut, "{argv:?}");
+        }
+    }
+
     use super::*;
 
     /// A local directory module with one no-param command and one that takes a
@@ -315,27 +410,6 @@ mod tests {
         .to_string();
         assert!(err.contains("no command `nope`"), "got: {err}");
         assert!(err.contains("hello, greet"), "got: {err}");
-    }
-
-    #[test]
-    fn too_many_values_is_rejected_before_execution() {
-        let dir = local_module();
-        // `hello` takes no params, so even one value is too many — and this must
-        // fail loudly rather than silently drop the extra.
-        let err = run(
-            "./mod",
-            Some("hello"),
-            &["surplus".to_string()],
-            &[],
-            dir.path(),
-            &crate::trust::Grant::Current,
-            false,
-            false,
-            None,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("at most 0 value"), "got: {err}");
     }
 
     #[test]

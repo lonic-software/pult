@@ -54,7 +54,15 @@ pub fn run(
             }
         }
     };
-    exec::execute(resolved, cmd, &HashMap::new(), grant, print, run_id)
+    exec::execute(
+        resolved,
+        cmd,
+        &HashMap::new(),
+        exec::Prompting::Guided,
+        grant,
+        print,
+        run_id,
+    )
 }
 
 fn command_labels(cmds: &[ResolvedCommand], width: usize) -> Vec<String> {

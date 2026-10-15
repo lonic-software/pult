@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
-use indexmap::IndexMap;
 
 use crate::interp;
 use crate::resolver::{ResolvedCommand, ResolvedEntry, ResolvedRun, ResolvedSeg};
+use crate::value::{self, Values};
 
 /// Compile a step-list run into one bash script: named steps become shell
 /// functions, the run list becomes the calls, declared outputs get runtime
@@ -14,14 +14,11 @@ use crate::resolver::{ResolvedCommand, ResolvedEntry, ResolvedRun, ResolvedSeg};
 /// entry (see `Guards`) — consumed only if a live run has wired up
 /// `$PULT_EVENTS`, so it's a silent no-op elsewhere. `--print` previews pass
 /// `Guards::None` to keep that output exactly the composed script.
-pub fn compile(
-    cmd: &ResolvedCommand,
-    values: &IndexMap<String, String>,
-    guards: Guards,
-) -> Result<String> {
+pub fn compile(cmd: &ResolvedCommand, values: &Values, guards: Guards) -> Result<String> {
     let ResolvedRun::Steps(entries) = &cmd.run else {
         bail!("command `{}` has a plain run, nothing to compile", cmd.id);
     };
+    let words = value::words(&cmd.params, values);
 
     // (fn_name, body) — deduped on identical body, suffixed on name clashes.
     let mut fns: Vec<(String, String)> = Vec::new();
@@ -37,11 +34,11 @@ pub fn compile(
         }
         match entry {
             ResolvedEntry::Inline(s) => {
-                body.push_str(&interp::interpolate_lenient(s, values));
+                body.push_str(&interp::interpolate_lenient(s, &words));
                 push_newline(&mut body);
             }
             ResolvedEntry::Call(call) => {
-                let script = interp::interpolate_lenient(&call.script, values);
+                let script = interp::interpolate_lenient(&call.script, &words);
                 let fn_name = intern(&mut fns, &call.name, script);
                 body.push_str(&fn_name);
                 body.push('\n');
@@ -56,9 +53,9 @@ pub fn compile(
                 let parts: Vec<String> = segs
                     .iter()
                     .map(|seg| match seg {
-                        ResolvedSeg::Inline(s) => interp::interpolate_lenient(s, values),
+                        ResolvedSeg::Inline(s) => interp::interpolate_lenient(s, &words),
                         ResolvedSeg::Call { name, script } => {
-                            let script = interp::interpolate_lenient(script, values);
+                            let script = interp::interpolate_lenient(script, &words);
                             intern(&mut fns, name, script)
                         }
                     })
@@ -236,11 +233,13 @@ fn mangle(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::resolver::ResolvedCall;
+    use crate::value::Value;
+    use indexmap::IndexMap;
 
-    fn vals(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
+    fn vals(pairs: &[(&str, &str)]) -> Values {
         pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| (k.to_string(), Value::Text(v.to_string())))
             .collect()
     }
 

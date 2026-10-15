@@ -35,7 +35,7 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
-fn require_tty(what: &str) -> Result<()> {
+pub fn require_tty(what: &str) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!("{what}, and stdin is not a terminal — pass all values on the command line");
     }
@@ -76,6 +76,12 @@ pub fn password(message: &str) -> Result<String> {
             .without_confirmation()
             .prompt(),
     )
+}
+
+/// Ask a flag param: yes or no, defaulting to no.
+pub fn yes_no(message: &str) -> Result<bool> {
+    require_tty(&format!("`{message}` needs interactive input"))?;
+    map_inquire(Confirm::new(message).with_default(false).prompt())
 }
 
 pub fn confirm(message: &str) -> Result<bool> {
