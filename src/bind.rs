@@ -30,7 +30,7 @@ pub fn args(cmd: &ResolvedCommand) -> Vec<Arg> {
             } else {
                 arg.long(name.clone())
             };
-            match def.kind() {
+            let arg = match def.kind() {
                 ParamKind::Pick(pick) => match &pick.options {
                     Some(opts) => {
                         let values: Vec<&str> = opts.iter().map(OptionDef::value).collect();
@@ -54,6 +54,14 @@ pub fn args(cmd: &ResolvedCommand) -> Vec<Arg> {
                     }
                 }
                 ParamKind::Use(_) => unreachable!("resolver inlines every use: param"),
+            };
+            // The description leads; the kind's own hint stays after it.
+            match &def.description {
+                Some(d) => {
+                    let hint = arg.get_help().map(ToString::to_string).unwrap_or_default();
+                    arg.help(format!("{d} ({hint})"))
+                }
+                None => arg,
             }
         })
         .collect()

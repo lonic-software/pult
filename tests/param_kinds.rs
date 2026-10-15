@@ -14,7 +14,7 @@ commands:
       env: { pick: { options: [dev, prod] } }
       force: { flag: {} }
       dry: { flag: { arg: "-n" } }
-      only: { repeat: { arg: "--only", max: 2 } }
+      only: { repeat: { arg: "--only", max: 2 }, description: "Limit to these targets" }
       files: { repeat: { min: 1 } }
     run: "printf '%s|' {env} {force} {dry} {only} {files}"
 "#;
@@ -189,21 +189,23 @@ fn list_json_describes_flags_and_repeats() {
     let params = &doc["data"]["commands"][0]["params"];
     assert_eq!(
         params[1],
-        serde_json::json!({"name": "force", "kind": "flag", "arg": "--force"})
+        serde_json::json!({"name": "force", "kind": "flag", "arg": "--force", "description": null})
     );
     assert_eq!(
         params[2],
-        serde_json::json!({"name": "dry", "kind": "flag", "arg": "-n"})
+        serde_json::json!({"name": "dry", "kind": "flag", "arg": "-n", "description": null})
     );
     assert_eq!(
         params[3],
         serde_json::json!({"name": "only", "kind": "repeat", "arg": "--only",
-                           "min": 0, "max": 2, "secret": false})
+                           "min": 0, "max": 2, "secret": false,
+                           "description": "Limit to these targets"})
     );
     assert_eq!(
         params[4],
         serde_json::json!({"name": "files", "kind": "repeat", "arg": null,
-                           "min": 1, "max": null, "secret": false})
+                           "min": 1, "max": null, "secret": false,
+                           "description": null})
     );
 }
 
@@ -363,6 +365,11 @@ fn pult_x_binds_a_command_exactly_as_pult_does() {
     let out = env.pult(&["x", "./mod", "go", "--help"]);
     expect(&out, 0);
     assert!(stdout(&out).contains("--only <ONLY>"), "{out:?}");
+    // A param's description leads its help; the kind's hint follows.
+    assert!(
+        stdout(&out).contains("Limit to these targets (0 to 2 value(s)"),
+        "{out:?}"
+    );
 
     // Before the command, `--help` is `pult x`'s own.
     let out = env.pult(&["x", "--help"]);

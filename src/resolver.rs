@@ -747,6 +747,9 @@ fn visit_param(def: &mut ParamDef, f: &dyn Fn(&mut String, bool)) {
     {
         f(arg, false);
     }
+    if let Some(d) = &mut def.description {
+        f(d, false);
+    }
 }
 
 fn visit_step(step: &mut StepDef, f: &dyn Fn(&mut String, bool)) {
@@ -819,7 +822,11 @@ fn resolve_command(
                         ctx()
                     );
                 }
-                named.clone()
+                let mut concrete = named.clone();
+                if def.description.is_some() {
+                    concrete.description = def.description.clone();
+                }
+                concrete
             }
             _ => def.clone(),
         };
@@ -1248,6 +1255,42 @@ commands:
             .as_ref()
             .unwrap();
         assert_eq!(opts[1].description(), Some("dirconn env"));
+    }
+
+    /// A param `description` is `${var}`-substituted like an option's, and a
+    /// `use:` site's own description replaces the named param's.
+    #[test]
+    fn param_description_is_substituted_and_a_use_site_overrides_it() {
+        let module = r#"
+version: 1
+vars:
+  cluster_prefix: { required: true }
+params:
+  env:
+    input: {}
+    description: "The ${cluster_prefix} environment"
+commands:
+  - id: c
+    title: C
+    params:
+      env: { use: env }
+      other: { use: env, description: "Somewhere else" }
+    run: "echo {env} {other}"
+"#;
+        let (_d, resolved) = setup(
+            "version: 1\nincludes:\n  - source: ./mods/aws\n    vars: { cluster_prefix: dirconn }\ncommands:\n  - { id: local, title: L, run: \"true\" }\n",
+            &[("mods/aws/module.yaml", module)],
+        );
+        let r = resolved.unwrap();
+        let cmd = r.commands.iter().find(|c| c.id == "c").unwrap();
+        assert_eq!(
+            cmd.params["env"].description.as_deref(),
+            Some("The dirconn environment")
+        );
+        assert_eq!(
+            cmd.params["other"].description.as_deref(),
+            Some("Somewhere else")
+        );
     }
 
     #[test]

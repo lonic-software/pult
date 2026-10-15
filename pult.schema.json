@@ -245,6 +245,14 @@
       "description": "A param is a picker, free input, a boolean switch, a list of values, or a reference to a named param; exactly one of the five must be set (validated at load, so `kind()` is infallible).",
       "type": "object",
       "properties": {
+        "description": {
+          "description": "What the value is for, in a sentence: shown beside the prompt, in `--help`, and by `--list --json`. Not a kind, so it sits beside any of them; on a `use:` param it replaces the named param's own.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "flag": {
           "description": "`flag:` with no body is a flag with every default, so `null` counts as set.",
           "anyOf": [
