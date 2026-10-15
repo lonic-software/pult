@@ -363,8 +363,8 @@ Rules that keep resolution deterministic and safe:
   any duplicate name (command, param, or step) in the merged whole is a load
   error — use `prefix:` to disambiguate. Nothing ever silently shadows.
 - The command ids `includes`, `registry`, `module`, `update`, `self`, `init`,
-  `trust`, `cache`, `ui`, `events`, `x`, `tap`, `registries`, `serve`, and
-  `doctor` are reserved for pult's own (current and future) subcommands;
+  `trust`, `cache`, `ui`, `events`, `x`, `tool`, `tap`, `registries`, `serve`,
+  and `doctor` are reserved for pult's own (current and future) subcommands;
   every other id is promised to manifests forever.
 
 ## 5 · Publishing a module

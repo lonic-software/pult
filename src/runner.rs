@@ -13,7 +13,7 @@ use crate::mask::Masker;
 /// spec). Decided by the caller (exec.rs), not here:
 ///
 /// - `Off` — no journal (disabled, failed to open, `--print` never gets
-///   here, ephemeral `pult x`). Byte-for-byte the pre-journal behavior:
+///   here, ephemeral `pult x`, `pult tool`). Byte-for-byte the pre-journal behavior:
 ///   inherited stdio, events channel only when stderr is a terminal.
 /// - `MetaOnly` — interactive commands: the terminal owns the child's
 ///   stdio (a working PTY is the whole contract of `interactive: true`),
@@ -65,6 +65,33 @@ pub fn run_sh(
         journaling,
         channel,
     )
+}
+
+/// Run `program` with `args` directly — no shell on any platform, so nothing
+/// in an argument is ever interpreted. Same journaling contract as
+/// [`run_sh`]; `display` is the caller's redacted rendering for the banner.
+pub fn run_argv(
+    program: &Path,
+    args: &[String],
+    display: &str,
+    dir: &Path,
+    journaling: Journaling,
+    channel: InheritedChannel,
+) -> Result<i32> {
+    eprintln!("└  running: {display}");
+    execute(
+        &mut argv_command(program, args, dir),
+        display,
+        journaling,
+        channel,
+    )
+}
+
+/// The process an argv run spawns: exactly `program`, exactly `args`.
+pub fn argv_command(program: &Path, args: &[String], dir: &Path) -> Command {
+    let mut command = Command::new(program);
+    command.args(args).current_dir(dir);
+    command
 }
 
 /// Run a compiled step script via bash (the composed scripts rely on

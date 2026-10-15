@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::exec;
 use crate::label;
 use crate::prompt;
-use crate::resolver::{Resolved, ResolvedCommand, group_commands};
+use crate::resolver::{Origin, Resolved, ResolvedCommand, group_commands};
 
 /// Bare `pult`: the guided flow (spec §9 Phase 1). A command menu, then one
 /// prompt per param — sequential, so each picker can shell out with every
@@ -25,7 +25,12 @@ pub fn run(
     print: bool,
     run_id: Option<&str>,
 ) -> Result<i32> {
-    println!("◆  {} · pult", resolved.name);
+    // Under a tool, stdout is the tool's alone.
+    let header = format!("◆  {} · pult", resolved.name);
+    match resolved.origin {
+        Origin::Tool => eprintln!("{header}"),
+        Origin::Manifest | Origin::Module => println!("{header}"),
+    }
     let groups = group_commands(&resolved.commands);
     let width = label::width();
 

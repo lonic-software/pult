@@ -1,0 +1,1398 @@
+{
+  "lonic_json": 1,
+  "tool": "forklift",
+  "schema": 3,
+  "command": "self-schema",
+  "ok": true,
+  "data": {
+    "version": 1,
+    "name": "forklift",
+    "description": "Forklift — a version control system designed for serverless hosting.",
+    "commands": [
+      {
+        "id": "alias",
+        "title": "Manage the `fl` short alias for this binary",
+        "category": "alias",
+        "description": "Manage the `fl` short alias: a shell-agnostic symlink (a shim on Windows) placed next to this binary, not a per-shell alias — it works in scripts, non-interactive shells and every shell dialect alike, and is trivially discoverable and removable. This is the one implementation every install method (the curl script, pult, `cargo install`) calls, so the alias never drifts between install paths. Without a subcommand, reports whether the alias is installed and where.",
+        "params": {},
+        "run": "alias",
+        "interactive": false
+      },
+      {
+        "id": "alias-install",
+        "title": "Create the alias next to this binary (default name: \"fl\")",
+        "category": "alias",
+        "description": "Create the alias next to this binary: on Unix, a symlink; on Windows (where a symlink needs elevated privilege), a `.cmd` shim that forwards to this binary. Resolves this binary's own path (`current_exe`), so it always points at whichever `forklift` is actually running the command. Idempotent: an alias that already points here succeeds without change. Refuses — without a --force, there isn't one — if the name is already taken by something else (a real file, or a symlink to a different target): removing an unrelated file automatically would be a surprise no flag should paper over.",
+        "params": {
+          "name": {
+            "repeat": {
+              "max": 1
+            }
+          }
+        },
+        "run": "alias install -- {name}",
+        "interactive": false
+      },
+      {
+        "id": "alias-uninstall",
+        "title": "Remove the alias next to this binary (default name: \"fl\")",
+        "category": "alias",
+        "description": "Remove the alias next to this binary. A no-op (success) if it is not installed. Refuses if the name exists but was not created by this command (a real file, e.g.). A symlink (Unix) or a recognized shim (Windows) is removed even if it points at a different forklift binary — deleting a symlink can never lose data, unlike a real file.",
+        "params": {
+          "name": {
+            "repeat": {
+              "max": 1
+            }
+          }
+        },
+        "run": "alias uninstall -- {name}",
+        "interactive": false
+      },
+      {
+        "id": "alias-status",
+        "title": "Report whether the alias is installed and where it points (the default)",
+        "category": "alias",
+        "params": {},
+        "run": "alias status",
+        "interactive": false
+      },
+      {
+        "id": "audit",
+        "title": "Verify the warehouse's signed history offline",
+        "description": "Verify the warehouse's signed history offline: the office chain back to the genesis parcel, then the given pallet (the current one by default). Requires established trust (\"forklift office enroll\").\n\nBy default, large chunked files are presence-checked (their chunks are confirmed present without re-reading the bytes). \"--full\" re-reads every present chunk — re-hashing it — and re-assembles each chunked file to confirm its recorded content hash; a stronger, slower pass.",
+        "params": {
+          "full": {
+            "flag": {
+              "arg": "--full"
+            }
+          },
+          "pallet": {
+            "repeat": {
+              "max": 1
+            }
+          }
+        },
+        "run": "audit {full} -- {pallet}",
+        "interactive": false
+      },
+      {
+        "id": "bay",
+        "title": "Manage bays: parallel working directories bound to this warehouse",
+        "category": "bay",
+        "description": "Manage bays: additional working directories bound to this warehouse. A bay shares the object store, the refs and trust, but keeps its own working tree, inventory, current pallet and lock — so several agents (or you and an agent) work one machine without cloning the objects N times or fighting one lock. Like git worktrees, designed in. Without a subcommand, the bays are listed.",
+        "params": {},
+        "run": "bay",
+        "interactive": false
+      },
+      {
+        "id": "bay-add",
+        "title": "Open a new bay (a new working directory on a new pallet)",
+        "category": "bay",
+        "description": "Open a bay: a new working directory bound to this warehouse, checked out to a new pallet named after the bay (branched from the current head). The bay shares this warehouse's objects, refs and trust; it has its own working tree, inventory and current pallet. cd into it to work there.",
+        "params": {
+          "scope": {
+            "repeat": {
+              "arg": "--scope"
+            }
+          },
+          "name": {
+            "input": {}
+          },
+          "path": {
+            "repeat": {
+              "max": 1
+            }
+          }
+        },
+        "run": "bay add {scope} -- {name} {path}",
+        "interactive": false
+      },
+      {
+        "id": "bay-remove",
+        "title": "De-register a bay (its pallet ref and materialized files are kept)",
+        "category": "bay",
+        "description": "De-register a bay: remove its local state and the redirect in its working directory. The bay's pallet is a normal ref and is kept, and its materialized files are left in place — delete the directory yourself to reclaim the space.",
+        "params": {
+          "name": {
+            "input": {}
+          }
+        },
+        "run": "bay remove -- {name}",
+        "interactive": false
+      },
+      {
+        "id": "blame",
+        "title": "Show, for each line of a file, the parcel and author that last changed it",
+        "description": "Attribute every line of a file to the parcel that introduced it — and, because authorship is signed and classed, to the author's identity class and supervisor. That is blame git cannot express: \"was this line written by a human or an agent, under whose supervision\", offline and forge-proof. The walk follows the first-parent chain from the revision (the current pallet's head by default); a line a merge brought in from a side line is attributed to the merge parcel.",
+        "params": {
+          "rev": {
+            "repeat": {
+              "arg": "--rev",
+              "max": 1
+            }
+          },
+          "path": {
+            "input": {}
+          }
+        },
+        "run": "blame {rev} -- {path}",
+        "interactive": false
+      },
+      {
+        "id": "cherry-pick",
+        "title": "Apply a parcel's changes onto the current pallet as a new, author-preserving parcel",
+        "description": "Apply a parcel's diff (its change against its first parent) onto the current pallet as a new, author-preserving, freshly-signed parcel. Unlike rebase, cherry-pick only *adds* — no rewrite, no force-push: the picked parcel's authors are preserved and this operator is recorded as the stacker. A clean pick is stacked immediately; a conflicting one leaves markers to resolve, \"load\" and \"stack\" (which completes the pick single-parent).",
+        "params": {
+          "message": {
+            "repeat": {
+              "arg": "--message",
+              "max": 1
+            }
+          },
+          "revision": {
+            "input": {}
+          }
+        },
+        "run": "cherry-pick {message} -- {revision}",
+        "interactive": false
+      },
+      {
+        "id": "compact",
+        "title": "Compact the object store: pack loose objects into a few dense pack files",
+        "description": "Compact the object store: sweep the loose objects (each its own zstd-compressed file) into a few dense pack files — an append-only data file plus a sorted index. At scale that turns hundreds of thousands of tiny files into a handful of large ones, so a history walk stops paying an open-per-object and the store stops paying per-file slack. Objects are only moved, never re-hashed; a loose file is deleted only after the pack that holds it is durably written, so compacting can never lose an object. Packs roll over at a size/count threshold, so no single pack grows unbounded. Run it after a large \"import-git\" or periodically as maintenance. With --all, also rewrite the existing packs: drop unreachable (garbage) objects that were stuck in packs and consolidate many packs into few — a heavier full repack, worth running occasionally. Add --redelta to a full repack to also re-delta-compress every object instead of copying already-packed records verbatim — denser, but a one-shot CPU-bound pass.",
+        "params": {
+          "all": {
+            "flag": {
+              "arg": "--all"
+            }
+          },
+          "redelta": {
+            "flag": {
+              "arg": "--redelta"
+            }
+          }
+        },
+        "run": "compact {all} {redelta}",
+        "interactive": false
+      },
+      {
+        "id": "config",
+        "title": "Read or change configuration values",
+        "description": "Read or change configuration values (e.g. \"operator.name\"). Without a key, every known key is listed; with a key, its value is printed; with a key and a value, the value is set; with --unset, the key is removed (e.g. clearing a \"remote.token\"). Values are stored in the current warehouse by default; when reading, the warehouse value wins over the global one.",
+        "params": {
+          "global": {
+            "flag": {
+              "arg": "--global"
+            }
+          },
+          "unset": {
+            "flag": {
+              "arg": "--unset"
+            }
+          },
+          "key-value": {
+            "repeat": {
+              "max": 2,
+              "secret": true
+            }
+          }
+        },
+        "run": "config {global} {unset} -- {key-value}",
+        "interactive": false
+      },
+      {
+        "id": "conflicts",
+        "title": "List the files left in conflict by an unresolved consolidation",
+        "description": "List the files an unresolved consolidation left in conflict, as structured records (with --json: each file's base, ours and theirs sides as content addresses a resolver can fetch). Designed for agents, which resolve merges well when given the three sides instead of marker soup. An empty list is a valid answer — there is nothing to resolve.",
+        "params": {},
+        "run": "conflicts",
+        "interactive": false
+      },
+      {
+        "id": "consolidate",
+        "title": "Consolidate (merge) another pallet into the current one",
+        "description": "Consolidate (merge) another pallet into the current one. Fast-forwards when possible; otherwise runs a three-way merge and stacks a merge parcel. Conflicts are marked in the affected files and must be resolved, loaded and stacked to complete the consolidation.",
+        "params": {
+          "pallet": {
+            "input": {}
+          }
+        },
+        "run": "consolidate -- {pallet}",
+        "interactive": false
+      },
+      {
+        "id": "deliver",
+        "title": "Squash the current draft pallet onto a target as one clean parcel, keeping the trail (`dv`)",
+        "description": "Deliver the current (draft) pallet's checkpoint trail onto a target pallet as a single clean signed parcel — the squash agents need, without losing the trail. The delivered parcel carries the draft head's tree with the target as its only parent, so the checkpoints stay out of the target's history; the full trail is kept (the draft pallet is left intact) and recorded as a signed \"delivery\" entry on the parcel's manifest, so \"what the agent tried, in what order\" stays discoverable. Needs an enrolled key (the trail is signed evidence). The current pallet becomes the target; the working directory is unchanged (the tree is identical).",
+        "params": {
+          "message": {
+            "repeat": {
+              "arg": "--message",
+              "max": 1
+            }
+          },
+          "target": {
+            "input": {}
+          }
+        },
+        "run": "deliver {message} -- {target}",
+        "interactive": false
+      },
+      {
+        "id": "diff",
+        "title": "Show line-by-line changes",
+        "description": "Show the line-by-line changes between the working directory and the inventory (what \"load\" would stage). With --staged, show the changes between the inventory and the pallet head (what \"stack\" would record). With two revisions (pallet names or parcel hashes), compare those instead — use \":empty\" as either revision to compare against the empty tree (every file on the other side then lists as added). An optional trailing path limits the report to a file or directory.",
+        "params": {
+          "staged": {
+            "flag": {
+              "arg": "--staged"
+            }
+          },
+          "targets": {
+            "repeat": {}
+          }
+        },
+        "run": "diff {staged} -- {targets}",
+        "interactive": false
+      },
+      {
+        "id": "export-git",
+        "title": "Export this warehouse's history into a new git repository (one-way, lossy)",
+        "description": "One-way export of this warehouse's history into a new git repository: parcels become commits, trees become trees, blobs become blobs, and each user pallet becomes a branch. The escape hatch that makes trying forklift reversible — but lossy in this direction: git has no home for the signed office, the @manifest, or per-parcel signatures, so those are dropped. The path must be empty or new. Requires git on PATH.",
+        "params": {
+          "path": {
+            "input": {}
+          }
+        },
+        "run": "export-git -- {path}",
+        "interactive": false
+      },
+      {
+        "id": "franchise",
+        "title": "Open a local franchise of a remote warehouse (clone)",
+        "description": "Open a local franchise of a remote warehouse: prepare a fresh warehouse in the target directory, remember the remote, adopt its trust anchor, download the history (using the remote's bundle when it has one) and materialize the chosen pallet in the working directory. With --only, franchise sparsely: fetch the full signed history but only the named subtree(s) of content, leaving the rest sealed by hash.",
+        "params": {
+          "pallet": {
+            "repeat": {
+              "arg": "--pallet",
+              "max": 1
+            }
+          },
+          "token": {
+            "repeat": {
+              "arg": "--token",
+              "max": 1,
+              "secret": true
+            }
+          },
+          "only": {
+            "repeat": {
+              "arg": "--only"
+            }
+          },
+          "expect": {
+            "repeat": {
+              "arg": "--expect",
+              "max": 1
+            }
+          },
+          "url": {
+            "input": {}
+          },
+          "directory": {
+            "input": {}
+          }
+        },
+        "run": "franchise {pallet} {token} {only} {expect} -- {url} {directory}",
+        "interactive": false
+      },
+      {
+        "id": "haul",
+        "title": "Reviewable merge proposals (pull requests) on the @haul meta pallet",
+        "category": "haul",
+        "description": "Propose merging one pallet into another, with discussion and signed reviews — pull requests, in Forklift's vocabulary. A haul is an append-only log of signed events on the @haul meta pallet, so authorship — and who approved — is forge-proof and carries the operator's identity class (a human's approval is distinguishable from an agent's). Reviews are recorded; merging is not gated on them in this release. Intra-warehouse (pallet → pallet).",
+        "params": {},
+        "run": "haul",
+        "interactive": false
+      },
+      {
+        "id": "haul-open",
+        "title": "Open a merge proposal",
+        "category": "haul",
+        "params": {
+          "target": {
+            "repeat": {
+              "arg": "--target",
+              "min": 1,
+              "max": 1
+            }
+          },
+          "source": {
+            "repeat": {
+              "arg": "--source",
+              "max": 1
+            }
+          },
+          "title": {
+            "repeat": {
+              "arg": "--title",
+              "min": 1,
+              "max": 1
+            }
+          },
+          "message": {
+            "repeat": {
+              "arg": "--message",
+              "max": 1
+            }
+          }
+        },
+        "run": "haul open {target} {source} {title} {message}",
+        "interactive": false
+      },
+      {
+        "id": "haul-list",
+        "title": "List proposals",
+        "category": "haul",
+        "params": {
+          "state": {
+            "repeat": {
+              "arg": "--state",
+              "max": 1
+            }
+          }
+        },
+        "run": "haul list {state}",
+        "interactive": false
+      },
+      {
+        "id": "haul-show",
+        "title": "Show one proposal in full",
+        "category": "haul",
+        "params": {
+          "id": {
+            "input": {}
+          }
+        },
+        "run": "haul show -- {id}",
+        "interactive": false
+      },
+      {
+        "id": "haul-comment",
+        "title": "Add a comment",
+        "category": "haul",
+        "params": {
+          "message": {
+            "repeat": {
+              "arg": "--message",
+              "min": 1,
+              "max": 1
+            }
+          },
+          "id": {
+            "input": {}
+          }
+        },
+        "run": "haul comment {message} -- {id}",
+        "interactive": false
+      },
+      {
+        "id": "haul-review",
+        "title": "Record a signed review (approve by default)",
+        "category": "haul",
+        "description": "Record a signed review of a haul. Approves by default; pass --request-changes or --comment for the other verdicts. Because the review is signed, the approval carries your identity class — an agent's approval is distinguishable from a human's. Requires an enrolled signing key.",
+        "params": {
+          "request-changes": {
+            "flag": {
+              "arg": "--request-changes"
+            }
+          },
+          "comment": {
+            "flag": {
+              "arg": "--comment"
+            }
+          },
+          "message": {
+            "repeat": {
+              "arg": "--message",
+              "max": 1
+            }
+          },
+          "id": {
+            "input": {}
+          }
+        },
+        "run": "haul review {request-changes} {comment} {message} -- {id}",
+        "interactive": false
+      },
+      {
+        "id": "haul-merge",
+        "title": "Merge a proposal (consolidate its source into the target)",
+        "category": "haul",
+        "params": {
+          "id": {
+            "input": {}
+          }
+        },
+        "run": "haul merge -- {id}",
+        "interactive": false
+      },
+      {
+        "id": "haul-close",
+        "title": "Close a proposal without merging",
+        "category": "haul",
+        "params": {
+          "id": {
+            "input": {}
+          }
+        },
+        "run": "haul close -- {id}",
+        "interactive": false
+      },
+      {
+        "id": "haul-reopen",
+        "title": "Reopen a closed proposal",
+        "category": "haul",
+        "params": {
+          "id": {
+            "input": {}
+          }
+        },
+        "run": "haul reopen -- {id}",
+        "interactive": false
+      },
+      {
+        "id": "heal",
+        "title": "Resolve a standing durability taint automated recovery could not clear on its own",
+        "description": "Resolve a standing durability taint (\"durability_taint\" refusals, exit 21): a write's final path(s) were left visible after a failed durability sync, and the automatic entry-heal every command runs could not restage every one of them on its own. This verb runs the deeper recovery pass — restage whatever it can, then walk every durable ref source (pallet heads, parked work, tags, and staged inventory shards) to tell a vanished-but-never-referenced object (safe to drop) from one something still points at (reported, with remedies). A torn taint (its own record was cut short by a crash) cannot be resolved this way at all and needs a heavyweight recovery instead. Exits 0 once every recorded path is resolved; exits 21, with the taint left standing on exactly what remains, otherwise.",
+        "params": {},
+        "run": "heal",
+        "interactive": false
+      },
+      {
+        "id": "history",
+        "title": "Print the parcels of a revision, newest first",
+        "description": "Print the parcels of the current pallet (or of the given revision — a pallet name or a parcel hash), newest first: hash, operators, timestamps and description.",
+        "params": {
+          "class": {
+            "repeat": {
+              "arg": "--class",
+              "max": 1
+            }
+          },
+          "limit": {
+            "repeat": {
+              "arg": "--limit",
+              "max": 1
+            }
+          },
+          "after": {
+            "repeat": {
+              "arg": "--after",
+              "max": 1
+            }
+          },
+          "oneline": {
+            "flag": {
+              "arg": "--oneline"
+            }
+          },
+          "revision": {
+            "repeat": {
+              "max": 1
+            }
+          }
+        },
+        "run": "history {class} {limit} {after} {oneline} -- {revision}",
+        "interactive": false
+      },
+      {
+        "id": "import-git",
+        "title": "Import a git repository's history into this warehouse (one-way migration)",
+        "description": "One-way migration of a git repository's history into this warehouse: git commits become parcels, trees become trees, blobs become blobs, and each local branch becomes a pallet. The imported history is unsigned (it predates trust), so import into a fresh warehouse and then run \"office enroll\" to anchor it. Run it from the git repo's directory (\"forklift import-git .\") so the checked-out working tree matches the imported HEAD. Requires git on PATH.",
+        "params": {
+          "no-compact": {
+            "flag": {
+              "arg": "--no-compact"
+            }
+          },
+          "path": {
+            "input": {}
+          }
+        },
+        "run": "import-git {no-compact} -- {path}",
+        "interactive": false
+      },
+      {
+        "id": "lift",
+        "title": "Upload the current pallet's new parcels to the remote (push)",
+        "description": "Upload the current pallet's new parcels to the configured remote (\"remote.url\") and move the remote's ref. When trust is established, the office pallet and the trust anchor are lifted first — the remote verifies every signature before it accepts the update. A remote that is ahead or has diverged is never overwritten: lower first.",
+        "params": {},
+        "run": "lift",
+        "interactive": false
+      },
+      {
+        "id": "load",
+        "title": "Take the current state of a file or directory into the inventory (stage)",
+        "params": {
+          "path": {
+            "input": {}
+          }
+        },
+        "run": "load -- {path}",
+        "interactive": false
+      },
+      {
+        "id": "lower",
+        "title": "Download the remote's new parcels and fast-forward the current pallet (pull)",
+        "description": "Download the remote's new parcels for the current pallet from the configured remote (\"remote.url\") and fast-forward to them — working directory and inventory included. On first contact with a trusted remote its trust anchor is adopted (one-way, like \"office enroll\"), and the adopted genesis is reported. A diverged pallet is reported, never merged implicitly.",
+        "params": {
+          "expect": {
+            "repeat": {
+              "arg": "--expect",
+              "max": 1
+            }
+          }
+        },
+        "run": "lower {expect}",
+        "interactive": false
+      },
+      {
+        "id": "manifest",
+        "title": "Attach signed post-metadata to a parcel: approvals, review notes (`mf`)",
+        "category": "manifest",
+        "description": "Record and read the manifest — signed post-metadata attached to a parcel after the fact (approvals, review notes; later, machine-authorship provenance). Entries are tracked metadata on the \"@manifest\" meta pallet: forge-proof, portable and auditable, and they reference parcels without ever mutating them. Recording needs an enrolled signing key (like the office). Without a subcommand, the whole manifest is listed.",
+        "params": {},
+        "run": "manifest",
+        "interactive": false
+      },
+      {
+        "id": "manifest-note",
+        "title": "Attach a free-form note to a parcel",
+        "category": "manifest",
+        "description": "Record a signed note about a parcel — a review comment, a caveat, any free-form annotation. The note references the parcel and never changes it. Requires an enrolled signing key.",
+        "params": {
+          "message": {
+            "repeat": {
+              "arg": "--message",
+              "min": 1,
+              "max": 1
+            }
+          },
+          "revision": {
+            "input": {}
+          }
+        },
+        "run": "manifest note {message} -- {revision}",
+        "interactive": false
+      },
+      {
+        "id": "manifest-approve",
+        "title": "Record a signed approval (sign-off) of a parcel",
+        "category": "manifest",
+        "description": "Record a signed approval of a parcel — a cryptographic sign-off, forge-proof and offline-verifiable. Optionally attach a message. Requires an enrolled signing key.",
+        "params": {
+          "message": {
+            "repeat": {
+              "arg": "--message",
+              "max": 1
+            }
+          },
+          "revision": {
+            "input": {}
+          }
+        },
+        "run": "manifest approve {message} -- {revision}",
+        "interactive": false
+      },
+      {
+        "id": "manifest-provenance",
+        "title": "Record how a parcel was produced: model, tool, session (AI provenance)",
+        "category": "manifest",
+        "description": "Record signed machine-authorship provenance for a parcel — which model produced the change, with which tool, in which session, and (optionally) a transcript fingerprint. Because the entry is signed, it is evidence: paired with an agent-class identity (\"office admit --agent --supervisor\"), it answers \"which model produced this, under whose supervision\" forge-proof and offline — the AI-traceability question git cannot answer. Requires an enrolled signing key.",
+        "params": {
+          "model": {
+            "repeat": {
+              "arg": "--model",
+              "min": 1,
+              "max": 1
+            }
+          },
+          "tool": {
+            "repeat": {
+              "arg": "--tool",
+              "max": 1
+            }
+          },
+          "session": {
+            "repeat": {
+              "arg": "--session",
+              "max": 1
+            }
+          },
+          "transcript": {
+            "repeat": {
+              "arg": "--transcript",
+              "max": 1
+            }
+          },
+          "message": {
+            "repeat": {
+              "arg": "--message",
+              "max": 1
+            }
+          },
+          "revision": {
+            "input": {}
+          }
+        },
+        "run": "manifest provenance {model} {tool} {session} {transcript} {message} -- {revision}",
+        "interactive": false
+      },
+      {
+        "id": "manifest-show",
+        "title": "Show the manifest entries attached to a parcel",
+        "category": "manifest",
+        "description": "Show every manifest entry (approvals, notes) attached to a parcel, oldest first, with who recorded each and when.",
+        "params": {
+          "revision": {
+            "input": {}
+          }
+        },
+        "run": "manifest show -- {revision}",
+        "interactive": false
+      },
+      {
+        "id": "office",
+        "title": "Manage the warehouse office: users and signing keys",
+        "category": "office",
+        "description": "Manage the warehouse office: users and signing keys, tracked as metadata on the reserved \"office\" pallet. Without a subcommand, the users and their keys are listed.",
+        "params": {},
+        "run": "office",
+        "interactive": false
+      },
+      {
+        "id": "office-enroll",
+        "title": "Enroll the configured operator and establish trust — one-way!",
+        "category": "office",
+        "description": "Enroll the configured operator and establish trust: the genesis office parcel introduces the first user and key. This is a one-way door — from then on every parcel stacked in this warehouse must be signed. When a remote is configured, its pallet heads are included in the trust boundary (history the remote already has stays valid unsigned), so the remote must be reachable — or pass --offline to skip it.",
+        "params": {
+          "offline": {
+            "flag": {
+              "arg": "--offline"
+            }
+          },
+          "passphrase": {
+            "flag": {
+              "arg": "--passphrase"
+            }
+          }
+        },
+        "run": "office enroll {offline} {passphrase}",
+        "interactive": false
+      },
+      {
+        "id": "office-keygen",
+        "title": "Generate a keypair locally and print its public half + proof-of-possession",
+        "category": "office",
+        "description": "Generate a keypair locally and print its public half plus a proof-of-possession (a self-signature binding the key to your operator UUID). The private key stays on this machine. Hand the printed admit line to an office admin to be enrolled, or the printed link line to a machine that already holds one of your keys to add this as another device.",
+        "params": {
+          "passphrase": {
+            "flag": {
+              "arg": "--passphrase"
+            }
+          }
+        },
+        "run": "office keygen {passphrase}",
+        "interactive": false
+      },
+      {
+        "id": "office-admit",
+        "title": "Enroll another operator with their public key — admins only",
+        "category": "office",
+        "description": "Enroll another operator: their UUID, public key and proof-of-possession, exactly as printed by their \"forklift office keygen\" run. The key becomes their identity root, endorsed by your admin key. Office records are pseudonymous — no names or emails ever go on-chain. Mark automated principals with --agent / --bot / --service: the class rides in the signed record, so \"an agent wrote this, supervised by <human>\" is forge-proof. An agent requires a --supervisor; a supervisor must be an enrolled human. Automated identities should hold passphraseless keys (they sign autonomously under their own marked identity, never as a human).",
+        "params": {
+          "role": {
+            "repeat": {
+              "arg": "--role",
+              "max": 1
+            }
+          },
+          "pallet": {
+            "repeat": {
+              "arg": "--pallet"
+            }
+          },
+          "agent": {
+            "flag": {
+              "arg": "--agent"
+            }
+          },
+          "bot": {
+            "flag": {
+              "arg": "--bot"
+            }
+          },
+          "service": {
+            "flag": {
+              "arg": "--service"
+            }
+          },
+          "supervisor": {
+            "repeat": {
+              "arg": "--supervisor",
+              "max": 1
+            }
+          },
+          "operator-id": {
+            "input": {}
+          },
+          "public-key": {
+            "input": {}
+          },
+          "pop": {
+            "input": {}
+          }
+        },
+        "run": "office admit {role} {pallet} {agent} {bot} {service} {supervisor} -- {operator-id} {public-key} {pop}",
+        "interactive": false
+      },
+      {
+        "id": "office-link",
+        "title": "Link another device's key to your own identity",
+        "category": "office",
+        "description": "Link another device's key to your own identity: a sigchain endorsement — the new key is trusted because a key you already hold signs for it, so every warehouse that trusts your identity accepts it automatically. Run \"forklift office keygen\" on the other device (configured with the same operator.uuid) and pass the printed public key and proof-of-possession here.",
+        "params": {
+          "public-key": {
+            "input": {}
+          },
+          "pop": {
+            "input": {}
+          }
+        },
+        "run": "office link -- {public-key} {pop}",
+        "interactive": false
+      },
+      {
+        "id": "office-authorize",
+        "title": "Authorize a new key for an already-enrolled operator — admins only",
+        "category": "office",
+        "description": "Authorize a new key for an already-enrolled operator: the recovery path for someone who lost every device (the scope of a key-authorization equals the scope of the authorizer's authority, so an admin's endorsement is valid exactly here, in the office they administer). The operator runs \"forklift office keygen\" on their new machine and hands you the printed line over a channel where you can confirm it is really them; their proof-of-possession still co-signs the record, so you cannot attribute a key they do not hold. For your own devices use \"office link\"; for a new operator use \"office admit\".",
+        "params": {
+          "operator-id": {
+            "input": {}
+          },
+          "public-key": {
+            "input": {}
+          },
+          "pop": {
+            "input": {}
+          }
+        },
+        "run": "office authorize -- {operator-id} {public-key} {pop}",
+        "interactive": false
+      },
+      {
+        "id": "office-role",
+        "title": "Change a user's role (and a writer's pallet grants) — admins only",
+        "category": "office",
+        "description": "Change a user's role (admin, writer or reader) and, for writers, the pallet grants. Admins only, with lockout protection: the office always keeps at least one admin. Remotes enforce roles on every lift.",
+        "params": {
+          "pallet": {
+            "repeat": {
+              "arg": "--pallet"
+            }
+          },
+          "identifier": {
+            "input": {}
+          },
+          "role": {
+            "input": {}
+          }
+        },
+        "run": "office role {pallet} -- {identifier} {role}",
+        "interactive": false
+      },
+      {
+        "id": "office-rotate",
+        "title": "Issue a fresh key for the configured operator and retire the old ones",
+        "category": "office",
+        "description": "Issue a fresh key for the configured operator and retire the old ones. The change is signed with the old key, proving the rotation was authorized by its owner. Each retirement records a distrust boundary (the pallet heads vouched for right now, the remote's included), so a retired key cannot silently sign anything new.",
+        "params": {
+          "offline": {
+            "flag": {
+              "arg": "--offline"
+            }
+          },
+          "passphrase": {
+            "flag": {
+              "arg": "--passphrase"
+            }
+          }
+        },
+        "run": "office rotate {offline} {passphrase}",
+        "interactive": false
+      },
+      {
+        "id": "office-retire",
+        "title": "Revoke a key: retire it, or mark it compromised",
+        "category": "office",
+        "description": "Revoke a key. Plain retirement is the routine goodbye (a decommissioned machine); --compromised marks a key that may be in someone else's hands. Either way the revocation records a distrust boundary — the pallet heads vouched for right now, the remote's included: signatures by the key outside that ancestry fail every future audit. Exact ancestry, never timestamps, so a shifted clock cannot forge validity.",
+        "params": {
+          "compromised": {
+            "flag": {
+              "arg": "--compromised"
+            }
+          },
+          "offline": {
+            "flag": {
+              "arg": "--offline"
+            }
+          },
+          "key-id": {
+            "input": {}
+          }
+        },
+        "run": "office retire {compromised} {offline} -- {key-id}",
+        "interactive": false
+      },
+      {
+        "id": "office-regenesis",
+        "title": "RESET trust: new root, prior history pinned as attested — recovery only",
+        "category": "office",
+        "description": "Re-genesis: the recovery primitive for a chain nobody can extend anymore (all keys lost, no admin left). Creates a new self-endorsed trust root for the configured operator and replaces the trust anchor; the old office head is pinned in the new anchor as attested history (kept, but its guarantee degrades from verified to attested). LOUD: every clone refuses to sync until its holder consciously re-accepts, and a remote accepts the reset only from the server operator's static token. Without --confirm, prints what would happen.",
+        "params": {
+          "confirm": {
+            "flag": {
+              "arg": "--confirm"
+            }
+          }
+        },
+        "run": "office regenesis {confirm}",
+        "interactive": false
+      },
+      {
+        "id": "office-accept-regenesis",
+        "title": "Consciously accept a remote's trust reset (re-genesis)",
+        "category": "office",
+        "description": "Accept a remote's re-genesis: after a trust reset every sync is refused until you deliberately accept the new anchor — the SSH host-key-change moment. The new anchor must name your pinned genesis as its prior (the chain of custody); verify out-of-band that the reset is legitimate before confirming. Without --confirm, shows what would be accepted and refuses. --confirm takes the new genesis being accepted, and accepts only if that is still the remote's genesis — so what is accepted is exactly what was shown.",
+        "params": {
+          "confirm": {
+            "repeat": {
+              "arg": "--confirm",
+              "max": 1
+            }
+          }
+        },
+        "run": "office accept-regenesis {confirm}",
+        "interactive": false
+      },
+      {
+        "id": "office-list",
+        "title": "List the users and their keys (the default)",
+        "category": "office",
+        "params": {},
+        "run": "office list",
+        "interactive": false
+      },
+      {
+        "id": "palletize",
+        "title": "Create a new pallet (branch) and shift to it; without a name, list the pallets",
+        "description": "Create a new pallet at the current head — or at the given revision (a pallet name or a parcel hash) — and shift to it. Without arguments, the pallets are listed with the current one marked.",
+        "params": {
+          "all": {
+            "flag": {
+              "arg": "--all"
+            }
+          },
+          "name-revision": {
+            "repeat": {
+              "max": 2
+            }
+          }
+        },
+        "run": "palletize {all} -- {name-revision}",
+        "interactive": false
+      },
+      {
+        "id": "park",
+        "title": "Park the work in progress and reset to the pallet head",
+        "category": "park",
+        "description": "Park the work in progress (the staged and unstaged changes of tracked files) as a parked parcel and reset the warehouse to the pallet head. Untracked files are left alone. \"park pop\" re-applies the latest parked changes; \"park list\" lists them.",
+        "params": {},
+        "run": "park",
+        "interactive": false
+      },
+      {
+        "id": "park-pop",
+        "title": "Re-apply the most recently parked changes (staged) and drop them from the list",
+        "category": "park",
+        "params": {},
+        "run": "park pop",
+        "interactive": false
+      },
+      {
+        "id": "park-list",
+        "title": "List the parked parcels, newest first",
+        "category": "park",
+        "params": {},
+        "run": "park list",
+        "interactive": false
+      },
+      {
+        "id": "peek",
+        "title": "Peek into an object (print its content)",
+        "description": "Print the content of an object: a blob's bytes, a tree's entries, or a parcel's fields. With --inventory, print the inventory of a working-directory folder instead.",
+        "params": {
+          "inventory": {
+            "repeat": {
+              "arg": "--inventory",
+              "max": 1
+            }
+          },
+          "object": {
+            "repeat": {
+              "max": 1
+            }
+          }
+        },
+        "run": "peek {inventory} -- {object}",
+        "interactive": false
+      },
+      {
+        "id": "prepare",
+        "title": "Prepare a new warehouse in the current directory",
+        "description": "Prepare a new warehouse in the current directory: the \".forklift\" folder with the object store, the staging area, the configuration template and the ignore file. Preparing is idempotent — only the missing pieces are created.",
+        "params": {},
+        "run": "prepare",
+        "interactive": false
+      },
+      {
+        "id": "profile",
+        "title": "Manage identity profiles (named operator ids) and select one per warehouse",
+        "category": "profile",
+        "description": "Manage identity profiles: named identity bundles (an operator id and a display name) stored in the global configuration. A warehouse selects one with \"profile use\", so one machine can act as different operators in different warehouses — e.g. a personal identity and one per organization. Without a subcommand, the profiles are listed.",
+        "params": {},
+        "run": "profile",
+        "interactive": false
+      },
+      {
+        "id": "profile-list",
+        "title": "List the profiles and the local keys each one holds (the default)",
+        "category": "profile",
+        "params": {},
+        "run": "profile list",
+        "interactive": false
+      },
+      {
+        "id": "profile-create",
+        "title": "Create a named profile (mints an operator id unless one is given)",
+        "category": "profile",
+        "params": {
+          "display-name": {
+            "repeat": {
+              "arg": "--display-name",
+              "max": 1
+            }
+          },
+          "id": {
+            "repeat": {
+              "arg": "--id",
+              "max": 1
+            }
+          },
+          "name": {
+            "input": {}
+          }
+        },
+        "run": "profile create {display-name} {id} -- {name}",
+        "interactive": false
+      },
+      {
+        "id": "profile-use",
+        "title": "Act as this profile in the current warehouse",
+        "category": "profile",
+        "params": {
+          "name": {
+            "input": {}
+          }
+        },
+        "run": "profile use -- {name}",
+        "interactive": false
+      },
+      {
+        "id": "query",
+        "title": "Query parcel history by signed identity, signer and parcel facts",
+        "description": "Filter parcel history on its signed dimensions — identity class, supervisor, role, signing key, recorded machine-authorship provenance, signed tags — plus parcel-local facts (dates, description, merge-ness, touched paths). By default identity answers are VERIFIED: the signature is checked and the office joined off the verified signer, never off the parcel's own (forgeable) claim; --recorded opts into the cheap, self-declared reading and labels every answer accordingly. A parcel with no provenance recorded at all never matches a --model/--tool predicate in either direction (absence isn't a claim to negate); an untagged parcel plainly does not carry a --tag. Flags AND together; --where takes a JSON predicate tree for or/not/nesting. Scope the walk with revisions and --from — that (not --limit) is what bounds verification work.",
+        "params": {
+          "from": {
+            "repeat": {
+              "arg": "--from",
+              "max": 1
+            }
+          },
+          "class": {
+            "repeat": {
+              "arg": "--class",
+              "max": 1
+            }
+          },
+          "unsupervised": {
+            "flag": {
+              "arg": "--unsupervised"
+            }
+          },
+          "supervisor": {
+            "repeat": {
+              "arg": "--supervisor",
+              "max": 1
+            }
+          },
+          "signer": {
+            "repeat": {
+              "arg": "--signer",
+              "max": 1
+            }
+          },
+          "author-after": {
+            "repeat": {
+              "arg": "--author-after",
+              "max": 1
+            }
+          },
+          "author-before": {
+            "repeat": {
+              "arg": "--author-before",
+              "max": 1
+            }
+          },
+          "merges": {
+            "flag": {
+              "arg": "--merges"
+            }
+          },
+          "no-merges": {
+            "flag": {
+              "arg": "--no-merges"
+            }
+          },
+          "grep": {
+            "repeat": {
+              "arg": "--grep",
+              "max": 1
+            }
+          },
+          "model": {
+            "repeat": {
+              "arg": "--model",
+              "max": 1
+            }
+          },
+          "tool": {
+            "repeat": {
+              "arg": "--tool",
+              "max": 1
+            }
+          },
+          "tag": {
+            "repeat": {
+              "arg": "--tag",
+              "max": 1
+            }
+          },
+          "touches": {
+            "repeat": {
+              "arg": "--touches",
+              "max": 1
+            }
+          },
+          "verify": {
+            "flag": {
+              "arg": "--verify"
+            }
+          },
+          "recorded": {
+            "flag": {
+              "arg": "--recorded"
+            }
+          },
+          "where": {
+            "repeat": {
+              "arg": "--where",
+              "max": 1
+            }
+          },
+          "limit": {
+            "repeat": {
+              "arg": "--limit",
+              "max": 1
+            }
+          },
+          "after": {
+            "repeat": {
+              "arg": "--after",
+              "max": 1
+            }
+          },
+          "oneline": {
+            "flag": {
+              "arg": "--oneline"
+            }
+          },
+          "revisions": {
+            "repeat": {}
+          }
+        },
+        "run": "query {from} {class} {unsupervised} {supervisor} {signer} {author-after} {author-before} {merges} {no-merges} {grep} {model} {tool} {tag} {touches} {verify} {recorded} {where} {limit} {after} {oneline} -- {revisions}",
+        "interactive": false
+      },
+      {
+        "id": "remove",
+        "title": "Stage a file or directory for removal",
+        "description": "Stage a file or directory for removal: its inventory entries are marked as deleted, so they will not be part of the next parcel. The working directory is not touched. To unstage changes instead (undo a \"load\"), use \"unload\".",
+        "params": {
+          "path": {
+            "input": {}
+          }
+        },
+        "run": "remove -- {path}",
+        "interactive": false
+      },
+      {
+        "id": "restore",
+        "title": "Restore a file or directory from the inventory (discard unstaged changes)",
+        "description": "Restore a file or directory in the working directory from the inventory (discard unstaged changes). With --staged, reset the inventory entries to the pallet head instead (unstage), leaving the working directory untouched.",
+        "params": {
+          "staged": {
+            "flag": {
+              "arg": "--staged"
+            }
+          },
+          "path": {
+            "input": {}
+          }
+        },
+        "run": "restore {staged} -- {path}",
+        "interactive": false
+      },
+      {
+        "id": "self-update",
+        "title": "Check for a newer release and update this binary (client only)",
+        "description": "Check the latest published release against this binary and, for a script/manual install, update in place by re-running the verified install script. A package-manager install (cargo/brew) is never overwritten — self-update shows the right upgrade command instead. There is deliberately no server self-update: a server is redeployed, not self-mutated.",
+        "params": {
+          "check": {
+            "flag": {
+              "arg": "--check"
+            }
+          }
+        },
+        "run": "self-update {check}",
+        "interactive": false
+      },
+      {
+        "id": "shift",
+        "title": "Shift to another pallet",
+        "description": "Shift to another pallet: materialize its head parcel in the working directory and repopulate the inventory from it. Refuses to run while there are staged or unstaged changes (untracked files are tolerated).",
+        "params": {
+          "pallet": {
+            "input": {}
+          }
+        },
+        "run": "shift -- {pallet}",
+        "interactive": false
+      },
+      {
+        "id": "show",
+        "title": "Print a file's content at a revision (`git show <rev>:<path>`'s equivalent)",
+        "description": "Print a file's content at a revision in one invocation: \"<revision>:<path>\", split on the first \":\" (a revision — a pallet name, an \"@\"-qualified meta pallet, or a parcel hash prefix — can never contain \":\", so the split is unambiguous even when the path itself has one). A chunked large file reports its metadata (content hash, size, chunk count) instead of assembling it; non-text content is reported binary. With --json, the envelope carries the resolved parcel hash, the tree entry's own hash, the binary/chunked signal, and the content when it is text.",
+        "params": {
+          "target": {
+            "input": {}
+          }
+        },
+        "run": "show -- {target}",
+        "interactive": false
+      },
+      {
+        "id": "stack",
+        "title": "Stack the inventory as a new parcel (commit) on the current pallet",
+        "description": "Stack the inventory as a new parcel (commit) on the current pallet, with the configured operator recorded as the author. A consolidation in progress is completed by this command.",
+        "params": {
+          "description": {
+            "repeat": {
+              "max": 1
+            }
+          }
+        },
+        "run": "stack -- {description}",
+        "interactive": false
+      },
+      {
+        "id": "stocktake",
+        "title": "Report the staged and unstaged changes of the warehouse",
+        "description": "Report the current pallet, the staged changes (inventory vs pallet head — what the next \"stack\" records) and the changes not yet loaded (working directory vs inventory). With --summary, report only the counts (a token-cheap overview for scripts and agents).",
+        "params": {
+          "summary": {
+            "flag": {
+              "arg": "--summary"
+            }
+          }
+        },
+        "run": "stocktake {summary}",
+        "interactive": false
+      },
+      {
+        "id": "expand",
+        "title": "Widen a sparse warehouse's fetch scope and download the newly in-scope subtree(s)",
+        "description": "Widen a sparse warehouse's fetch scope: add subtree path(s) to what the store fetches, then download their content across the whole history from the remote. Cheap and incremental — only the newly in-scope objects are fetched; what is already present is skipped. After expanding, a bay can be scoped to the new path (\"bay add --scope\"). A full (non-sparse) warehouse already holds everything, so there is nothing to expand.",
+        "params": {
+          "paths": {
+            "repeat": {
+              "min": 1
+            }
+          }
+        },
+        "run": "expand -- {paths}",
+        "interactive": false
+      },
+      {
+        "id": "narrow",
+        "title": "Narrow this checkout's materialization scope and de-materialize the dropped subtree(s)",
+        "description": "Narrow this checkout's materialization scope: drop subtree path(s) from what this bay (or the main tree) materializes, and remove the now out-of-scope files from the working directory. This frees nothing in the shared object store — the dropped content is still ordinary reachable history, not garbage — it only shrinks what this checkout shows. A checkout must keep at least one in-scope path; to stop scoping entirely, open a fresh full checkout.",
+        "params": {
+          "paths": {
+            "repeat": {
+              "min": 1
+            }
+          }
+        },
+        "run": "narrow -- {paths}",
+        "interactive": false
+      },
+      {
+        "id": "scope",
+        "title": "Show this bay's sparse materialization scope, and the warehouse fetch scope",
+        "category": "scope",
+        "description": "Show the sparse-workspace scope: this bay's materialization scope (the subtree path(s) it checks out, stages and stacks) and the warehouse's fetch scope (what the store has fetched at all). An unscoped bay (or the main tree) reports a full scope: the whole tree. Scope is local to the checkout and never tracked. Read-only.",
+        "params": {},
+        "run": "scope",
+        "interactive": false
+      },
+      {
+        "id": "scope-status",
+        "title": "Show the current bay's materialization scope and the warehouse fetch scope (the default)",
+        "category": "scope",
+        "params": {},
+        "run": "scope status",
+        "interactive": false
+      },
+      {
+        "id": "scope-prune",
+        "title": "Reclaim disk from a sparse warehouse: forget a fetched path and free its content",
+        "description": "Reclaim disk from a sparse warehouse: drop a fetched path from the shared warehouse fetch scope and free the objects under it from the object store. This is the deliberate, destructive counterpart of \"narrow\" — narrow is bay-local and frees nothing, because narrowed-away content is still reachable history that garbage collection correctly keeps; scope-prune forgets a path warehouse-wide and reclaims its disk. It is multi-bay-aware: it refuses to free a path any checkout (the main tree or a bay) still materializes. The pruned content is sealed by hash afterwards — re-fetchable from the origin with \"expand\". A full (non-sparse) warehouse has nothing to prune. If an earlier prune was interrupted before it finished freeing everything, running it again on the same path resumes and finishes the job rather than refusing. Use --dry-run to see what it would free without changing anything.",
+        "params": {
+          "dry-run": {
+            "flag": {
+              "arg": "--dry-run"
+            }
+          },
+          "paths": {
+            "repeat": {
+              "min": 1
+            }
+          }
+        },
+        "run": "scope-prune {dry-run} -- {paths}",
+        "interactive": false
+      },
+      {
+        "id": "store",
+        "title": "Report object-store health: loose vs packed objects, packs, and whether compaction is due",
+        "description": "Report the health of the object store — the counterpart of \"stocktake\" (which reports the working tree). Shows how many objects are loose (unpacked) versus packed, how many pack files there are and how delta-dense they are, the on-disk sizes, and whether an incremental compaction or a consolidating repack is currently due per the maintenance.loose / maintenance.packs thresholds. Read-only; run \"compact\" to act on it.",
+        "params": {},
+        "run": "store",
+        "interactive": false
+      },
+      {
+        "id": "tag",
+        "title": "Manage signed tags: named, admin-signed pointers at a parcel (releases)",
+        "category": "tag",
+        "description": "Manage tags: named, signed pointers at a parcel — releases and milestones. A tag is a signed record on the \"@tags\" meta pallet, so who cut it is the parcel's signature (forge-proof), verifiable offline against the office chain. The release convention: a tag is signed by an admin key, so creating one requires an admin. Tag names are immutable. Without a subcommand, the tags are listed.",
+        "params": {},
+        "run": "tag",
+        "interactive": false
+      },
+      {
+        "id": "tag-create",
+        "title": "Create a signed tag pointing at a revision (admin only)",
+        "category": "tag",
+        "description": "Create a signed tag pointing at a revision — a release marker. The tag is signed and recorded on the \"@tags\" meta pallet, verifiable offline against the office chain. As the release convention, only an admin may cut a tag. Tag names are immutable; an existing name is refused.",
+        "params": {
+          "message": {
+            "repeat": {
+              "arg": "--message",
+              "max": 1
+            }
+          },
+          "name": {
+            "input": {}
+          },
+          "revision": {
+            "repeat": {
+              "max": 1
+            }
+          }
+        },
+        "run": "tag create {message} -- {name} {revision}",
+        "interactive": false
+      },
+      {
+        "id": "tag-show",
+        "title": "Show one tag in full (subject, tagger, message)",
+        "category": "tag",
+        "params": {
+          "name": {
+            "input": {}
+          }
+        },
+        "run": "tag show -- {name}",
+        "interactive": false
+      },
+      {
+        "id": "tag-list",
+        "title": "List every tag (the default)",
+        "category": "tag",
+        "params": {},
+        "run": "tag list",
+        "interactive": false
+      },
+      {
+        "id": "undo",
+        "title": "Undo the last stack on the current pallet (soft — keeps your changes)",
+        "description": "Undo the last \"stack\" on the current pallet: move the pallet head back to the previous parcel, keeping the working directory and the inventory as they are (like git's \"reset --soft HEAD~1\"). The undone parcel's changes are staged again, so you can re-stack them — e.g. with a corrected message or author — or adjust them first. The parcel is not deleted, only taken off the pallet. Merge parcels (completed consolidations) are not undone yet.",
+        "params": {},
+        "run": "undo",
+        "interactive": false
+      },
+      {
+        "id": "unload",
+        "title": "Unstage a file or directory (keep your changes)",
+        "description": "Unstage a file or directory: reset its inventory entries to the pallet head, leaving the working directory untouched — the inverse of \"load\", and the same as \"restore --staged\". To stage a removal instead, use \"remove\".",
+        "params": {
+          "path": {
+            "input": {}
+          }
+        },
+        "run": "unload -- {path}",
+        "interactive": false
+      },
+      {
+        "id": "version",
+        "title": "Print the version of Forklift",
+        "params": {},
+        "run": "version",
+        "interactive": false
+      }
+    ]
+  }
+}

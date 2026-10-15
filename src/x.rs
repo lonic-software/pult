@@ -86,7 +86,10 @@ fn var_arg() -> Arg {
 /// comes before goes through phase one (`cli`); the rest stays raw, `--` and
 /// all, for `bind_tail` to bind exactly as `pult <command>` would. Which of
 /// `cli`'s options take a separate value is read from `cli` itself.
-fn split_at_command<'a>(cli: &clap::Command, rest: &'a [String]) -> (&'a [String], &'a [String]) {
+pub(crate) fn split_at_command<'a>(
+    cli: &clap::Command,
+    rest: &'a [String],
+) -> (&'a [String], &'a [String]) {
     let takes_value = |arg: &str| {
         cli.get_arguments().any(|a| {
             !a.is_positional()
@@ -316,7 +319,7 @@ fn resolve_ephemeral(
     resolved.include_summary.clear();
     // A single ephemeral source: let the trust prompt show the command about to
     // run (the trust unit is exactly this invocation).
-    resolved.ephemeral = true;
+    resolved.origin = resolver::Origin::Module;
     Ok(resolved)
 }
 
@@ -388,7 +391,7 @@ mod tests {
         // The module is what's trusted — no phantom "includes" line.
         assert!(resolved.include_summary.is_empty());
         // Ephemeral: the trust prompt will show the command about to run.
-        assert!(resolved.ephemeral);
+        assert_eq!(resolved.origin, resolver::Origin::Module);
     }
 
     #[test]

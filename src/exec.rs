@@ -11,7 +11,7 @@ use crate::journal;
 use crate::label;
 use crate::manifest::{ParamKind, RepeatDef};
 use crate::mask::{self, Masker};
-use crate::resolver::{Resolved, ResolvedCommand, ResolvedRun};
+use crate::resolver::{ArgvWord, Origin, Resolved, ResolvedCommand, ResolvedRun};
 use crate::runner::Journaling;
 use crate::value::{self, Value, Values};
 use crate::{compile, interp, machine, options, prompt, runner, shell, trust};
@@ -35,9 +35,11 @@ pub enum Prompting {
 /// work), build the final script, and hand off to the runner (or print it).
 ///
 /// This is the single choke point through which anything from a manifest gets
-/// executed, so the trust check lives here. For an ephemeral `pult x` source the
-/// trust prompt also shows the **composed command about to run** — honest there
-/// because the trust unit is that one invocation. A real manifest's trust covers
+/// executed, so the trust check lives here, keyed to the `Resolved`'s
+/// [`Origin`]: a tool document (`pult tool`) has no trust gate at all. For an
+/// ephemeral `pult x` source the trust prompt also shows the **composed
+/// command about to run** — honest there because the trust unit is that one
+/// invocation. A real manifest's trust covers
 /// every command it declares, so showing one would misrepresent the scope; its
 /// prompt stays the file/include summary. Either way `--print` prints that same
 /// composed command with no trust gate — a side-effect-free dry run, since the
@@ -55,24 +57,34 @@ pub fn execute(
     if print {
         // Dry run: compose without executing anything (provided values
         // concrete, the rest as `<name>`), print, and stop — no trust needed.
-        let preview = compose(cmd, &fill(cmd, provided, None, prompting)?)?;
+        let preview = compose(resolved, cmd, &fill(cmd, provided, None, prompting)?)?;
         println!("{preview}");
         return Ok(0);
     }
 
-    // Only an ephemeral source shows its command in the trust prompt (see above).
-    let about_to_run = if resolved.ephemeral {
-        Some(compose(cmd, &fill(cmd, provided, None, prompting)?)?)
-    } else {
-        None
-    };
-    trust::ensure_trusted(
-        &resolved.path,
-        &resolved.trust_hash,
-        &resolved.include_summary,
-        grant,
-        about_to_run.as_deref(),
-    )?;
+    match resolved.origin {
+        Origin::Tool => {}
+        Origin::Manifest | Origin::Module => {
+            // Only an ephemeral source shows its command in the trust prompt
+            // (see above).
+            let about_to_run = if resolved.origin == Origin::Module {
+                Some(compose(
+                    resolved,
+                    cmd,
+                    &fill(cmd, provided, None, prompting)?,
+                )?)
+            } else {
+                None
+            };
+            trust::ensure_trusted(
+                &resolved.path,
+                &resolved.trust_hash,
+                &resolved.include_summary,
+                grant,
+                about_to_run.as_deref(),
+            )?;
+        }
+    }
 
     // Trusted now — fill for real (prompting for and resolving any values not
     // given on the command line) and run.
@@ -99,6 +111,8 @@ pub fn execute(
         ResolvedRun::Steps(_) => {
             shell::bash()?;
         }
+        // Spawned directly; no shell to resolve.
+        ResolvedRun::Argv(_) => {}
     }
 
     // Build the run's masker once, post-`fill` (so an interactively prompted
@@ -110,12 +124,12 @@ pub fn execute(
     // render a banner too, so it needs the same masker a journaled run gets.
     let (masker, unmaskable) = build_masker(cmd, &values);
 
-    // Open the run journal (see journal.rs). Ephemeral `pult x` sources are
-    // skipped — no durable repo identity to journal under. The journal's
+    // Open the run journal (see journal.rs). Ephemeral `pult x` sources and
+    // tool documents are skipped — no durable repo identity to journal under. The journal's
     // param audit record gets `<redacted>` for secrets (the spec's literal,
     // machine-recognizable marker — distinct from the `••••••` display mask
     // below, which is a human-facing rendering).
-    let journaling = if resolved.ephemeral {
+    let journaling = if resolved.origin != Origin::Manifest {
         Journaling::Off
     } else {
         let journal = journal::Journal::start(journal::StartInfo {
@@ -155,7 +169,10 @@ pub fn execute(
     // that precedes that abort. `warn_unmaskable` dedupes by name (a
     // process-global set) so a secret already warned about there isn't
     // warned about again here.
-    if matches!(journaling, Journaling::Full(..)) || matches!(cmd.run, ResolvedRun::Script(_)) {
+    // An argv run's banner is masked the same way a script's is.
+    if matches!(journaling, Journaling::Full(..))
+        || matches!(cmd.run, ResolvedRun::Script(_) | ResolvedRun::Argv(_))
+    {
         warn_unmaskable(&unmaskable);
     }
 
@@ -189,6 +206,18 @@ pub fn execute(
                 channel,
             )
         }
+        // The same two-pass display as a script's: by name, then by value.
+        ResolvedRun::Argv(words) => runner::run_argv(
+            &resolved.path,
+            &argv(cmd, words, &values, &values),
+            &masker.apply(&display_argv(
+                &resolved.path,
+                &argv(cmd, words, &values, &redact(cmd, &values)),
+            )),
+            &resolved.run_dir,
+            journaling,
+            channel,
+        ),
         // A channel inherited from upstream belongs to whoever set it, and
         // only a channel's owner emits `step`: on someone else's channel
         // each step is named by a `status` line instead.
@@ -314,7 +343,7 @@ fn warn_unmaskable(names: &[String]) {
 ///
 /// A provided value's type matches its param's kind: the argv binding and
 /// `--params-json` (main.rs) both build it from the kind.
-fn fill(
+pub(crate) fn fill(
     cmd: &ResolvedCommand,
     provided: &HashMap<String, Value>,
     run_dir: Option<&Path>,
@@ -544,14 +573,94 @@ fn pick_selection(opts: &[options::PickOption], i: usize) -> String {
 }
 
 /// Render the final command text for `values`: a plain `run:` interpolates to a
-/// single line; a step list compiles to its bash script.
-fn compose(cmd: &ResolvedCommand, values: &Values) -> Result<String> {
+/// single line; a step list compiles to its bash script; an argv shows as the
+/// program and its arguments, shell-quoted.
+fn compose(resolved: &Resolved, cmd: &ResolvedCommand, values: &Values) -> Result<String> {
     match &cmd.run {
         ResolvedRun::Script(template) => {
             interp::interpolate(template, &value::words(&cmd.params, values))
         }
         ResolvedRun::Steps(_) => compile::compile(cmd, values, Guards::None),
+        ResolvedRun::Argv(words) => Ok(display_argv(
+            &resolved.path,
+            &argv(cmd, words, values, values),
+        )),
     }
+}
+
+/// The arguments an argv run spawns its program with. A literal is itself;
+/// a param is its value as zero or more arguments: text one, a set flag its
+/// `arg`, an unset flag or empty list none, a list each item after its `arg`
+/// (or alone, without one).
+///
+/// One rule is the tool path's own, not the shared shell renderer's: under
+/// an `arg` starting with `--`, an item that itself starts with `-` becomes
+/// the single argument `--arg=item`, so the tool binds it as the value
+/// rather than refusing it as an unknown flag. `value::render` keeps the
+/// two-word form, since a hand-written manifest calls tools whose option
+/// syntax pult cannot know.
+///
+/// `shown` supplies the words actually emitted: `values` itself for the run,
+/// or its redaction for the banner. The shape, including that join, always
+/// follows `values`, so the banner shows the argv that ran even when a
+/// secret is masked.
+pub(crate) fn argv(
+    cmd: &ResolvedCommand,
+    words: &[ArgvWord],
+    values: &Values,
+    shown: &Values,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for word in words {
+        let name = match word {
+            ArgvWord::Literal(s) => {
+                out.push(s.clone());
+                continue;
+            }
+            ArgvWord::Param(name) => name,
+        };
+        let def = &cmd.params[name.as_str()];
+        match (&values[name.as_str()], &shown[name.as_str()]) {
+            (Value::Text(_), Value::Text(s)) => out.push(s.clone()),
+            (Value::Flag(false), _) => {}
+            (Value::Flag(true), _) => {
+                let ParamKind::Flag(flag) = def.kind() else {
+                    unreachable!("a flag value belongs to a flag param");
+                };
+                out.push(
+                    flag.arg
+                        .clone()
+                        .expect("a resolved flag always has an `arg`"),
+                );
+            }
+            (Value::List(items), Value::List(shown)) => {
+                let arg = match def.kind() {
+                    ParamKind::Repeat(repeat) => repeat.arg.as_deref(),
+                    _ => unreachable!("a list value belongs to a repeat param"),
+                };
+                for (item, word) in items.iter().zip(shown) {
+                    match arg {
+                        Some(arg) if arg.starts_with("--") && item.starts_with('-') => {
+                            out.push(format!("{arg}={word}"))
+                        }
+                        Some(arg) => out.extend([arg.to_string(), word.clone()]),
+                        None => out.push(word.clone()),
+                    }
+                }
+            }
+            _ => unreachable!("a redaction keeps each value's kind"),
+        }
+    }
+    out
+}
+
+/// An argv for display only: the program and each argument shell-quoted.
+fn display_argv(program: &Path, args: &[String]) -> String {
+    std::iter::once(program.display().to_string())
+        .chain(args.iter().cloned())
+        .map(|a| interp::shell_quote(&a))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -684,7 +793,7 @@ mod tests {
         // Preview fill (`--print`, ephemeral trust prompt): the secret becomes
         // its slot even though a value was provided; plain inputs stay concrete.
         let values = fill(cmd, &provided, None, Prompting::Direct).unwrap();
-        let preview = compose(cmd, &values).unwrap();
+        let preview = compose(&resolved, cmd, &values).unwrap();
         assert!(!preview.contains("hunter2"), "leaked: {preview}");
         assert!(preview.contains("<token>"), "got: {preview}");
         assert!(preview.contains("--region us"), "got: {preview}");

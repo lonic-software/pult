@@ -21,6 +21,7 @@ mod runner;
 mod runs;
 mod selfupdate;
 mod shell;
+mod tool;
 mod trust;
 mod value;
 mod verify;
@@ -81,6 +82,11 @@ fn run(args: &[String]) -> Result<i32> {
     // is reserved, so no manifest command can ever claim it).
     if args.first().map(String::as_str) == Some("x") {
         return x::run_cli(&args[1..]);
+    }
+    // `pult tool` — a program's own commands, from its self-schema document.
+    // No manifest is involved at all (the id is reserved too).
+    if args.first().map(String::as_str) == Some("tool") {
+        return tool::run_cli(&args[1..]);
     }
     // As is `init` — its whole point is running where no manifest exists.
     if args.first().map(String::as_str) == Some("init") {
@@ -278,6 +284,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                pult update [VERSION]        self-update to the latest (or given) release\n  \
                pult init [--user]           scaffold a starter manifest\n  \
                pult x <SOURCE> [COMMAND]    run a command straight from a module source (no manifest)\n  \
+               pult tool <BIN> [COMMAND]    run a program's commands from its own `self-schema`\n  \
                pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
                pult includes verify         check every pin still resolves and no tag moved\n  \
                pult doctor [--json]         run every command's `check:` and report readiness\n  \
@@ -547,7 +554,7 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                             .collect::<Vec<_>>()
                     )
                 }
-                ResolvedRun::Script(_) => serde_json::Value::Null,
+                ResolvedRun::Script(_) | ResolvedRun::Argv(_) => serde_json::Value::Null,
             };
             json!({
                 "id": cmd.id,
