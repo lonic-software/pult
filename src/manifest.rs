@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -46,13 +47,13 @@ pub struct Manifest {
     #[cfg_attr(test, schemars(with = "Option<serde_json::Value>"))]
     pub registries: Option<serde_yaml::Value>,
     /// Modules only: variables the include site binds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_keys")]
     pub vars: IndexMap<String, VarDef>,
     /// Named, reusable param definitions (referenced via `use:`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_keys")]
     pub params: IndexMap<String, ParamDef>,
     /// Named, reusable script fragments (referenced via `use:` in run lists).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_keys")]
     pub steps: IndexMap<String, StepDef>,
     #[serde(default)]
     pub commands: Vec<CommandDef>,
@@ -63,7 +64,7 @@ pub struct Manifest {
 #[serde(deny_unknown_fields)]
 pub struct IncludeDef {
     pub source: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_keys")]
     pub vars: IndexMap<String, String>,
     #[serde(default)]
     pub prefix: Option<String>,
@@ -90,7 +91,7 @@ pub struct VarDef {
 pub struct CommandDef {
     pub id: String,
     pub title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_keys")]
     pub params: IndexMap<String, ParamDef>,
     pub run: RunSpec,
     /// Optional readiness probe: a shell command (no `{param}` placeholders —
@@ -151,6 +152,39 @@ where
     T: Deserialize<'de> + Default,
 {
     Ok(Some(Option::<T>::deserialize(d)?.unwrap_or_default()))
+}
+
+/// Every mapping a manifest declares refuses a repeated key. A plain
+/// `IndexMap` keeps the last of two equal keys and drops the first without a
+/// word, so a param, step, var or binding written twice would silently lose
+/// a definition. Implemented on the map's own visitor, so it holds under
+/// every format a manifest is read from (YAML today, JSON for `pult tool`).
+/// Struct mappings need nothing: serde's derive already refuses a repeated
+/// field. `every_manifest_map_refuses_duplicates` keeps new map fields on it.
+fn unique_keys<'de, D, V>(d: D) -> Result<IndexMap<String, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    struct Unique<V>(PhantomData<V>);
+    impl<'de, V: Deserialize<'de>> Visitor<'de> for Unique<V> {
+        type Value = IndexMap<String, V>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a mapping")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Self::Value, A::Error> {
+            let mut out = IndexMap::with_capacity(m.size_hint().unwrap_or(0));
+            while let Some(key) = m.next_key::<String>()? {
+                if out.contains_key(&key) {
+                    return Err(de::Error::custom(format_args!("duplicate key `{key}`")));
+                }
+                let value = m.next_value()?;
+                out.insert(key, value);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(Unique(PhantomData))
 }
 
 pub enum ParamKind<'a> {
@@ -414,10 +448,10 @@ pub struct UseRef {
     pub use_: String,
     /// Rebind the step's `{placeholder}` names (values may reference this
     /// command's params).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_keys")]
     pub with: IndexMap<String, String>,
     /// Rename the step's declared outputs: `{ TASK: BACKEND_TASK }`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_keys")]
     pub exports: IndexMap<String, String>,
 }
 
@@ -443,7 +477,7 @@ pub enum PipeEntry {
 pub struct PipeUseRef {
     #[serde(rename = "use")]
     pub use_: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_keys")]
     pub with: IndexMap<String, String>,
 }
 
@@ -1093,5 +1127,190 @@ commands:
         };
         let opt = OptionDef::Full(full);
         assert_eq!(opt.description(), None);
+    }
+
+    /// One document per manifest map field, each declaring the key `k`
+    /// twice: (field, YAML, JSON, whether the field sits under an untagged
+    /// enum). An untagged enum reports its own "did not match any variant"
+    /// in place of the inner error, so for those only the refusal is pinned.
+    const DUPLICATE_KEY_DOCS: &[(&str, &str, &str, bool)] = &[
+        (
+            "Manifest.vars",
+            "version: 1\nvars:\n  k: {default: a}\n  k: {default: b}\n",
+            r#"{"version":1,"vars":{"k":{"default":"a"},"k":{"default":"b"}}}"#,
+            false,
+        ),
+        (
+            "Manifest.params",
+            "version: 1\nparams:\n  k: {input: {}}\n  k: {flag: {}}\n",
+            r#"{"version":1,"params":{"k":{"input":{}},"k":{"flag":{}}}}"#,
+            false,
+        ),
+        (
+            "Manifest.steps",
+            "version: 1\nsteps:\n  k: echo a\n  k: echo b\n",
+            r#"{"version":1,"steps":{"k":"echo a","k":"echo b"}}"#,
+            false,
+        ),
+        (
+            "IncludeDef.vars",
+            "version: 1\nincludes:\n  - source: ./m\n    vars: {k: a, k: b}\n",
+            r#"{"version":1,"includes":[{"source":"./m","vars":{"k":"a","k":"b"}}]}"#,
+            false,
+        ),
+        (
+            "CommandDef.params",
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    run: echo\n    params:\n      k: {input: {}}\n      k: {flag: {}}\n",
+            r#"{"version":1,"commands":[{"id":"c","title":"C","run":"echo","params":{"k":{"input":{}},"k":{"flag":{}}}}]}"#,
+            false,
+        ),
+        (
+            "UseRef.with",
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    run:\n      - use: s\n        with: {k: a, k: b}\n",
+            r#"{"version":1,"commands":[{"id":"c","title":"C","run":[{"use":"s","with":{"k":"a","k":"b"}}]}]}"#,
+            true,
+        ),
+        (
+            "UseRef.exports",
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    run:\n      - use: s\n        exports: {k: A, k: B}\n",
+            r#"{"version":1,"commands":[{"id":"c","title":"C","run":[{"use":"s","exports":{"k":"A","k":"B"}}]}]}"#,
+            true,
+        ),
+        (
+            "PipeUseRef.with",
+            "version: 1\ncommands:\n  - id: c\n    title: C\n    run:\n      - pipe:\n          - use: s\n            with: {k: a, k: b}\n",
+            r#"{"version":1,"commands":[{"id":"c","title":"C","run":[{"pipe":[{"use":"s","with":{"k":"a","k":"b"}}]}]}]}"#,
+            true,
+        ),
+    ];
+
+    /// Each document with its second `k` renamed parses under both formats,
+    /// so the refusal below is about the repeat and nothing else.
+    #[test]
+    fn duplicate_key_docs_parse_once_the_repeat_is_renamed() {
+        for (field, yaml, json, _) in DUPLICATE_KEY_DOCS {
+            let (yaml, json) = (rename_second_k(yaml), rename_second_k(json));
+            serde_yaml::from_str::<Manifest>(&yaml)
+                .unwrap_or_else(|e| panic!("{field} YAML: {e}\n{yaml}"));
+            serde_json::from_str::<Manifest>(&json)
+                .unwrap_or_else(|e| panic!("{field} JSON: {e}\n{json}"));
+        }
+    }
+
+    fn rename_second_k(doc: &str) -> String {
+        let at = doc.rfind('k').unwrap();
+        format!("{}j{}", &doc[..at], &doc[at + 1..])
+    }
+
+    #[test]
+    fn every_manifest_map_refuses_a_repeated_key_under_yaml_and_json() {
+        for (field, yaml, json, untagged) in DUPLICATE_KEY_DOCS {
+            let errors = [
+                (
+                    "YAML",
+                    serde_yaml::from_str::<Manifest>(yaml)
+                        .err()
+                        .map(|e| e.to_string()),
+                ),
+                (
+                    "JSON",
+                    serde_json::from_str::<Manifest>(json)
+                        .err()
+                        .map(|e| e.to_string()),
+                ),
+            ];
+            for (format, err) in errors {
+                let err = err.unwrap_or_else(|| panic!("{field} under {format}: repeat accepted"));
+                assert!(
+                    *untagged || err.contains("duplicate key `k`"),
+                    "{field} under {format}: {err}"
+                );
+            }
+        }
+    }
+
+    /// The refusal reaches a manifest load as an invalid manifest, naming
+    /// the key.
+    #[test]
+    fn a_repeated_param_key_fails_the_load() {
+        let (_d, path) = write_manifest(DUPLICATE_KEY_DOCS[4].1);
+        let err = load(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("duplicate key `k`"), "got: {text}");
+        assert_eq!(
+            crate::machine::classify(&err),
+            crate::machine::ErrorCode::InvalidManifest
+        );
+    }
+
+    /// Struct mappings refuse a repeated field through serde's derive, under
+    /// both formats; pinned so a hand-written Deserialize cannot lose it.
+    #[test]
+    fn a_repeated_struct_field_is_refused_under_yaml_and_json() {
+        let docs = [
+            (
+                "version: 1\ncommands:\n  - id: c\n    title: A\n    title: B\n    run: echo\n",
+                r#"{"version":1,"commands":[{"id":"c","title":"A","title":"B","run":"echo"}]}"#,
+                "duplicate field `title`",
+            ),
+            (
+                "version: 1\nparams:\n  p: {flag: {}, flag: {arg: -x}}\n",
+                r#"{"version":1,"params":{"p":{"flag":{},"flag":{"arg":"-x"}}}}"#,
+                "duplicate field `flag`",
+            ),
+            (
+                "version: 1\nversion: 1\n",
+                r#"{"version":1,"version":1}"#,
+                "duplicate field `version`",
+            ),
+        ];
+        for (yaml, json, want) in docs {
+            let y = serde_yaml::from_str::<Manifest>(yaml)
+                .unwrap_err()
+                .to_string();
+            let j = serde_json::from_str::<Manifest>(json)
+                .unwrap_err()
+                .to_string();
+            assert!(y.contains(want), "YAML: {y}");
+            assert!(j.contains(want), "JSON: {j}");
+        }
+    }
+
+    /// The enforcer for the refusal's coverage: every map-typed field
+    /// declared in this file goes through `unique_keys`, and the set of such
+    /// fields is exactly the one `DUPLICATE_KEY_DOCS` exercises. A new map
+    /// field fails here until it carries the helper and a document above.
+    #[test]
+    fn every_manifest_map_refuses_duplicates() {
+        let src = include_str!("manifest.rs");
+        let src = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        let mut found = Vec::new();
+        let mut owner = "";
+        let mut prev = "";
+        for line in src.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("pub struct ") {
+                owner = rest.split([' ', '<', '{']).next().unwrap();
+            }
+            let is_field = t.ends_with(',')
+                && t.split_once(": ").is_some_and(|(_, ty)| {
+                    ty.contains("Map<") || ty.contains("serde_yaml::Mapping")
+                });
+            if is_field {
+                let name = t.trim_start_matches("pub ").split(':').next().unwrap();
+                assert!(
+                    prev.contains("deserialize_with = \"unique_keys\""),
+                    "{owner}.{name} is a map without `unique_keys`"
+                );
+                found.push(format!("{owner}.{name}"));
+            }
+            if !t.is_empty() && !t.starts_with("///") && !t.starts_with("//") {
+                prev = t;
+            }
+        }
+        let mut exercised: Vec<_> = DUPLICATE_KEY_DOCS.iter().map(|d| d.0.to_owned()).collect();
+        found.sort();
+        exercised.sort();
+        assert_eq!(found, exercised);
     }
 }
