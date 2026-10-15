@@ -53,7 +53,10 @@ pub fn parse_source_lenient(source: &str) -> Result<Source> {
 }
 
 fn parse_source_with(source: &str, require_pin: bool) -> Result<Source> {
-    if source.starts_with("./") || source.starts_with("../") {
+    // `.\mod` is what PowerShell's tab completion writes.
+    let windows_relative =
+        cfg!(windows) && (source.starts_with(".\\") || source.starts_with("..\\"));
+    if source.starts_with("./") || source.starts_with("../") || windows_relative {
         return Ok(Source::Local);
     }
     if let Some(rest) = source.strip_prefix("git::") {
@@ -97,7 +100,7 @@ fn parse_git(
         None => (body, None),
     };
     if let Some(sub) = &subpath
-        && (sub.split('/').any(|seg| seg == "..") || sub.starts_with('/'))
+        && escapes_checkout(sub)
     {
         bail!("git module `{display}`: subpath must be repo-relative without `..`");
     }
@@ -183,7 +186,11 @@ fn ensure_fetched_inner(git_src: &GitSource, cache_root: &Path) -> Result<(PathB
 }
 
 fn cache_key(git_src: &GitSource) -> String {
-    let digest = Sha256::digest(format!("{}@{}", git_src.url, git_src.rev).as_bytes());
+    // On Windows, entries fetched before [`git`] pinned LF line endings may
+    // hold CRLF checkouts; a distinct key leaves them behind instead of
+    // serving their broken scripts forever (pins never refetch).
+    let eol = if cfg!(windows) { "#lf" } else { "" };
+    let digest = Sha256::digest(format!("{}@{}{eol}", git_src.url, git_src.rev).as_bytes());
     let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
     let name = git_src
         .url
@@ -382,13 +389,29 @@ fn version_key(tag: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
+/// Whether a `//subdir` could point outside the checkout it is joined onto.
+/// Checked for Windows' rules on every host — a manifest is shared across
+/// platforms, so `x\..\..\evil` or `C:evil` must be refused even where `\`
+/// and `:` are ordinary filename characters.
+fn escapes_checkout(sub: &str) -> bool {
+    sub.starts_with(['/', '\\'])
+        || sub.contains(':')
+        || sub.split(['/', '\\']).any(|seg| seg == "..")
+}
+
 fn is_full_sha(rev: &str) -> bool {
     rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Run git with line-ending conversion off. Git for Windows installs with
+/// `core.autocrlf=true`, which would check a module out with CRLF endings —
+/// and a shipped `bin/` script with CRLF fails in sh (`$'\r': command not
+/// found`, `bad interpreter`). Modules get exactly the bytes they committed.
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
     let mut cmd = Command::new("git");
-    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
+    cmd.args(["-c", "core.autocrlf=false", "-c", "core.eol=lf"])
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -464,6 +487,29 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("without `..`"), "got: {err}");
+    }
+
+    #[test]
+    fn windows_style_subpath_escapes_are_rejected_on_every_host() {
+        for bad in [
+            r"github.com/org/repo//x\..\..\evil@v1",
+            r"github.com/org/repo//\abs@v1",
+            r"github.com/org/repo//C:evil@v1",
+        ] {
+            let err = parse_source(bad).unwrap_err().to_string();
+            assert!(err.contains("without `..`"), "{bad}: {err}");
+        }
+        assert!(parse_source("github.com/org/repo//mods/aws@v1").is_ok());
+    }
+
+    #[test]
+    fn backslash_relative_sources_are_local_on_windows() {
+        let parsed = parse_source(r".\tools");
+        if cfg!(windows) {
+            assert!(matches!(parsed.unwrap(), Source::Local));
+        } else {
+            assert!(parsed.is_err());
+        }
     }
 
     #[test]

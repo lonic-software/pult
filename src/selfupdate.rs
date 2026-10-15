@@ -123,13 +123,18 @@ fn replace_file(exe: &Path, new_bin: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The null device as the platform's curl/wget can open it. Windows has no
+/// `/dev/null`: native `curl.exe` fails there with "Failure writing output
+/// to destination" before reporting where the redirect landed.
+const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
 /// Resolve the latest release tag by following the /releases/latest redirect —
 /// no API, no auth, no rate limits.
 fn latest_tag(repo: &str) -> Result<String> {
     let url = format!("https://github.com/{repo}/releases/latest");
     let output = if has("curl") {
         let out = Command::new("curl")
-            .args(["-fsSLI", "-o", "/dev/null", "-w", "%{url_effective}", &url])
+            .args(["-fsSLI", "-o", NULL_DEVICE, "-w", "%{url_effective}", &url])
             .output()
             .context("failed to run curl")?;
         if !out.status.success() {
@@ -142,7 +147,7 @@ fn latest_tag(repo: &str) -> Result<String> {
     } else if has("wget") {
         // wget prints headers to stderr with -S; the final Location wins.
         let out = Command::new("wget")
-            .args(["-q", "-S", "--max-redirect=10", "-O", "/dev/null", &url])
+            .args(["-q", "-S", "--max-redirect=10", "-O", NULL_DEVICE, &url])
             .output()
             .context("failed to run wget")?;
         String::from_utf8_lossy(&out.stderr)
@@ -230,6 +235,17 @@ mod tests {
     fn target_triple_resolves_on_supported_hosts() {
         // This test runs on CI hosts we ship binaries for.
         assert!(target_triple().is_ok());
+    }
+
+    #[test]
+    fn the_null_device_is_writable_on_this_host() {
+        // What curl/wget get as `-o`; on Windows a `/dev/null` here fails.
+        use std::io::Write;
+        let mut null = std::fs::OpenOptions::new()
+            .write(true)
+            .open(NULL_DEVICE)
+            .unwrap();
+        null.write_all(b"20 bytes of headers.").unwrap();
     }
 
     #[test]
