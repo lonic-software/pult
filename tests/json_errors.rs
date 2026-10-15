@@ -211,10 +211,13 @@ fn a_command_line_clap_rejects_is_a_usage_document_with_clap_text() {
     let message = doc["error"]["message"].as_str().unwrap();
     assert!(message.contains("<RUN_ID>"), "{doc}");
 
-    // Help is not a failure: no document, clap's help on stdout, exit 0.
+    // Help is not a failure: a success document, exit 0 (json_success.rs
+    // pins its shape).
     let out = env.pult(&["doctor", "--json", "--help"]);
-    assert_eq!(out.status.code(), Some(0));
-    assert!(!String::from_utf8_lossy(&out.stdout).contains("lonic_json"));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["ok"], true, "{doc}");
+    assert!(doc.get("error").is_none(), "{doc}");
 }
 
 #[test]
