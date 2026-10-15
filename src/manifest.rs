@@ -160,8 +160,8 @@ where
 /// a definition. Implemented on the map's own visitor, so it holds under
 /// every format a manifest is read from (YAML today, JSON for `pult tool`).
 /// Struct mappings need nothing: serde's derive already refuses a repeated
-/// field. `every_manifest_map_refuses_duplicates` keeps new map fields on it.
-fn unique_keys<'de, D, V>(d: D) -> Result<IndexMap<String, V>, D::Error>
+/// field. `every_manifest_map_is_exercised` keeps new map fields on it.
+pub(crate) fn unique_keys<'de, D, V>(d: D) -> Result<IndexMap<String, V>, D::Error>
 where
     D: Deserializer<'de>,
     V: Deserialize<'de>,
@@ -173,10 +173,11 @@ where
             f.write_str("a mapping")
         }
         fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Self::Value, A::Error> {
-            let mut out = IndexMap::with_capacity(m.size_hint().unwrap_or(0));
+            // The hint comes from the input; never preallocate on its word alone.
+            let mut out = IndexMap::with_capacity(m.size_hint().unwrap_or(0).min(256));
             while let Some(key) = m.next_key::<String>()? {
                 if out.contains_key(&key) {
-                    return Err(de::Error::custom(format_args!("duplicate key `{key}`")));
+                    return Err(de::Error::custom(format_args!("duplicate key {key:?}")));
                 }
                 let value = m.next_value()?;
                 out.insert(key, value);
@@ -555,7 +556,7 @@ fn load_inner(path: &Path) -> Result<Loaded> {
 /// of dependent pickers, run/step reference checks) live in the resolver.
 pub fn parse(raw: &str, origin: &Path) -> Result<Manifest> {
     let probe: VersionProbe = serde_yaml::from_str(raw)
-        .with_context(|| format!("{} is not valid YAML", origin.display()))?;
+        .with_context(|| format!("failed to parse {}", origin.display()))?;
     match probe.version {
         None => bail!(
             "{} has no `version:` field — add `version: {SUPPORTED_VERSION}`",
@@ -1223,7 +1224,7 @@ commands:
             for (format, err) in errors {
                 match err {
                     None => wrong.push(format!("{field} under {format}: repeat accepted")),
-                    Some(err) if !untagged && !err.contains("duplicate key `k`") => {
+                    Some(err) if !untagged && !err.contains(r#"duplicate key "k""#) => {
                         wrong.push(format!("{field} under {format}: {err}"))
                     }
                     Some(_) => {}
@@ -1237,10 +1238,14 @@ commands:
     /// the key.
     #[test]
     fn a_repeated_param_key_fails_the_load() {
-        let (_d, path) = write_manifest(DUPLICATE_KEY_DOCS[4].1);
+        let (_, yaml, _, _) = DUPLICATE_KEY_DOCS
+            .iter()
+            .find(|d| d.0 == "CommandDef.params")
+            .unwrap();
+        let (_d, path) = write_manifest(yaml);
         let err = load(&path).unwrap_err();
         let text = format!("{err:#}");
-        assert!(text.contains("duplicate key `k`"), "got: {text}");
+        assert!(text.contains(r#"duplicate key "k""#), "got: {text}");
         assert_eq!(
             crate::machine::classify(&err),
             crate::machine::ErrorCode::InvalidManifest
@@ -1278,43 +1283,65 @@ commands:
             assert!(y.contains(want), "YAML: {y}");
             assert!(j.contains(want), "JSON: {j}");
         }
+        // The version probe sees a repeated `version` first; what reaches
+        // the user names the repeat, not the YAML.
+        let err = parse("version: 1\nversion: 1\n", Path::new("m.yaml")).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("duplicate field `version`"), "got: {text}");
+        assert!(!text.contains("not valid YAML"), "got: {text}");
     }
 
-    /// The enforcer for the refusal's coverage: every map-typed field
-    /// declared in this file goes through `unique_keys`, and the set of such
-    /// fields is exactly the one `DUPLICATE_KEY_DOCS` exercises. A new map
-    /// field fails here until it carries the helper and a document above.
+    /// The enforcer for the refusal's coverage: every mapping position in
+    /// the manifest's derived schema is exactly the set `DUPLICATE_KEY_DOCS`
+    /// exercises, so a new map anywhere a manifest reaches — through an
+    /// alias, nested in another map's values, inside an enum variant, in a
+    /// type defined in another file — fails here until it has a document
+    /// above, and that document fails until the map refuses the repeat.
     #[test]
-    fn every_manifest_map_refuses_duplicates() {
-        let src = include_str!("manifest.rs");
-        let src = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+    fn every_manifest_map_is_exercised() {
+        let schema = serde_json::to_value(schemars::schema_for!(Manifest)).unwrap();
         let mut found = Vec::new();
-        let mut owner = "";
-        let mut prev = "";
-        for line in src.lines() {
-            let t = line.trim();
-            if let Some(rest) = t.strip_prefix("pub struct ") {
-                owner = rest.split([' ', '<', '{']).next().unwrap();
-            }
-            let is_field = t.ends_with(',')
-                && t.split_once(": ").is_some_and(|(_, ty)| {
-                    ty.contains("Map<") || ty.contains("serde_yaml::Mapping")
-                });
-            if is_field {
-                let name = t.trim_start_matches("pub ").split(':').next().unwrap();
-                assert!(
-                    prev.contains("deserialize_with = \"unique_keys\""),
-                    "{owner}.{name} is a map without `unique_keys`"
-                );
-                found.push(format!("{owner}.{name}"));
-            }
-            if !t.is_empty() && !t.starts_with("///") && !t.starts_with("//") {
-                prev = t;
-            }
+        maps_in(&schema, "Manifest", &mut found);
+        for (name, def) in schema["definitions"].as_object().unwrap() {
+            maps_in(def, name, &mut found);
         }
         let mut exercised: Vec<_> = DUPLICATE_KEY_DOCS.iter().map(|d| d.0.to_owned()).collect();
         found.sort();
         exercised.sort();
         assert_eq!(found, exercised);
+    }
+
+    /// Every mapping (an object schema whose `additionalProperties` is a
+    /// schema, not `false`) under `schema`, named by the path to it. A
+    /// `$ref` is not followed: each definition is walked on its own, under
+    /// its own name.
+    fn maps_in(schema: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+        let Some(obj) = schema.as_object() else {
+            return;
+        };
+        if let Some(values) = obj.get("additionalProperties")
+            && values.is_object()
+        {
+            out.push(path.to_owned());
+            maps_in(values, &format!("{path}{{}}"), out);
+        }
+        if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
+            for (field, sub) in props {
+                maps_in(sub, &format!("{path}.{field}"), out);
+            }
+        }
+        if let Some(items) = obj.get("items") {
+            maps_in(items, &format!("{path}[]"), out);
+        }
+        for key in ["anyOf", "oneOf", "allOf"] {
+            for sub in obj
+                .get(key)
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
+                maps_in(sub, path, out);
+            }
+        }
     }
 }
