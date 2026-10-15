@@ -1204,6 +1204,7 @@ commands:
 
     #[test]
     fn every_manifest_map_refuses_a_repeated_key_under_yaml_and_json() {
+        let mut wrong = Vec::new();
         for (field, yaml, json, untagged) in DUPLICATE_KEY_DOCS {
             let errors = [
                 (
@@ -1220,13 +1221,16 @@ commands:
                 ),
             ];
             for (format, err) in errors {
-                let err = err.unwrap_or_else(|| panic!("{field} under {format}: repeat accepted"));
-                assert!(
-                    *untagged || err.contains("duplicate key `k`"),
-                    "{field} under {format}: {err}"
-                );
+                match err {
+                    None => wrong.push(format!("{field} under {format}: repeat accepted")),
+                    Some(err) if !untagged && !err.contains("duplicate key `k`") => {
+                        wrong.push(format!("{field} under {format}: {err}"))
+                    }
+                    Some(_) => {}
+                }
             }
         }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// The refusal reaches a manifest load as an invalid manifest, naming
