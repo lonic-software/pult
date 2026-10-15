@@ -174,9 +174,9 @@ struct Mode {
     json: bool,
     command: Option<String>,
     /// The `command` of a help or version document: the surface whose help
-    /// was asked for, which is not the one [`command_name`] finds when the
-    /// flag comes first (`pult --help doctor` is the top-level help).
-    answered: Option<String>,
+    /// was asked for, which is not `command` when the flag comes first
+    /// (`pult --help doctor` is the top-level help).
+    help_surface: Option<String>,
 }
 
 static MODE: OnceLock<Mode> = OnceLock::new();
@@ -187,7 +187,7 @@ pub fn init(args: &[String]) {
     let _ = MODE.set(Mode {
         json: wants_json(args),
         command: command_name(args),
-        answered: answered_command(args),
+        help_surface: help_surface(args),
     });
 }
 
@@ -202,52 +202,99 @@ fn wants_json(args: &[String]) -> bool {
 
 /// The machine surface the arguments name, for the document's `command`:
 /// `doctor`, `runs list`, `runs tail`, or `list` for `--list`; `None` for
-/// anything else. The first argument that is not an option names the
-/// subcommand; `--run-id` is the one global option that takes a value.
+/// anything else.
 fn command_name(args: &[String]) -> Option<String> {
-    surface(args, true)
+    Scan::of(args, false).surface(true)
 }
 
-/// The machine surface a help or version flag answers for: [`command_name`]
-/// over the arguments before the first such flag, where `--list` names
-/// nothing, since `--list --help` is the top-level help.
-fn answered_command(args: &[String]) -> Option<String> {
-    let asked = args
-        .iter()
-        .position(|a| asks_help_or_version(a))
-        .unwrap_or(args.len());
-    surface(&args[..asked], false)
+/// The machine surface a help or version flag answers for: the one named
+/// before the first such flag, where `--list` names nothing, since
+/// `--list --help` is the top-level help.
+fn help_surface(args: &[String]) -> Option<String> {
+    Scan::of(args, true).surface(false)
 }
 
-/// `--help`, `--version`, or a short-flag cluster holding `h` or `V`.
-fn asks_help_or_version(arg: &str) -> bool {
-    match arg.strip_prefix("--") {
-        Some(long) => long == "help" || long == "version",
-        None => arg.starts_with('-') && arg.contains(['h', 'V']),
-    }
+/// The help or version request pult answers itself when no manifest is
+/// found: only a top-level one, a flag before any subcommand. A subcommand's
+/// help needs the manifest that declares it.
+pub fn top_level_ask(args: &[String]) -> Option<Ask> {
+    let scan = Scan::of(args, true);
+    scan.ask.filter(|_| scan.positionals.is_empty())
 }
 
-fn surface(args: &[String], list: bool) -> Option<String> {
-    let args: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .take_while(|a| *a != "--")
-        .collect();
-    let mut positionals = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i] {
-            "--run-id" => i += 1,
-            a if a.starts_with('-') => {}
-            a => positionals.push(a),
+/// A help or version flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    Help,
+    Version,
+}
+
+/// The arguments before any `--`, read the way the top-level parser reads
+/// them: the first argument that is not an option names the subcommand, and
+/// `--run-id` is the one global option that takes a value.
+struct Scan<'a> {
+    positionals: Vec<&'a str>,
+    list: bool,
+    /// The first help or version flag, when the scan stops at it.
+    ask: Option<Ask>,
+}
+
+impl<'a> Scan<'a> {
+    /// With `stop_at_ask`, the scan ends at the first help or version flag,
+    /// the one clap acts on.
+    fn of(args: &'a [String], stop_at_ask: bool) -> Scan<'a> {
+        let mut scan = Scan {
+            positionals: Vec::new(),
+            list: false,
+            ask: None,
+        };
+        let mut args = args.iter().map(String::as_str);
+        while let Some(arg) = args.next() {
+            match arg {
+                "--" => break,
+                "--run-id" => {
+                    // clap refuses a value that starts with `-`, so the line
+                    // is a usage error there and no help or version answers.
+                    let value = args.next();
+                    if stop_at_ask && value.is_none_or(|v| v.starts_with('-')) {
+                        break;
+                    }
+                }
+                "--list" => scan.list = true,
+                a if a.starts_with('-') => {
+                    if stop_at_ask && let Some(ask) = asks(a) {
+                        scan.ask = Some(ask);
+                        break;
+                    }
+                }
+                a => scan.positionals.push(a),
+            }
         }
-        i += 1;
+        scan
     }
-    match positionals.as_slice() {
-        ["doctor", ..] => Some("doctor".to_string()),
-        ["runs", sub @ ("list" | "tail"), ..] => Some(format!("runs {sub}")),
-        [] if list && args.contains(&"--list") => Some("list".to_string()),
-        _ => None,
+
+    fn surface(&self, list: bool) -> Option<String> {
+        match self.positionals.as_slice() {
+            ["doctor", ..] => Some("doctor".to_string()),
+            ["runs", sub @ ("list" | "tail"), ..] => Some(format!("runs {sub}")),
+            [] if list && self.list => Some("list".to_string()),
+            _ => None,
+        }
+    }
+}
+
+/// `--help`, `--version`, or whichever of `h` and `V` comes first in a
+/// short-flag cluster, as clap acts on the first.
+fn asks(arg: &str) -> Option<Ask> {
+    match arg.strip_prefix("--") {
+        Some("help") => Some(Ask::Help),
+        Some("version") => Some(Ask::Version),
+        Some(_) => None,
+        None => arg.strip_prefix('-')?.chars().find_map(|c| match c {
+            'h' => Some(Ask::Help),
+            'V' => Some(Ask::Version),
+            _ => None,
+        }),
     }
 }
 
@@ -289,6 +336,11 @@ fn succeeded(command: Option<&str>, data: serde_json::Value) -> serde_json::Valu
     })
 }
 
+/// The success document answering a help or version request with `text`.
+fn help_document(command: Option<&str>, text: &str) -> serde_json::Value {
+    succeeded(command, serde_json::json!({ "message": text.trim_end() }))
+}
+
 /// Write the error document, if this invocation is in JSON mode and stdout
 /// can still carry one; returns whether it was written.
 fn emit(code: ErrorCode, message: &str, details: Option<serde_json::Value>) -> bool {
@@ -298,24 +350,27 @@ fn emit(code: ErrorCode, message: &str, details: Option<serde_json::Value>) -> b
     write_document(&document(mode.command.as_deref(), code, message, details))
 }
 
-/// Answer a help or version request at the top level, outside clap (with no
-/// manifest around): under `--json` the success document carrying `text`,
-/// `command` null. Returns whether it was written; otherwise the caller
-/// prints `text`.
-pub fn answer(text: &str) -> bool {
-    MODE.get().is_some_and(|m| m.json) && write_document(&answered(None, text))
-}
-
-/// The success document answering a help or version request with clap's (or
-/// pult's own) text.
-fn answered(command: Option<&str>, text: &str) -> serde_json::Value {
-    succeeded(command, serde_json::json!({ "message": text.trim_end() }))
+/// Answer a help or version request with `text` on stdout: under `--json`
+/// the success document carrying it, `command` being `surface`, otherwise
+/// the text itself. Both belong on stdout, so neither falls back to the
+/// other, and a write that fails (the reader left) is ignored, as clap's own
+/// help ignores it.
+pub fn emit_help(surface: Option<&str>, text: &str) {
+    use std::io::Write;
+    let json = MODE.get().is_some_and(|m| m.json);
+    let mut out = std::io::stdout().lock();
+    let _ = if json {
+        writeln!(out, "{}", help_document(surface, text))
+    } else {
+        writeln!(out, "{}", text.trim_end())
+    }
+    .and_then(|()| out.flush());
 }
 
 fn write_document(doc: &serde_json::Value) -> bool {
-    // Not `println!`: with stdout closed it panics, turning the exit status
-    // into 101. A document nobody can read falls back to prose, even one cut
-    // short when the reader left mid-write.
+    // Not `println!`: with stdout closed it panics, turning the failure's
+    // exit status into 101. A document nobody can read falls back to prose
+    // on stderr, even one cut short when the reader left mid-write.
     use std::io::Write;
     let mut out = std::io::stdout().lock();
     writeln!(out, "{doc}").and_then(|()| out.flush()).is_ok()
@@ -337,31 +392,52 @@ pub fn report(err: &anyhow::Error) -> i32 {
     code.exit_code()
 }
 
+fn is_ask(err: &clap::Error) -> bool {
+    matches!(
+        err.kind(),
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    )
+}
+
 /// Parse `argv` (argv[0] included) with `cli`. In JSON mode, help and version
 /// are a success document whose `data.message` is clap's text, exit 0, and
 /// any other parse failure is a `usage` document whose `details.usage` keeps
 /// clap's own text, in place of printing that text to stderr, exit 2.
 /// Outside JSON mode, clap prints and exits as it always does.
-pub fn get_matches<I, T>(cli: clap::Command, argv: I) -> clap::ArgMatches
+pub fn get_matches<I, T>(mut cli: clap::Command, argv: I) -> clap::ArgMatches
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let err = match cli.try_get_matches_from(argv) {
+    let argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
+    let err = match cli.try_get_matches_from_mut(argv.iter().cloned()) {
         Ok(matches) => return matches,
         Err(err) => err,
     };
     let Some(mode) = MODE.get().filter(|m| m.json) else {
         err.exit();
     };
-    let text = err.render().to_string();
-    if matches!(
-        err.kind(),
-        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-    ) {
-        if !write_document(&answered(mode.answered.as_deref(), &text)) {
-            let _ = err.print();
+    // `--json` is pult's own mode switch, and a surface without a `--json`
+    // of its own refuses it as an unknown argument before clap reaches a help
+    // or version flag later on the line. So that the answer does not depend
+    // on the order, a help or version request the line holds once `--json`
+    // is set aside is answered; any other failure is reported as it was.
+    let err = if is_ask(&err) {
+        err
+    } else {
+        let mut separated = false;
+        let without_json = argv.iter().filter(|a| {
+            separated |= a.to_str() == Some("--");
+            separated || a.to_str() != Some("--json")
+        });
+        match cli.try_get_matches_from_mut(without_json.cloned()) {
+            Err(ask) if is_ask(&ask) => ask,
+            _ => err,
         }
+    };
+    let text = err.render().to_string();
+    if is_ask(&err) {
+        emit_help(mode.help_surface.as_deref(), &text);
         std::process::exit(0);
     }
     if !emit(
@@ -437,22 +513,36 @@ mod tests {
 
     #[test]
     fn a_help_or_version_flag_answers_for_the_surface_before_it() {
-        let answered = |s: &str| answered_command(&args(s));
-        assert_eq!(answered("doctor --help --json").as_deref(), Some("doctor"));
-        assert_eq!(
-            answered("--run-id abc doctor -h").as_deref(),
-            Some("doctor")
-        );
-        assert_eq!(answered("runs tail --help").as_deref(), Some("runs tail"));
-        assert_eq!(answered("--help doctor --json"), None);
-        assert_eq!(answered("-hV doctor"), None);
-        assert_eq!(answered("--list --help --json"), None);
-        assert_eq!(answered("--version --json"), None);
-        assert_eq!(answered("hello --help --json"), None);
-        assert_eq!(
-            answered("doctor --help").as_deref(),
-            command_name(&args("doctor")).as_deref()
-        );
+        let surface = |s: &str| help_surface(&args(s));
+        assert_eq!(surface("doctor --help --json").as_deref(), Some("doctor"));
+        assert_eq!(surface("--run-id abc doctor -h").as_deref(), Some("doctor"));
+        assert_eq!(surface("runs tail --help").as_deref(), Some("runs tail"));
+        assert_eq!(surface("--help doctor --json"), None);
+        assert_eq!(surface("-hV doctor"), None);
+        assert_eq!(surface("--list --help --json"), None);
+        assert_eq!(surface("--version --json"), None);
+        assert_eq!(surface("hello --help --json"), None);
+    }
+
+    #[test]
+    fn only_a_top_level_flag_is_asked_without_a_manifest_and_the_first_wins() {
+        let ask = |s: &str| top_level_ask(&args(s));
+        assert_eq!(ask("--help --json"), Some(Ask::Help));
+        assert_eq!(ask("--json -V"), Some(Ask::Version));
+        assert_eq!(ask("--help --version"), Some(Ask::Help));
+        assert_eq!(ask("--version --help"), Some(Ask::Version));
+        assert_eq!(ask("-qhV"), Some(Ask::Help));
+        assert_eq!(ask("-Vh"), Some(Ask::Version));
+        assert_eq!(ask("--list --help"), Some(Ask::Help));
+        assert_eq!(ask("--run-id abc --help"), Some(Ask::Help));
+        // clap refuses these as a missing `--run-id` value, so nothing answers.
+        assert_eq!(ask("--run-id -x --help"), None);
+        assert_eq!(ask("--run-id --help"), None);
+        assert_eq!(ask("doctor --help"), None);
+        assert_eq!(ask("hello --json -- -h"), None);
+        assert_eq!(ask("--json -- --version"), None);
+        assert_eq!(ask("--run-id -h"), None);
+        assert_eq!(ask("--jsonh --helpx"), None);
     }
 
     /// The prose line and the document's `message` must not change when a

@@ -536,7 +536,9 @@ text they print without `--json` (trailing newline trimmed):
 surface's (`pult doctor --help --json`), and `null` for any other help — the
 top-level help, a manifest command's, `pult x`'s — and for the version. A help
 flag before the subcommand asks for the top-level help (`pult --help doctor`),
-and so does `--list --help`.
+and so does `--list --help`. `--json` may come before or after the help flag
+(`pult hello --json --help`). With no manifest, only the top-level help and
+version are answered; a command's help is the `no_manifest` error.
 
 `pult self schema` prints the manifest JSON Schema, not a document, and has
 no envelope. The run journal's own records (`events.jsonl`, `meta.json`)

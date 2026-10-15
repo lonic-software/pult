@@ -171,6 +171,16 @@ fn help_and_version_under_json_are_success_documents() {
             "Usage: pult doctor",
         ),
         (
+            &["--json", "doctor", "--help"][..],
+            "doctor",
+            "Usage: pult doctor",
+        ),
+        (
+            &["--run-id", "abc", "doctor", "-h", "--json"][..],
+            "doctor",
+            "Usage: pult doctor",
+        ),
+        (
             &["runs", "list", "--help", "--json"][..],
             "runs list",
             "Usage: pult runs list",
@@ -192,6 +202,13 @@ fn help_and_version_under_json_are_success_documents() {
         (&["runs", "--help", "--json"][..], "Usage: pult runs"),
         (&["init", "--help", "--json"][..], "Usage: pult init"),
         (&["x", "--help", "--json"][..], "Usage: pult x"),
+        // `--json` first: surfaces without a `--json` of their own still
+        // answer the help rather than refusing `--json`.
+        (&["hello", "--json", "--help"][..], "Usage: pult hello"),
+        (&["runs", "--json", "--help"][..], "Usage: pult runs"),
+        (&["init", "--json", "-h"][..], "Usage: pult init"),
+        (&["x", "--json", "--help"][..], "Usage: pult x"),
+        (&["--json", "--version"][..], "pult "),
     ] {
         let help = data(&env.pult(args), null.clone(), 0);
         let help = help["message"].as_str().unwrap();
@@ -219,4 +236,108 @@ fn help_and_version_without_a_manifest_are_success_documents_too() {
     let plain = env.pult(&["--help"]);
     assert_eq!(plain.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&plain.stdout).trim_end(), help);
+}
+
+/// Setting `--json` aside to find a help request must not turn a real
+/// failure into a success: with no help or version on the line, or with an
+/// unknown argument ahead of it, the line is still a usage error.
+#[test]
+fn a_failure_with_json_first_stays_a_usage_error() {
+    let env = Env::new();
+    for args in [
+        &["hello", "--json"][..],
+        &["hello", "--json", "--bogus", "--help"][..],
+        &["init", "--json", "--bogus"][..],
+    ] {
+        let out = env.pult(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["ok"], false, "{args:?}: {doc}");
+        assert_eq!(doc["error"]["code"], "usage", "{args:?}: {doc}");
+    }
+}
+
+/// With no manifest, only a top-level help or version is pult's to answer:
+/// a subcommand's help, or a `-h` after `--`, is still `no_manifest`. The
+/// first flag wins, as it does under clap.
+#[test]
+fn without_a_manifest_only_a_top_level_flag_is_answered_and_the_first_wins() {
+    let env = Env::new();
+    std::fs::remove_file(env.repo.path().join("pult.yaml")).unwrap();
+    let null = serde_json::Value::Null;
+    let help = data(
+        &env.pult(&["--help", "--version", "--json"]),
+        null.clone(),
+        0,
+    );
+    assert!(
+        help["message"]
+            .as_str()
+            .unwrap()
+            .contains("No manifest was found"),
+        "{help}"
+    );
+    let version = data(&env.pult(&["--json", "-Vh"]), null, 0);
+    assert_eq!(
+        version["message"],
+        format!("pult {}", env!("CARGO_PKG_VERSION"))
+    );
+
+    for (args, command) in [
+        (
+            &["hello", "--json", "--", "-h"][..],
+            serde_json::Value::Null,
+        ),
+        (
+            &["doctor", "--help", "--json"][..],
+            serde_json::json!("doctor"),
+        ),
+        (
+            &["hello", "--version", "--json"][..],
+            serde_json::Value::Null,
+        ),
+    ] {
+        let out = env.pult(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["error"]["code"], "no_manifest", "{args:?}: {doc}");
+        assert_eq!(doc["command"], command, "{args:?}: {doc}");
+    }
+}
+
+/// A help or version answer nobody can read is not a panic (exit 101), in
+/// plain mode or under `--json`, with or without a manifest. Stdout is a
+/// pipe whose read end is closed before pult starts, so every write fails.
+#[test]
+fn help_and_version_to_a_closed_stdout_exit_0_without_a_panic() {
+    let with = Env::new();
+    let without = Env::new();
+    std::fs::remove_file(without.repo.path().join("pult.yaml")).unwrap();
+    for env in [&with, &without] {
+        for args in [
+            &["--help", "--json"][..],
+            &["--version", "--json"][..],
+            &["--help"][..],
+            &["--version"][..],
+        ] {
+            let (reader, writer) = std::io::pipe().unwrap();
+            drop(reader);
+            let out = Command::new(env!("CARGO_BIN_EXE_pult"))
+                .current_dir(env.repo.path())
+                .env("PULT_STATE_DIR", env.state.path())
+                .env("PULT_TRUST_STORE", env.trust.path().join("trust.json"))
+                .env(
+                    "PULT_USER_MANIFEST",
+                    env.repo.path().join("no-such-user-manifest.yaml"),
+                )
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(writer)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+            assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+        }
+    }
 }

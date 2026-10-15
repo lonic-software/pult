@@ -107,30 +107,26 @@ fn run(args: &[String]) -> Result<i32> {
     let (loaded, scope) = match discovery::find_manifest() {
         Ok(found) => found,
         Err(e) => {
-            // --version / --help should still work with no manifest around,
-            // and under --json they answer with a document, as clap's do.
-            let text = if args.iter().any(|a| a == "-V" || a == "--version") {
-                Some(format!("pult {}", env!("CARGO_PKG_VERSION")))
-            } else if args.iter().any(|a| a == "-h" || a == "--help") {
-                Some(format!(
-                    "pult — manifest-driven ops launcher\n\n\
-                     Run inside a repo containing a pult.yaml, or create one:\n  \
-                       pult init          starter manifest in this directory\n  \
-                       pult init --user   your personal manifest (~/.config/pult/)\n\n\
-                     Bare `pult` opens the guided flow; `pult <command> [values…]`\n\
-                     runs directly. `pult update` updates pult itself.\n\n\
-                     No manifest was found (current directory upward, then the user\n\
-                     manifest).\n\n\
-                     Authoring guide: {}",
-                    docs_url()
-                ))
-            } else {
-                None
-            };
-            if let Some(text) = text {
-                if !machine::answer(&text) {
-                    println!("{text}");
-                }
+            // The top-level --version / --help still work with no manifest
+            // around, and under --json they answer with a document, as
+            // clap's do. A subcommand's help needs the manifest declaring it.
+            if let Some(ask) = machine::top_level_ask(args) {
+                let text = match ask {
+                    machine::Ask::Version => format!("pult {}", env!("CARGO_PKG_VERSION")),
+                    machine::Ask::Help => format!(
+                        "pult — manifest-driven ops launcher\n\n\
+                         Run inside a repo containing a pult.yaml, or create one:\n  \
+                           pult init          starter manifest in this directory\n  \
+                           pult init --user   your personal manifest (~/.config/pult/)\n\n\
+                         Bare `pult` opens the guided flow; `pult <command> [values…]`\n\
+                         runs directly. `pult update` updates pult itself.\n\n\
+                         No manifest was found (current directory upward, then the user\n\
+                         manifest).\n\n\
+                         Authoring guide: {}",
+                        docs_url()
+                    ),
+                };
+                machine::emit_help(None, &text);
                 return Ok(0);
             }
             return Err(e);
