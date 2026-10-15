@@ -37,6 +37,10 @@ a root manifest may have `includes` but not `vars`; a module may have `vars`
 but not `includes` (no transitive includes). `registries:` is reserved for a
 future phase and rejected with an explanatory error.
 
+No mapping in a manifest may repeat a key: a param, step, var, `with:` or
+`exports:` entry declared twice in the same mapping is an error, never a silent
+"last one wins". The same holds for a field repeated inside one entry.
+
 ### `<command>`
 
 ```yaml
