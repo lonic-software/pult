@@ -322,7 +322,8 @@ fn stderr_tail(stderr: &[u8]) -> String {
 /// A tool document is an allowlisted subset of the manifest vocabulary:
 /// `version`, `name`, `description`, `commands`; per command `id`, `title`,
 /// `category`, `description`, `interactive`, `params` and a one-line `run`;
-/// per param `input`, `flag`, `repeat`, and `pick` with static `options`.
+/// per param `input`, `flag`, `repeat`, or `pick` with static `options`, and
+/// an optional `description`.
 /// Every struct is destructured in full, with no `..`, so a field the
 /// vocabulary grows fails to compile here until it is placed on one side.
 fn check_subset(m: &Manifest) -> Result<()> {
@@ -537,6 +538,21 @@ mod tests {
         assert_eq!(
             names,
             ["pallet", "token", "only", "expect", "url", "directory"]
+        );
+    }
+
+    #[test]
+    fn forklift_params_carry_their_help_as_their_description() {
+        let resolved = forklift();
+        for cmd in &resolved.commands {
+            for (key, param) in &cmd.params {
+                assert!(param.description.is_some(), "{} {key}", cmd.id);
+            }
+        }
+        let diff = resolved.commands.iter().find(|c| c.id == "diff").unwrap();
+        assert_eq!(
+            diff.params["staged"].description.as_deref(),
+            Some("Compare the inventory against the pallet head (what \"stack\" would record)")
         );
     }
 
