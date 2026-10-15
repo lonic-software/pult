@@ -791,6 +791,10 @@ status <text>                # transient activity line
 step <k>/<n> <name>          # entering step k of n
 ```
 
+A `progress` percentage is ASCII digits, optionally preceded by one `+`; a
+value above 100 means 100 at any magnitude, and a `-`, a decimal point or any
+other character makes the line malformed.
+
 **Unknown verbs and malformed lines are silently ignored** — never an error,
 in either direction. This is what makes the vocabulary additive-forever: a
 script targeting a newer pult, or an older script run under a newer one,
