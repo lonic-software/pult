@@ -14,6 +14,8 @@
 //!
 //! `ok` says whether pult produced its result, not whether that result is
 //! good news: `doctor` with failing checks exits 1 and still says `ok: true`.
+//! Help and version are results too: under `--json` their text is a success
+//! document's `data.message`, exit 0.
 //!
 //! A consumer classifies a failure by `error.code`, never by the exit status:
 //! pult hands a command's own exit code straight through, so every number
@@ -171,6 +173,10 @@ pub fn usage(message: impl Into<String>) -> anyhow::Error {
 struct Mode {
     json: bool,
     command: Option<String>,
+    /// The `command` of a help or version document: the surface whose help
+    /// was asked for, which is not the one [`command_name`] finds when the
+    /// flag comes first (`pult --help doctor` is the top-level help).
+    answered: Option<String>,
 }
 
 static MODE: OnceLock<Mode> = OnceLock::new();
@@ -181,6 +187,7 @@ pub fn init(args: &[String]) {
     let _ = MODE.set(Mode {
         json: wants_json(args),
         command: command_name(args),
+        answered: answered_command(args),
     });
 }
 
@@ -198,6 +205,29 @@ fn wants_json(args: &[String]) -> bool {
 /// anything else. The first argument that is not an option names the
 /// subcommand; `--run-id` is the one global option that takes a value.
 fn command_name(args: &[String]) -> Option<String> {
+    surface(args, true)
+}
+
+/// The machine surface a help or version flag answers for: [`command_name`]
+/// over the arguments before the first such flag, where `--list` names
+/// nothing, since `--list --help` is the top-level help.
+fn answered_command(args: &[String]) -> Option<String> {
+    let asked = args
+        .iter()
+        .position(|a| asks_help_or_version(a))
+        .unwrap_or(args.len());
+    surface(&args[..asked], false)
+}
+
+/// `--help`, `--version`, or a short-flag cluster holding `h` or `V`.
+fn asks_help_or_version(arg: &str) -> bool {
+    match arg.strip_prefix("--") {
+        Some(long) => long == "help" || long == "version",
+        None => arg.starts_with('-') && arg.contains(['h', 'V']),
+    }
+}
+
+fn surface(args: &[String], list: bool) -> Option<String> {
     let args: Vec<&str> = args
         .iter()
         .map(String::as_str)
@@ -216,7 +246,7 @@ fn command_name(args: &[String]) -> Option<String> {
     match positionals.as_slice() {
         ["doctor", ..] => Some("doctor".to_string()),
         ["runs", sub @ ("list" | "tail"), ..] => Some(format!("runs {sub}")),
-        [] if args.contains(&"--list") => Some("list".to_string()),
+        [] if list && args.contains(&"--list") => Some("list".to_string()),
         _ => None,
     }
 }
@@ -245,6 +275,10 @@ fn document(
 
 /// The success document for `command`, carrying `data`.
 pub fn success(command: &str, data: serde_json::Value) -> serde_json::Value {
+    succeeded(Some(command), data)
+}
+
+fn succeeded(command: Option<&str>, data: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "lonic_json": LONIC_JSON,
         "tool": TOOL,
@@ -258,15 +292,31 @@ pub fn success(command: &str, data: serde_json::Value) -> serde_json::Value {
 /// Write the error document, if this invocation is in JSON mode and stdout
 /// can still carry one; returns whether it was written.
 fn emit(code: ErrorCode, message: &str, details: Option<serde_json::Value>) -> bool {
-    let Some(mode) = MODE.get() else { return false };
-    if !mode.json {
+    let Some(mode) = MODE.get().filter(|m| m.json) else {
         return false;
-    }
-    // Not `println!`: with stdout closed it panics, turning the failure's
-    // exit status into 101. A document nobody can read falls back to prose,
-    // even one cut short when the reader left mid-write.
+    };
+    write_document(&document(mode.command.as_deref(), code, message, details))
+}
+
+/// Answer a help or version request at the top level, outside clap (with no
+/// manifest around): under `--json` the success document carrying `text`,
+/// `command` null. Returns whether it was written; otherwise the caller
+/// prints `text`.
+pub fn answer(text: &str) -> bool {
+    MODE.get().is_some_and(|m| m.json) && write_document(&answered(None, text))
+}
+
+/// The success document answering a help or version request with clap's (or
+/// pult's own) text.
+fn answered(command: Option<&str>, text: &str) -> serde_json::Value {
+    succeeded(command, serde_json::json!({ "message": text.trim_end() }))
+}
+
+fn write_document(doc: &serde_json::Value) -> bool {
+    // Not `println!`: with stdout closed it panics, turning the exit status
+    // into 101. A document nobody can read falls back to prose, even one cut
+    // short when the reader left mid-write.
     use std::io::Write;
-    let doc = document(mode.command.as_deref(), code, message, details);
     let mut out = std::io::stdout().lock();
     writeln!(out, "{doc}").and_then(|()| out.flush()).is_ok()
 }
@@ -287,10 +337,11 @@ pub fn report(err: &anyhow::Error) -> i32 {
     code.exit_code()
 }
 
-/// Parse `argv` (argv[0] included) with `cli`. A parse failure in JSON mode
-/// is a `usage` document whose `details.usage` keeps clap's own text, in place
-/// of printing that text to stderr, and exits 2. Help and version are not
-/// failures and are left to clap, as is everything outside JSON mode.
+/// Parse `argv` (argv[0] included) with `cli`. In JSON mode, help and version
+/// are a success document whose `data.message` is clap's text, exit 0, and
+/// any other parse failure is a `usage` document whose `details.usage` keeps
+/// clap's own text, in place of printing that text to stderr, exit 2.
+/// Outside JSON mode, clap prints and exits as it always does.
 pub fn get_matches<I, T>(cli: clap::Command, argv: I) -> clap::ArgMatches
 where
     I: IntoIterator<Item = T>,
@@ -300,16 +351,19 @@ where
         Ok(matches) => return matches,
         Err(err) => err,
     };
-    let json = MODE.get().is_some_and(|m| m.json);
-    if !json
-        || matches!(
-            err.kind(),
-            clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-        )
-    {
+    let Some(mode) = MODE.get().filter(|m| m.json) else {
         err.exit();
-    }
+    };
     let text = err.render().to_string();
+    if matches!(
+        err.kind(),
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    ) {
+        if !write_document(&answered(mode.answered.as_deref(), &text)) {
+            let _ = err.print();
+        }
+        std::process::exit(0);
+    }
     if !emit(
         ErrorCode::Usage,
         &clap_message(&text),
@@ -379,6 +433,26 @@ mod tests {
         assert_eq!(command_name(&args("runs lst --json")), None);
         assert_eq!(command_name(&args("deploy --list --json")), None);
         assert_eq!(command_name(&args("--json")), None);
+    }
+
+    #[test]
+    fn a_help_or_version_flag_answers_for_the_surface_before_it() {
+        let answered = |s: &str| answered_command(&args(s));
+        assert_eq!(answered("doctor --help --json").as_deref(), Some("doctor"));
+        assert_eq!(
+            answered("--run-id abc doctor -h").as_deref(),
+            Some("doctor")
+        );
+        assert_eq!(answered("runs tail --help").as_deref(), Some("runs tail"));
+        assert_eq!(answered("--help doctor --json"), None);
+        assert_eq!(answered("-hV doctor"), None);
+        assert_eq!(answered("--list --help --json"), None);
+        assert_eq!(answered("--version --json"), None);
+        assert_eq!(answered("hello --help --json"), None);
+        assert_eq!(
+            answered("doctor --help").as_deref(),
+            command_name(&args("doctor")).as_deref()
+        );
     }
 
     /// The prose line and the document's `message` must not change when a

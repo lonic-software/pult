@@ -45,7 +45,7 @@ impl Env {
 }
 
 /// The one success document on stdout, with its header checked; returns `data`.
-fn data(out: &Output, command: &str, exit: i32) -> serde_json::Value {
+fn data(out: &Output, command: impl Into<serde_json::Value>, exit: i32) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(exit), "{out:?}");
     let doc: serde_json::Value = serde_json::from_str(stdout.trim())
@@ -63,7 +63,7 @@ fn data(out: &Output, command: &str, exit: i32) -> serde_json::Value {
     assert_eq!(doc["lonic_json"], 1);
     assert_eq!(doc["tool"], "pult");
     assert_eq!(doc["schema"], 2);
-    assert_eq!(doc["command"], command);
+    assert_eq!(doc["command"], command.into());
     assert_eq!(doc["ok"], true);
     doc["data"].clone()
 }
@@ -130,4 +130,93 @@ fn runs_tail_json_refuses_follow_as_a_usage_error() {
     assert_eq!(doc["schema"], 2);
     assert_eq!(doc["ok"], false);
     assert_eq!(doc["error"]["code"], "usage");
+}
+
+/// Help and version are results, not failures: under `--json` each is a
+/// success document carrying the text plain mode prints, exit 0. `command`
+/// names the machine surface whose help it is, and is null at the top level
+/// (a help flag before the subcommand asks for the top-level help).
+#[test]
+fn help_and_version_under_json_are_success_documents() {
+    let env = Env::new();
+    let null = serde_json::Value::Null;
+    let version = format!("pult {}", env!("CARGO_PKG_VERSION"));
+
+    let plain = env.pult(&["--version"]);
+    assert_eq!(String::from_utf8_lossy(&plain.stdout).trim_end(), version);
+    assert_eq!(
+        data(&env.pult(&["--version", "--json"]), null.clone(), 0)["message"],
+        version
+    );
+    assert_eq!(
+        data(&env.pult(&["--json", "-V"]), null.clone(), 0)["message"],
+        version
+    );
+
+    let top = data(&env.pult(&["--help", "--json"]), null.clone(), 0);
+    let top = top["message"].as_str().unwrap();
+    assert!(top.contains("Usage: pult [OPTIONS]"), "{top}");
+    assert!(top.contains("hello"), "{top}");
+    assert!(!top.ends_with('\n'), "{top:?}");
+
+    for (args, command, usage) in [
+        (
+            &["doctor", "--help", "--json"][..],
+            "doctor",
+            "Usage: pult doctor",
+        ),
+        (
+            &["--trust", "doctor", "-h", "--json"][..],
+            "doctor",
+            "Usage: pult doctor",
+        ),
+        (
+            &["runs", "list", "--help", "--json"][..],
+            "runs list",
+            "Usage: pult runs list",
+        ),
+        (
+            &["runs", "tail", "--help", "--json"][..],
+            "runs tail",
+            "Usage: pult runs tail",
+        ),
+    ] {
+        let help = data(&env.pult(args), command, 0);
+        let help = help["message"].as_str().unwrap();
+        assert!(help.contains(usage), "{args:?}: {help}");
+    }
+    for (args, usage) in [
+        (&["--help", "doctor", "--json"][..], "Usage: pult [OPTIONS]"),
+        (&["--list", "--help", "--json"][..], "Usage: pult [OPTIONS]"),
+        (&["hello", "--help", "--json"][..], "Usage: pult hello"),
+        (&["runs", "--help", "--json"][..], "Usage: pult runs"),
+        (&["init", "--help", "--json"][..], "Usage: pult init"),
+        (&["x", "--help", "--json"][..], "Usage: pult x"),
+    ] {
+        let help = data(&env.pult(args), null.clone(), 0);
+        let help = help["message"].as_str().unwrap();
+        assert!(help.contains(usage), "{args:?}: {help}");
+    }
+}
+
+/// The help and version pult answers itself when no manifest is found take
+/// the same shape as clap's.
+#[test]
+fn help_and_version_without_a_manifest_are_success_documents_too() {
+    let env = Env::new();
+    std::fs::remove_file(env.repo.path().join("pult.yaml")).unwrap();
+    let null = serde_json::Value::Null;
+    let version = format!("pult {}", env!("CARGO_PKG_VERSION"));
+
+    assert_eq!(
+        data(&env.pult(&["--version", "--json"]), null.clone(), 0)["message"],
+        version
+    );
+    let help = data(&env.pult(&["--help", "--json"]), null.clone(), 0);
+    let help = help["message"].as_str().unwrap();
+    assert!(help.contains("No manifest was found"), "{help}");
+
+    let plain = env.pult(&["--help"]);
+    assert_eq!(plain.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&plain.stdout).trim_end(), help);
 }

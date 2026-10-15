@@ -524,6 +524,20 @@ new error codes and new param kinds may appear; existing fields keep their
 meaning); a breaking change bumps `schema`. Check `ok` before reading
 `data`. The sections below show each command's `data`.
 
+Help and version are results too. Under `--json`, `--help`/`-h` and
+`--version`/`-V` write a success document, exit 0, whose `data.message` is the
+text they print without `--json` (trailing newline trimmed):
+
+```json
+{ "lonic_json": 1, "tool": "pult", "schema": 2, "command": null, "ok": true, "data": { "message": "pult 0.5.2" } }
+```
+
+`command` is `"doctor"`, `"runs list"` or `"runs tail"` when the help is that
+surface's (`pult doctor --help --json`), and `null` for any other help — the
+top-level help, a manifest command's, `pult x`'s — and for the version. A help
+flag before the subcommand asks for the top-level help (`pult --help doctor`),
+and so does `--list --help`.
+
 `pult self schema` prints the manifest JSON Schema, not a document, and has
 no envelope. The run journal's own records (`events.jsonl`, `meta.json`)
 carry their own schema, which is still `1`.
@@ -718,7 +732,8 @@ Lonic tool:
 - Classify by `error.code`, never by the exit status. Codes are stable within
   a `schema`; new ones may be added, so treat an unknown code as `generic`.
 - JSON mode is a bare `--json` argument before any `--`. Help and version
-  output stay plain text.
+  are not failures: under `--json` each is a success document (see [the
+  envelope](#machine-readable-output--the-envelope)).
 - `runs tail --jsonl` is a stream, not JSON mode: it never writes an error
   document, and a failure is the prose line on stderr.
 
