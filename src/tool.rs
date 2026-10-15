@@ -475,11 +475,11 @@ mod tests {
     #[test]
     fn windows_runs_only_a_file_with_a_pathext_extension() {
         let pathext = [".COM".to_string(), ".EXE".to_string()];
-        assert!(has_pathext(Path::new(r"C:inorklift.exe"), &pathext));
-        assert!(has_pathext(Path::new(r"C:inorklift.EXE"), &pathext));
-        assert!(!has_pathext(Path::new(r"C:inorklift"), &pathext));
-        assert!(!has_pathext(Path::new(r"C:inorklift.sh"), &pathext));
-        assert!(!has_pathext(Path::new(r"C:inorklift.exe"), &[]));
+        assert!(has_pathext(Path::new("forklift.exe"), &pathext));
+        assert!(has_pathext(Path::new("forklift.EXE"), &pathext));
+        assert!(!has_pathext(Path::new("forklift"), &pathext));
+        assert!(!has_pathext(Path::new("forklift.sh"), &pathext));
+        assert!(!has_pathext(Path::new("forklift.exe"), &[]));
     }
 
     fn envelope(data: &str) -> String {
