@@ -116,6 +116,12 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
     }
 }
 
+/// A JSON object read keeping every key, so a repeat can be refused.
+#[derive(serde::Deserialize)]
+struct Object(
+    #[serde(deserialize_with = "crate::manifest::unique_keys")] IndexMap<String, serde_json::Value>,
+);
+
 /// Merge param values read from stdin (as a JSON object) into `provided`,
 /// which is already populated from the command line. Kept as a pure function
 /// so the parsing/merge rules are unit-testable without an actual stdin pipe.
@@ -124,13 +130,9 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 /// string for a pick or an input, a boolean for a flag, an array of strings
 /// for a repeat — and any other type is a usage error naming the param and
 /// the type it needs; every key must be a param this command declares (typo
-/// safety — the error names the valid ones); and a param supplied both on
-/// the command line and via JSON is a conflict, not a silent override.
-#[derive(serde::Deserialize)]
-struct Object(
-    #[serde(deserialize_with = "crate::manifest::unique_keys")] IndexMap<String, serde_json::Value>,
-);
-
+/// safety — the error names the valid ones); a key appears once; and a param
+/// supplied both on the command line and via JSON is a conflict, not a silent
+/// override.
 pub fn merge_params_json(
     raw: &str,
     declared: &IndexMap<String, ParamDef>,

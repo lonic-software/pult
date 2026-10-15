@@ -1311,16 +1311,42 @@ commands:
         assert_eq!(found, exercised);
     }
 
-    /// Every mapping (an object schema whose `additionalProperties` is a
-    /// schema, not `false`) under `schema`, named by the path to it. A
-    /// `$ref` is not followed: each definition is walked on its own, under
-    /// its own name.
+    /// Every mapping under `schema` (an object schema whose
+    /// `additionalProperties` is anything but `false`: a schema, or `true`
+    /// for a map of `serde_json::Value`), named by the path to it. A field
+    /// whose schema says nothing at all (`true`, or `{}`) could be any map,
+    /// so it is reported too, unless it is `Manifest.registries`, which the
+    /// loader refuses outright. A `$ref` is not followed: each definition is
+    /// walked on its own, under its own name. Walks only the keywords
+    /// schemars 0.8 derives (not `patternProperties`, `not`, `if`, or a
+    /// tuple `items`); a hand-written Deserialize is trusted to read what
+    /// its schema shows.
     fn maps_in(schema: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+        let unconstrained = schema == &serde_json::Value::Bool(true)
+            || schema.as_object().is_some_and(|o| {
+                ![
+                    "type",
+                    "$ref",
+                    "anyOf",
+                    "oneOf",
+                    "allOf",
+                    "enum",
+                    "const",
+                    "items",
+                    "properties",
+                    "additionalProperties",
+                ]
+                .iter()
+                .any(|k| o.contains_key(*k))
+            });
+        if unconstrained && path != "Manifest.registries" {
+            out.push(format!("{path} (unconstrained)"));
+        }
         let Some(obj) = schema.as_object() else {
             return;
         };
         if let Some(values) = obj.get("additionalProperties")
-            && values.is_object()
+            && values != &serde_json::Value::Bool(false)
         {
             out.push(path.to_owned());
             maps_in(values, &format!("{path}{{}}"), out);
