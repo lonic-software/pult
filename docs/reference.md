@@ -612,7 +612,7 @@ Field notes:
   modules', see `<requirement>`), each the `name` of an entry in
   `requirements`. `requirements` lists the winning definitions: `defined_in`
   is the include source (`null` = the root manifest), `check` the command
-  pult runs, `shadowed` the include sources whose definition lost. Listing
+  pult runs, `shadowed` the include sources whose definition the root's replaced. Listing
   runs no check; `pult doctor --json` reports readiness.
 - `steps` — the labels a live run emits as `step k/n <name>` events (as
   `status <name>` instead when the run inherited its `PULT_EVENTS` channel;

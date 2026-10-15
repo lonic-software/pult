@@ -216,7 +216,7 @@ fn print_text(resolved: &Resolved, probes: &[Probe]) {
         println!("  {mark}  {:width$}  {}{why}", p.cmd.id, p.cmd.title);
     }
     if checked == 0 {
-        println!("no command declares a `check:` or `requires:` — nothing to probe");
+        println!("no command declares a `check:` or `requires:`");
         return;
     }
     println!(
