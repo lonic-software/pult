@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgAction, ArgMatches};
 use indexmap::IndexMap;
 
@@ -116,6 +116,12 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
     }
 }
 
+/// A JSON object read keeping every key, so a repeat can be refused.
+#[derive(serde::Deserialize)]
+struct Object(
+    #[serde(deserialize_with = "crate::manifest::unique_keys")] IndexMap<String, serde_json::Value>,
+);
+
 /// Merge param values read from stdin (as a JSON object) into `provided`,
 /// which is already populated from the command line. Kept as a pure function
 /// so the parsing/merge rules are unit-testable without an actual stdin pipe.
@@ -124,8 +130,9 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 /// string for a pick or an input, a boolean for a flag, an array of strings
 /// for a repeat — and any other type is a usage error naming the param and
 /// the type it needs; every key must be a param this command declares (typo
-/// safety — the error names the valid ones); and a param supplied both on
-/// the command line and via JSON is a conflict, not a silent override.
+/// safety — the error names the valid ones); a key appears once; and a param
+/// supplied both on the command line and via JSON is a conflict, not a silent
+/// override.
 pub fn merge_params_json(
     raw: &str,
     declared: &IndexMap<String, ParamDef>,
@@ -133,10 +140,14 @@ pub fn merge_params_json(
 ) -> Result<()> {
     let value: serde_json::Value =
         serde_json::from_str(raw).context("--params-json: stdin is not valid JSON")?;
-    let obj = value
+    value
         .as_object()
         .context("--params-json: stdin must be a JSON object of param name -> value")?;
-    for (key, v) in obj {
+    // Read again keeping every key: a JSON object keeps the last of two
+    // equal keys without a word, which would make a param given twice a
+    // silent override rather than a conflict.
+    let Object(obj) = serde_json::from_str(raw).map_err(|e| anyhow!("--params-json: {e}"))?;
+    for (key, v) in &obj {
         let Some(def) = declared.get(key) else {
             let known: Vec<&str> = declared.keys().map(String::as_str).collect();
             bail!(
@@ -277,6 +288,19 @@ mod tests {
             format!("{err:#}").contains("not valid JSON"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn merge_params_json_key_given_twice_errors() {
+        let declared = declared_params(TOKEN_CMD);
+        let mut provided = HashMap::new();
+        let err = merge_params_json(r#"{"token":"a","token":"b"}"#, &declared, &mut provided)
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains(r#"duplicate key "token""#),
+            "got: {err:#}"
+        );
+        assert!(provided.is_empty());
     }
 
     #[test]

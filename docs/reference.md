@@ -37,6 +37,10 @@ a root manifest may have `includes` but not `vars`; a module may have `vars`
 but not `includes` (no transitive includes). `registries:` is reserved for a
 future phase and rejected with an explanatory error.
 
+No mapping in a manifest may repeat a key: a param, step, var, `with:` or
+`exports:` entry declared twice in the same mapping is an error, never a silent
+"last one wins". The same holds for a field repeated inside one entry.
+
 ### `<command>`
 
 ```yaml
@@ -683,8 +687,9 @@ strings for a repeat (invalid JSON or a non-object is an error; a value of
 the wrong type is a usage error, exit 2, naming the param and the type it
 needs);
 every key must be a param the invoked command declares (an unknown key names
-the valid ones, for typo safety); a param given both on the command line and via
-`--params-json` is a conflict, not a silent override. Params in neither
+the valid ones, for typo safety); a key may appear only once in the object; a
+param given both on the command line and via `--params-json` is a conflict, not
+a silent override. Params in neither
 source are still prompted for as usual — and since stdin is now claimed by
 `--params-json`, an interactive terminal on stdin is rejected up front rather
 than hanging (pipe or redirect it: `echo '{...}' | pult …`, or a file).
