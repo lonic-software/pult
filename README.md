@@ -229,6 +229,18 @@ re-prompt, while a new version, or an edited local tree, does. Ephemeral is the
 a place in the repo, pin it into the manifest so everyone who pulls gets exactly
 the same thing.
 
+## A program's own commands — `pult tool`
+
+A program that prints a Pult manifest on `self-schema --json` needs no manifest
+at all: **`pult tool forklift`** opens a guided menu of Forklift's own
+commands, and `pult tool forklift history --limit 5` runs one directly. Pult
+spawns the program with an argv, never a shell, so a value always arrives as the
+single argument you typed. The document may declare only what an argv can mean:
+no `check:`, no step lists and no dynamic option sources. There is no trust
+prompt, because you already chose to run the program, and nothing is journaled.
+stdout carries only the program's output. See the reference for the exact
+grammar.
+
 ## Trust model
 
 A discovered manifest is a list of things to *execute*, so `pult`

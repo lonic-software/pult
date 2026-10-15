@@ -31,10 +31,15 @@ jobs:
   # and Windows-behavioral tests) rather than the whole suite: that keeps
   # this job honest about what it verifies (shell resolution) instead of
   # silently widening into an implied "Windows is supported" claim the rest
-  # of the codebase hasn't earned yet.
+  # of the codebase hasn't earned yet. The one addition is `pult tool`'s argv
+  # tests, for the same reason: a behaviour only Windows can falsify.
   windows-shell-smoke:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - name: Shell-resolution tests
         run: "cargo test --locked shell::"
+      # `pult tool` spawns its program directly, so this is where argv
+      # quoting meets Windows' command-line rules (tests/tool.rs).
+      - name: Tool argv tests
+        run: cargo test --locked --test tool

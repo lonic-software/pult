@@ -1,0 +1,26 @@
+# forklift-self-schema.json
+
+Forklift's real `forklift self-schema --json` envelope, verbatim — the document
+`pult tool forklift` reads. The unit tests in `src/tool.rs` parse it as the
+contract between the two tools: every command loads, in Forklift's order, and
+composes to the argv Forklift's own CLI accepts.
+
+**Provenance.** Captured from lonic-software/lonic-forklift at commit
+`eb95db99856b587ac143258b61e60b12b1d8589a` (`forklift version` 0.3.0), debug
+build:
+
+```sh
+cargo build -p forklift
+target/debug/forklift self-schema --json > forklift-self-schema.json
+```
+
+**Refreshing.** The env-gated test in `tests/tool.rs` compares a live binary's
+`data` with this file's and runs `pult tool <forklift> version` end to end:
+
+```sh
+PULT_TEST_FORKLIFT=/path/to/forklift cargo test --test tool live
+```
+
+When it reports drift, recapture with the command above, update the commit here,
+and rerun `cargo test` — a changed command shape shows up in the unit tests'
+argv table.

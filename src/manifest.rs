@@ -557,7 +557,28 @@ fn load_inner(path: &Path) -> Result<Loaded> {
 pub fn parse(raw: &str, origin: &Path) -> Result<Manifest> {
     let probe: VersionProbe = serde_yaml::from_str(raw)
         .with_context(|| format!("failed to parse {}", origin.display()))?;
-    match probe.version {
+    check_version(probe.version, origin)?;
+    let manifest: Manifest = serde_yaml::from_str(raw)
+        .with_context(|| format!("failed to parse {}", origin.display()))?;
+    validate(manifest, origin)
+}
+
+/// [`parse`] for a manifest written as JSON — a tool's `self-schema`
+/// document. Read by a JSON parser, never by YAML's, which refuses valid
+/// JSON (a surrogate-pair escape). The same probe-first order: every struct
+/// denies unknown fields, so a probe after the deserialize would turn a
+/// newer document's "upgrade pult" into an unknown-field error.
+pub fn parse_json(raw: &str, origin: &Path) -> Result<Manifest> {
+    let probe: VersionProbe = serde_json::from_str(raw)
+        .with_context(|| format!("failed to parse {}", origin.display()))?;
+    check_version(probe.version, origin)?;
+    let manifest: Manifest = serde_json::from_str(raw)
+        .with_context(|| format!("failed to parse {}", origin.display()))?;
+    validate(manifest, origin)
+}
+
+fn check_version(version: Option<u32>, origin: &Path) -> Result<()> {
+    match version {
         None => bail!(
             "{} has no `version:` field — add `version: {SUPPORTED_VERSION}`",
             origin.display()
@@ -567,10 +588,12 @@ pub fn parse(raw: &str, origin: &Path) -> Result<Manifest> {
             origin.display()
         ),
         Some(v) if v < 1 => bail!("{} has invalid manifest version {v}", origin.display()),
-        Some(_) => {}
+        Some(_) => Ok(()),
     }
-    let mut manifest: Manifest = serde_yaml::from_str(raw)
-        .with_context(|| format!("failed to parse {}", origin.display()))?;
+}
+
+/// The post-parse both formats share, so validation cannot drift between them.
+fn validate(mut manifest: Manifest, origin: &Path) -> Result<Manifest> {
     validate_file(&manifest).with_context(|| format!("invalid manifest {}", origin.display()))?;
     default_flag_args(&mut manifest);
     Ok(manifest)

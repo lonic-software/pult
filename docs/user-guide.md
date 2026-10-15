@@ -120,6 +120,23 @@ script and runs nothing.) If you find yourself reaching for the same `pult x`
 often, `pult includes add <source>` promotes it into a manifest so it's pinned
 and shared with everyone who pulls the repo.
 
+## Run a tool's own commands — `pult tool`
+
+Some programs describe their own commands in Pult's format: they print a
+manifest on `self-schema --json`. Forklift does this. For those, `pult tool`
+gives you the guided menu and prompts without any manifest at all:
+
+```sh
+pult tool forklift                       # menu of everything forklift offers
+pult tool forklift history --limit 5     # one command, args as forklift declares them
+pult tool forklift stack --print         # show the command line, don't run it
+```
+
+Pult runs the program directly, not through a shell, so whatever you type is
+passed to it exactly as typed. There is no trust prompt, because the program is
+one you already chose to run. The program's output is the only thing on stdout;
+Pult's own lines go to stderr.
+
 ## The trust prompt
 
 A `pult.yaml` is a list of things to *execute*, so the first time you run

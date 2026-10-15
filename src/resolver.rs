@@ -17,7 +17,7 @@ use crate::manifest::{
 /// breaks any manifest already using it, so anything the engine might
 /// plausibly want is parked now (`self` is the umbrella for everything
 /// unforeseen). Everything NOT on this list is promised to manifests forever.
-const RESERVED_IDS: [&str; 15] = [
+const RESERVED_IDS: [&str; 16] = [
     "includes",
     "registry",
     "module",
@@ -31,6 +31,8 @@ const RESERVED_IDS: [&str; 15] = [
     // ephemeral execution (`pult x`), and reserved for the decentralized
     // registry surface it feeds into (`pult tap`, `pult registry`).
     "x",
+    // a program's own commands from its self-schema document (`pult tool`).
+    "tool",
     "tap",
     "registries",
     // the interactive-surface roadmap beyond `ui`: the local web surface
@@ -63,12 +65,28 @@ pub struct Resolved {
     /// with `pins`/`include_summary`; `None` when that module declared none.
     pub include_names: Vec<Option<String>>,
     pub commands: Vec<ResolvedCommand>,
-    /// Set only by `pult x`: this is a single ephemeral source, not a durable
-    /// manifest. Its one effect today is that the trust prompt shows the command
-    /// about to run — honest here because the trust unit *is* that invocation;
-    /// for a real manifest, trust covers every command, so showing one would
-    /// misrepresent the scope.
-    pub ephemeral: bool,
+    pub origin: Origin,
+}
+
+/// Where a `Resolved` came from, which decides how its runs are gated,
+/// journaled and announced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A discovered manifest: trust-gated over every command it declares,
+    /// and journaled.
+    Manifest,
+    /// One module source run by `pult x`: trust-gated, with the command
+    /// about to run shown in the prompt — honest here because the trust unit
+    /// *is* that invocation (for a manifest, trust covers every command, so
+    /// showing one would misrepresent the scope). Not journaled: there is no
+    /// durable repo identity to journal under.
+    Module,
+    /// A program's own `self-schema` document, run by `pult tool`. No trust
+    /// gate: the document's author is the program the user named, already
+    /// executed to obtain it, and every run is that program spawned with
+    /// arguments (see [`ResolvedRun::Argv`]). Not journaled (no manifest
+    /// identity). Pult's own lines go to stderr, so stdout is the tool's.
+    Tool,
 }
 
 #[derive(Debug)]
@@ -175,6 +193,18 @@ pub enum ResolvedRun {
     Script(String),
     /// Step list — compiled to one bash script (compile.rs).
     Steps(Vec<ResolvedEntry>),
+    /// A tool document's run: the arguments the tool is spawned with, no
+    /// shell anywhere. Only [`resolve_tool`] builds one.
+    Argv(Vec<ArgvWord>),
+}
+
+/// One word of an [`ResolvedRun::Argv`] run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgvWord {
+    /// Passed as itself.
+    Literal(String),
+    /// The named param's value, as zero or more arguments.
+    Param(String),
 }
 
 #[derive(Debug)]
@@ -304,8 +334,87 @@ pub fn resolve_with(loaded: Loaded, cache_root: Option<&std::path::Path>) -> Res
         pins,
         include_names,
         commands,
-        ephemeral: false,
+        origin: Origin::Manifest,
     })
+}
+
+/// Resolve a tool's own document (`pult tool`), already parsed and checked
+/// against the tool subset: each command is resolved as a manifest's is
+/// (binding rules and all), except that its id may be one pult reserves —
+/// under `pult tool BIN <id>` no pult subcommand competes for it — and its
+/// `run` becomes an argv. `bin` is the absolute program every run spawns.
+pub fn resolve_tool(
+    m: Manifest,
+    bin: &std::path::Path,
+    run_dir: &std::path::Path,
+) -> Result<Resolved> {
+    let ns = Namespaces {
+        params: IndexMap::new(),
+        steps: IndexMap::new(),
+    };
+    let mut seen_ids = HashSet::new();
+    let mut commands = Vec::new();
+    for cmd in m.commands {
+        if !seen_ids.insert(cmd.id.clone()) {
+            bail!("duplicate command id `{}`", cmd.id);
+        }
+        let mut resolved = resolve_command(cmd, None, None, &ns)?;
+        let ResolvedRun::Script(run) = &resolved.run else {
+            unreachable!("the tool subset admits only a one-line run");
+        };
+        resolved.run = ResolvedRun::Argv(
+            argv_words(run, &resolved.params)
+                .with_context(|| format!("command `{}`", resolved.id))?,
+        );
+        commands.push(resolved);
+    }
+    if commands.is_empty() {
+        bail!("no commands");
+    }
+    let name = m.name.unwrap_or_else(|| {
+        bin.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| bin.display().to_string())
+    });
+    Ok(Resolved {
+        name,
+        path: bin.to_path_buf(),
+        dir: run_dir.to_path_buf(),
+        run_dir: run_dir.to_path_buf(),
+        trust_hash: String::new(),
+        include_summary: Vec::new(),
+        pins: Vec::new(),
+        include_names: Vec::new(),
+        commands,
+        origin: Origin::Tool,
+    })
+}
+
+/// A tool run's grammar: words separated by single spaces, each a literal
+/// (`^[A-Za-z0-9][A-Za-z0-9_.-]*$`), the literal `--`, or a whole `{name}`
+/// naming one of the command's params. Nothing else — no quote, shell
+/// character, newline, embedded placeholder or empty word — so a document
+/// can name no program but its own and nothing in it means anything to a
+/// shell.
+fn argv_words(run: &str, params: &IndexMap<String, ParamDef>) -> Result<Vec<ArgvWord>> {
+    run.split(' ')
+        .map(|word| {
+            let literal = word == "--"
+                || word.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+                    && word
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+            if literal {
+                return Ok(ArgvWord::Literal(word.to_string()));
+            }
+            match word.strip_prefix('{').and_then(|w| w.strip_suffix('}')) {
+                Some(name) if params.contains_key(name) => Ok(ArgvWord::Param(name.to_string())),
+                _ => bail!(
+                    "run word {word:?} is outside a tool run's grammar — a word is a plain literal, `--`, or a whole `{{param}}`"
+                ),
+            }
+        })
+        .collect()
 }
 
 struct LoadedModule {

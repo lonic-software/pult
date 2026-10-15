@@ -46,7 +46,7 @@ No mapping in a manifest may repeat a key: a param, step, var, `with:` or
 ```yaml
 - id: shell               # unique after merging; reserved ids: `includes`, `registry`,
   title: Open a shell     #   `module`, `update`, `self`, `init`, `trust`, `cache`, `ui`,
-                          #   `events`, `x`, `tap`, `registries`, `serve`, `doctor`
+                          #   `events`, `x`, `tool`, `tap`, `registries`, `serve`, `doctor`
   params:                 # ordered map — prompted in this order
     <name>: <param>
   run: <run>
@@ -368,6 +368,44 @@ the prose only. Use it to *try* a command set; `pult includes add` to *keep*
 one. Intercepted before manifest discovery, so it
 works where no `pult.yaml` exists.
 
+### `pult tool` — a program's own commands
+
+`pult tool <BIN> [COMMAND] [args…]` runs a command that a program declares about
+itself: Pult runs `BIN self-schema --json` (stdin closed), reads the manifest in
+the `data` of the lonic JSON envelope it prints, and binds and runs `COMMAND` from
+it. With no `COMMAND` it opens the guided menu, or — non-interactively — lists
+the program's commands and exits `2`. No manifest is involved, so it works
+anywhere.
+
+- **`BIN`** is a path (absolute, or relative to the invocation directory) when it
+  contains a path separator, and otherwise a name looked up on `PATH` (with
+  `PATHEXT` on Windows). Commands run in the invocation directory.
+- **No trust prompt and no journal.** `BIN` is a program you already chose to
+  run — Pult adds no code of its own and no shell. Nothing is recorded.
+- **Only what a program can mean is accepted.** The document is the same manifest
+  format (version probe first: a newer `version` says to upgrade Pult), limited to
+  `version`, `name`, `description` and `commands`. A command may not declare
+  `check:` or a step list, and a param may not declare `use:` or `pick.from`. Each
+  duplicate key is refused, as in every manifest.
+- **`run:` is an argv, not a script.** It is words separated by single spaces,
+  where each word is a plain literal (`[A-Za-z0-9][A-Za-z0-9_.-]*`), `--`, or a
+  whole `{param}`. Pult spawns `BIN` directly with those words as arguments. A
+  param's value is always one argument, whatever characters it contains, and no
+  shell ever sees it. `${…}` interpolation does not apply.
+- **A dash-led value stays a value.** When a repeat param with an `arg:` of the
+  form `--name` gets an item that starts with `-`, it is passed as one word,
+  `--name=item`, so that the program can't read the item as a flag of its own.
+  Otherwise it is passed as two words, `--name item`. This applies to
+  `pult tool` only.
+- **Binding** is as for `pult <command>` (see "On the command line"; `pult tool BIN
+  COMMAND --help` lists the args). `--print` is the only Pult option there. It
+  prints the composed command line instead of running it, though `BIN` still runs
+  once to print its document.
+- **stdout is the program's.** Pult's header, `running:` banner and errors go
+  to stderr, so `pult tool forklift history --oneline | head` sees only Forklift's
+  output. A `--json` after `COMMAND` is a param of the program (if it declares
+  one), never Pult's.
+
 ## Trust model
 
 Trust-on-first-use over the **resolved whole**: the stored hash covers the
@@ -436,6 +474,8 @@ pult x [--var N=V] <SOURCE>   run a command from a module source, no manifest (n
                                 included; --var only before the command; --trust / --print as
                                 elsewhere, but trust records only on a run; a bare source
                                 takes the latest tag
+pult tool <BIN> [COMMAND]      run a program's own commands from its `self-schema` document
+     [args…] [--print]          (no manifest, no trust prompt, no journal; Pult's lines on stderr)
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
 pult includes verify          CI guard: pins still resolve, no tag moved (exit 1 on drift)
