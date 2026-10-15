@@ -14,18 +14,24 @@ use crate::machine::{self, ErrorCode};
 use crate::resolver::{Requirement, Resolved, ResolvedCommand};
 use crate::shell;
 
-/// Run one requirement's check in `run_dir` with no stdin and its output
-/// discarded; its exit code (0 = present).
-pub fn probe(req: &Requirement, run_dir: &Path) -> Result<i32> {
-    let status = shell::sh_script(&req.check)?
+/// Run a check script — a requirement's or a command's `check:` — in
+/// `run_dir` with no stdin and its output discarded; its exit code (0 =
+/// ready, and a signal counts as 1).
+pub fn run_check(script: &str, run_dir: &Path) -> Result<i32> {
+    let status = shell::sh_script(script)?
         .command
         .current_dir(run_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to run the check for requirement `{}`", req.name))?;
+        .status()?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Run one requirement's check; its exit code (0 = present).
+pub fn probe(req: &Requirement, run_dir: &Path) -> Result<i32> {
+    run_check(&req.check, run_dir)
+        .with_context(|| format!("failed to run the check for requirement `{}`", req.name))
 }
 
 /// What `command -v <name>` finds on the inherited `PATH`, or `None`.

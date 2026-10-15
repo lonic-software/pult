@@ -131,6 +131,8 @@ In a module, `requires:` covers more than the module's own commands: a
 consumer's command that uses one of the module's steps or params needs
 everything the module requires. The consumer can redefine a name in its own
 `requires:` to replace the module's check; the root's definition always wins.
+Two modules may share a name if they agree on its check; if they define it
+differently, pult refuses to load until the root defines it.
 
 ### Switches and lists: `flag` and `repeat`
 

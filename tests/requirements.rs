@@ -182,6 +182,11 @@ fn doctor_reports_every_definition_and_fails_on_a_missing_one() {
     assert_eq!(reqs[1]["resolved_path"], serde_json::Value::Null);
     assert_eq!(reqs[1]["install"], serde_json::Value::Null);
     assert_eq!(reqs.as_array().unwrap().len(), 2);
+    // The command's own row says it would not run, and why.
+    let cmd = &doc["data"]["commands"][0];
+    assert_eq!(cmd["ready"], false);
+    assert_eq!(cmd["exit_code"], serde_json::Value::Null);
+    assert_eq!(cmd["missing"], serde_json::json!(["gone"]));
 
     // Listing runs no check, and reports the same definitions.
     let out = env.pult(&["--list", "--json"]);
@@ -206,5 +211,35 @@ fn a_v1_file_using_requires_is_refused() {
         stderr(&out).contains("`requires:` needs `version: 2`"),
         "{}",
         stderr(&out)
+    );
+}
+
+/// A command whose own check passes but whose tool is missing is not ready;
+/// a missing tool no command needs is reported but does not fail doctor.
+#[test]
+fn doctor_readiness_is_whether_each_command_would_run() {
+    let env = Env::new(
+        "version: 2\nrequires:\n  aws: { check: \"exit 1\" }\n  later: { check: \"exit 1\" }\n\
+         commands:\n  - { id: deploy, title: D, check: \"true\", requires: [aws], run: \"true\" }\n",
+        &[],
+    );
+    let out = env.pult(&["--trust", "doctor", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["data"]["commands"][0]["exit_code"], 0);
+    assert_eq!(doc["data"]["commands"][0]["ready"], false);
+
+    let env = Env::new(
+        "version: 2\nrequires:\n  later: { check: \"exit 1\" }\n\
+         commands:\n  - { id: c, title: C, check: \"true\", run: \"true\" }\n",
+        &[],
+    );
+    let out = env.pult(&["--trust", "doctor", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["data"]["requirements"][0]["ready"], false);
+    assert_eq!(
+        doc["data"]["requirements"][0]["needed_by"],
+        serde_json::json!([])
     );
 }

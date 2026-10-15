@@ -70,7 +70,7 @@ future phase and rejected with an explanatory error.
 - `check:` — a shell command whose exit 0 means "ready to run". It may not
   reference `{param}`s (it runs before any param exists); `${var}`s are
   substituted as usual. Run via `pult doctor` (all checks, trust-gated, exit 1
-  if any fail) and surfaced to UIs via `--list --json`; never run implicitly
+  if any command is not ready) and surfaced to UIs via `--list --json`; never run implicitly
   before `run:` — put real preflight/setup in the playbook itself.
 - `interactive:` — declares that `run:` requires a controlling terminal at
   runtime (a REPL, a TUI, a shell into a container). The contract: a command
@@ -108,11 +108,13 @@ definition.
 - **Names** use letters, digits, `_`, `-` and `.`, and start with a letter or
   digit. They are global, not prefixed: a module included with `prefix: t`
   still says `node`, so two modules that both need node need one tool.
-- **One definition wins** per name: the root manifest's beats every
-  include's (this is how a consumer fixes a module's check without forking
-  it), and between includes the first in `includes:` order wins. Losers are
-  not merged and not warned about; `pult doctor` and `--list --json` show
-  them as `shadowed`.
+- **One definition per name.** The root manifest's beats every include's
+  (this is how a consumer fixes a module's check without forking it); the
+  replaced ones are not merged, and `pult doctor` and `--list --json` show
+  them as `shadowed`. Includes that define the same name with the same check
+  share it. Includes that define it with *different* checks fail to load —
+  neither module's commands should be gated on the other's check — until the
+  root manifest defines the name itself.
 - **Which commands need what:** a command needs the names in its own
   `requires:` list, plus the whole `requires:` map of every module that
   declared the command or lends it a step or a param through `use:`. The
@@ -625,7 +627,7 @@ Field notes:
 ## Machine-readable readiness — `pult doctor --json`
 
 Same trust gate and exit-code semantics as text-mode `pult doctor` (exit 1 if
-any declared check failed, with `ok` still `true`: the report itself
+any command is not ready, with `ok` still `true`: the report itself
 succeeded), but as a stable document for tooling instead of a printed table.
 Its `data`:
 
@@ -634,8 +636,9 @@ Its `data`:
   "name": "demo",
   "manifest": "/repo/pult.yaml",
   "commands": [
-    { "id": "import", "title": "Import data", "check": "command -v aws", "ready": true, "exit_code": 0 },
-    { "id": "shell", "title": "Open a shell", "check": null, "ready": null, "exit_code": null }
+    { "id": "import", "title": "Import data", "check": "command -v aws", "ready": true, "exit_code": 0, "missing": [] },
+    { "id": "deploy", "title": "Deploy", "check": null, "ready": false, "exit_code": null, "missing": ["node"] },
+    { "id": "shell", "title": "Open a shell", "check": null, "ready": null, "exit_code": null, "missing": [] }
   ],
   "requirements": [
     { "name": "node", "defined_in": "./tools", "check": "node --version",
@@ -645,8 +648,11 @@ Its `data`:
 }
 ```
 
-`ready` and `exit_code` are `null` when the command declares no `check:` —
-there's nothing to run, not a failure.
+A command is `ready` when its `check:` passes and none of its requirements
+is missing; `missing` names the ones whose check failed. `exit_code` is
+`null` when the command declares no `check:`, and `ready` is `null` when it
+declares neither a `check:` nor any requirement — there's nothing to run,
+not a failure.
 
 `requirements` has one entry per winning definition (see `<requirement>`),
 whether or not a command needs it. `resolved_path` is what `command -v
@@ -654,7 +660,8 @@ whether or not a command needs it. `resolved_path` is what `command -v
 returned, so a custom check can fail while the name resolves. `install` is
 always `null` in this release. `needed_by` lists the ids of the commands whose
 effective requirements include it. A failing requirement makes the exit
-status 1, as a failing command check does.
+status 1 through the commands that need it; one no command needs is
+reported, but does not fail `pult doctor`.
 
 ## Machine-readable runs — `pult runs list --json`, `pult runs tail --json`
 

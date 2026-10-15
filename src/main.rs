@@ -281,7 +281,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                pult x <SOURCE> [COMMAND]    run a command straight from a module source (no manifest)\n  \
                pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
                pult includes verify         check every pin still resolves and no tag moved\n  \
-               pult doctor [--json]         run every command's `check:` and report readiness\n  \
+               pult doctor [--json]         run every `check:` and requirement, report readiness\n  \
                pult runs list [--json]      this repo's run history (the run journal)\n  \
                pult runs tail <ID> [--follow]  one run's event stream (--json / --jsonl for tooling)\n  \
                pult self schema             print the manifest JSON Schema (editors/CI)\n  \
