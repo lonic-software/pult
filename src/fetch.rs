@@ -185,6 +185,10 @@ fn ensure_fetched_inner(git_src: &GitSource, cache_root: &Path) -> Result<(PathB
     Ok((entry.join("repo"), meta))
 }
 
+/// The readable part of a cache entry's name is a hint, not an identity
+/// (the digest is), so it's capped to keep cache paths short.
+const MAX_KEY_NAME: usize = 40;
+
 fn cache_key(git_src: &GitSource) -> String {
     // On Windows, entries fetched before [`git`] pinned LF line endings may
     // hold CRLF checkouts; a distinct key leaves them behind instead of
@@ -192,10 +196,13 @@ fn cache_key(git_src: &GitSource) -> String {
     let eol = if cfg!(windows) { "#lf" } else { "" };
     let digest = Sha256::digest(format!("{}@{}{eol}", git_src.url, git_src.rev).as_bytes());
     let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    // Split on `\` too: a local `git::C:\…\repo` source would otherwise
+    // name its entry after the whole path, eating into Windows' 260-char
+    // path budget before the checkout even starts.
     let name = git_src
         .url
-        .trim_end_matches('/')
-        .rsplit('/')
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or("module")
         .trim_end_matches(".git");
@@ -208,6 +215,7 @@ fn cache_key(git_src: &GitSource) -> String {
                 '-'
             }
         })
+        .take(MAX_KEY_NAME)
         .collect();
     format!("{name}-{hex}")
 }
@@ -227,7 +235,7 @@ fn fetch(git_src: &GitSource, cache_root: &Path, entry: &Path) -> Result<CacheMe
     let result = fetch_into(git_src, &tmp);
     match result {
         Ok(meta) => {
-            match std::fs::rename(&tmp, entry) {
+            match rename_with_retry(&tmp, entry) {
                 Ok(()) => {}
                 // Lost a race with a concurrent pult — the winner's entry is
                 // the same immutable content.
@@ -247,6 +255,25 @@ fn fetch(git_src: &GitSource, cache_root: &Path, entry: &Path) -> Result<CacheMe
             Err(e)
         }
     }
+}
+
+/// `fs::rename`, retried briefly on Windows: a freshly written checkout is
+/// often still held open by antivirus or the search indexer for a moment,
+/// which fails the rename with "access denied" though nothing is wrong.
+/// Elsewhere one attempt, so a real failure still surfaces at once.
+fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    let attempts = if cfg!(windows) { 6 } else { 1 };
+    let mut delay = std::time::Duration::from_millis(50);
+    for _ in 1..attempts {
+        match std::fs::rename(from, to) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && !to.exists() => {
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+            other => return other,
+        }
+    }
+    std::fs::rename(from, to)
 }
 
 fn fetch_into(git_src: &GitSource, tmp: &Path) -> Result<CacheMeta> {
@@ -479,6 +506,20 @@ mod tests {
     fn unrecognized_source_errors() {
         let err = parse_source("not-a-source").unwrap_err().to_string();
         assert!(err.contains("not recognized"), "got: {err}");
+    }
+
+    #[test]
+    fn cache_keys_name_a_windows_path_source_after_its_last_component() {
+        let src = |url: &str| GitSource {
+            url: url.to_string(),
+            ..parse_git("x", "github.com/o/r@v1", false, true).unwrap()
+        };
+        let key = cache_key(&src(r"C:\Users\Máté Kolonics\src\tools.git"));
+        assert!(key.starts_with("tools-"), "got: {key}");
+        let long = cache_key(&src(&format!("https://h/{}", "n".repeat(200))));
+        assert_eq!(long.len(), MAX_KEY_NAME + 1 + 16, "got: {long}");
+        // An ordinary URL keeps the key it always had.
+        assert!(cache_key(&src("https://github.com/o/aws-common")).starts_with("aws-common-"));
     }
 
     #[test]
