@@ -255,6 +255,7 @@ mod tests {
             interactive: false,
             category: None,
             description: None,
+            requires: Vec::new(),
         }
     }
 

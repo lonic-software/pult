@@ -16,6 +16,7 @@ mod manifest;
 mod mask;
 mod options;
 mod prompt;
+mod requirements;
 mod resolver;
 mod runner;
 mod runs;
@@ -569,6 +570,10 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
                 "check": cmd.check,
                 "interactive": cmd.interactive,
                 "steps": steps,
+                // Effective requirement names, each a key of `requirements`
+                // below — the command's own and its modules' (see
+                // `ResolvedCommand::requires`).
+                "requires": cmd.requires,
             })
         })
         .collect();
@@ -583,6 +588,18 @@ fn list_json(resolved: &Resolved, trusted: bool, scope: Scope) -> serde_json::Va
         "trust_hash": resolved.trust_hash,
         "includes": includes,
         "commands": commands,
+        // Definitions only: listing runs no manifest code, so no check runs
+        // here — `pult doctor` reports readiness.
+        "requirements": resolved
+            .requirements
+            .values()
+            .map(|req| json!({
+                "name": req.name,
+                "defined_in": req.defined_in,
+                "check": req.check,
+                "shadowed": req.shadowed,
+            }))
+            .collect::<Vec<_>>(),
     })
 }
 

@@ -46,6 +46,13 @@
       "description": "Reserved for Phase C — rejected with a clear message if present.",
       "default": null
     },
+    "requires": {
+      "description": "Tools the commands need on the machine, by name. Names are global: one `node` per machine, whichever file defines it.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/RequirementDef"
+      }
+    },
     "steps": {
       "description": "Named, reusable script fragments (referenced via `use:` in run lists).",
       "type": "object",
@@ -113,6 +120,14 @@
           "type": "object",
           "additionalProperties": {
             "$ref": "#/definitions/ParamDef"
+          }
+        },
+        "requires": {
+          "description": "Names of the tools this command needs, from `requires:` in this file (or, for a root command, any file it includes). Checked before the command's params are filled.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         },
         "run": {
@@ -397,6 +412,21 @@
           "description": "Every item is a credential, treated exactly as a secret input.",
           "default": false,
           "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RequirementDef": {
+      "description": "One required tool.",
+      "type": "object",
+      "properties": {
+        "check": {
+          "description": "Shell command whose exit 0 means the tool is present. Defaults to `command -v <name>`, which assumes the executable has the requirement's name.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

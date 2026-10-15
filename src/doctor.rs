@@ -3,11 +3,12 @@ use std::process::Stdio;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::resolver::{Resolved, ResolvedCommand};
+use crate::requirements;
+use crate::resolver::{Requirement, Resolved, ResolvedCommand};
 use crate::trust;
 
-/// `pult doctor` — run every command's `check:` and report readiness before
-/// anything is executed for real. Checks are manifest code, so the trust gate
+/// `pult doctor` — run every command's `check:` and every requirement's
+/// check, and report readiness before anything is executed for real. Checks are manifest code, so the trust gate
 /// applies exactly as it does for `run:`. Output is suppressed (a check
 /// signals by exit code); exit 1 if any declared check failed.
 pub fn run(resolved: &Resolved, grant: &trust::Grant, json: bool) -> Result<i32> {
@@ -63,23 +64,114 @@ fn probe_all(resolved: &Resolved) -> Result<Vec<Probe<'_>>> {
 
 /// The probe loop: compute every result once, then render as text or JSON.
 /// Exit code semantics are identical either way — 1 if any declared check
-/// failed, 0 otherwise.
+/// (a command's or a requirement's) failed, 0 otherwise.
 fn report(resolved: &Resolved, want_json: bool) -> Result<i32> {
     let probes = probe_all(resolved)?;
-    let failed = probes.iter().filter(|p| p.ready() == Some(false)).count();
+    let reqs = probe_requirements(resolved)?;
+    let failed = probes.iter().filter(|p| p.ready() == Some(false)).count()
+        + reqs.iter().filter(|p| !p.ready()).count();
 
     if want_json {
         // A failing check is a negative result, not a failure to produce
         // one: the document says `ok: true` and the exit status says 1.
-        let doc = crate::machine::success("doctor", to_json(resolved, &probes));
+        let mut data = to_json(resolved, &probes);
+        data["requirements"] = requirements_json(resolved, &reqs);
+        let doc = crate::machine::success("doctor", data);
         println!("{}", serde_json::to_string_pretty(&doc)?);
     } else {
-        print_text(resolved, &probes);
+        print_text(resolved, &probes, !reqs.is_empty());
+        print_requirements(&reqs);
     }
     Ok(if failed == 0 { 0 } else { 1 })
 }
 
-fn print_text(resolved: &Resolved, probes: &[Probe]) {
+/// One requirement's check result.
+struct ReqProbe<'a> {
+    req: &'a Requirement,
+    exit_code: i32,
+    resolved_path: Option<String>,
+}
+
+impl ReqProbe<'_> {
+    fn ready(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
+/// Check every winning requirement definition, whether or not a command
+/// needs it.
+fn probe_requirements(resolved: &Resolved) -> Result<Vec<ReqProbe<'_>>> {
+    resolved
+        .requirements
+        .values()
+        .map(|req| {
+            Ok(ReqProbe {
+                req,
+                exit_code: requirements::probe(req, &resolved.run_dir)?,
+                resolved_path: requirements::resolved_path(req, &resolved.run_dir)?,
+            })
+        })
+        .collect()
+}
+
+/// The ids of the commands whose effective requirements include `name`.
+fn needed_by<'a>(resolved: &'a Resolved, name: &str) -> Vec<&'a str> {
+    resolved
+        .commands
+        .iter()
+        .filter(|c| c.requires.iter().any(|r| r == name))
+        .map(|c| c.id.as_str())
+        .collect()
+}
+
+fn print_requirements(reqs: &[ReqProbe]) {
+    if reqs.is_empty() {
+        return;
+    }
+    let width = reqs.iter().map(|p| p.req.name.len()).max().unwrap_or(0);
+    println!("requirements");
+    for p in reqs {
+        let from = p
+            .req
+            .defined_in
+            .as_deref()
+            .map(|s| format!("  (from {s})"))
+            .unwrap_or_default();
+        if p.ready() {
+            println!("  ✓  {:width$}  {}{from}", p.req.name, p.req.check);
+        } else {
+            println!(
+                "  ✗  {:width$}  {}  (exited {}){from}",
+                p.req.name, p.req.check, p.exit_code
+            );
+        }
+        for loser in &p.req.shadowed {
+            println!("     {:width$}  shadows the definition in {loser}", "");
+        }
+    }
+    let failed = reqs.iter().filter(|p| !p.ready()).count();
+    println!("{}/{} requirements met", reqs.len() - failed, reqs.len());
+}
+
+fn requirements_json(resolved: &Resolved, reqs: &[ReqProbe]) -> serde_json::Value {
+    reqs.iter()
+        .map(|p| {
+            json!({
+                "name": p.req.name,
+                "defined_in": p.req.defined_in,
+                "check": p.req.check,
+                "ready": p.ready(),
+                "exit_code": p.exit_code,
+                "resolved_path": p.resolved_path,
+                "install": null,
+                "shadowed": p.req.shadowed,
+                "needed_by": needed_by(resolved, &p.req.name),
+            })
+        })
+        .collect()
+}
+
+fn print_text(resolved: &Resolved, probes: &[Probe], has_requirements: bool) {
     let width = resolved
         .commands
         .iter()
@@ -100,7 +192,11 @@ fn print_text(resolved: &Resolved, probes: &[Probe]) {
         }
     }
     if checked == 0 {
-        println!("no command declares a `check:` — nothing to probe");
+        if has_requirements {
+            println!("no command declares a `check:`");
+        } else {
+            println!("no command declares a `check:` — nothing to probe");
+        }
         return;
     }
     println!(
