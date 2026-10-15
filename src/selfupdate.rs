@@ -97,13 +97,32 @@ fn fetch_and_replace(base: &str, asset: &str, bin_name: &str, tmp: &Path) -> Res
     Ok(exe)
 }
 
+const OLD_PREFIX: &str = ".pult-update-old";
+
+/// Best-effort removal of old binaries earlier updates moved aside (the bare
+/// `.pult-update-old` of older pult releases included). One still running
+/// stays locked on Windows and is simply skipped.
+fn remove_stale_old_binaries(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(OLD_PREFIX) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Swap `new_bin` into `exe`'s place atomically-ish: stage a copy next to the
 /// destination (same filesystem, so renames are atomic), move the old binary
 /// aside, move the new one in, roll back on failure.
 fn replace_file(exe: &Path, new_bin: &Path) -> Result<()> {
     let dir = exe.parent().context("binary has no parent directory")?;
     let staged = dir.join(".pult-update-staged");
-    let old = dir.join(".pult-update-old");
+    // Per-process, so a previous update's old binary that is still running
+    // (Windows keeps it locked) can't block this one from moving aside.
+    let old = dir.join(format!("{OLD_PREFIX}{}", std::process::id()));
+    remove_stale_old_binaries(dir);
     std::fs::copy(new_bin, &staged)
         .with_context(|| format!("staging into {} (is it writable?)", dir.display()))?;
     #[cfg(unix)]
@@ -111,14 +130,13 @@ fn replace_file(exe: &Path, new_bin: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     }
-    let _ = std::fs::remove_file(&old);
     std::fs::rename(exe, &old).context("moving the current binary aside")?;
     if let Err(e) = std::fs::rename(&staged, exe) {
         let _ = std::fs::rename(&old, exe); // roll back
         return Err(e).context("installing the new binary");
     }
-    // On Windows the old (still-running) file can't be deleted; leaving
-    // .pult-update-old behind is harmless and cleaned up by the next update.
+    // On Windows the old (still-running) file can't be deleted; leaving it
+    // behind is harmless, and the next update sweeps it.
     let _ = std::fs::remove_file(&old);
     Ok(())
 }
@@ -265,9 +283,18 @@ mod tests {
         let newer = dir.path().join("incoming");
         std::fs::write(&exe, "old").unwrap();
         std::fs::write(&newer, "new").unwrap();
+        // Leftovers of earlier updates, the pre-PID name included.
+        std::fs::write(dir.path().join(".pult-update-old"), "older").unwrap();
+        std::fs::write(dir.path().join(".pult-update-old4242"), "older").unwrap();
         replace_file(&exe, &newer).unwrap();
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "new");
         assert!(!dir.path().join(".pult-update-staged").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(OLD_PREFIX))
+            .collect();
+        assert!(leftovers.is_empty(), "old binary left behind");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

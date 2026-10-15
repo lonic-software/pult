@@ -147,10 +147,53 @@ fn execute_inherited(command: &mut Command, what: &str, inherited: bool) -> Resu
 
 #[cfg(not(unix))]
 fn execute_inherited(command: &mut Command, what: &str, _inherited: bool) -> Result<i32> {
+    #[cfg(windows)]
+    let _survive = ctrl_c::SurviveWhileChildRuns::install();
     let status = command
         .status()
         .with_context(|| format!("failed to run `{what}`"))?;
     Ok(exit_code(status))
+}
+
+/// Ctrl+C on a Windows console is delivered to every process attached to it
+/// — pult *and* its child. Left alone, pult dies on the spot (exit
+/// `0xC000013A`) while the child may still be cleaning up and printing over
+/// the next prompt. With this handler pult ignores the event, waits for the
+/// child the event also reached, and reports its status (mapped to 130 by
+/// [`exit_code`]). Unlike `SetConsoleCtrlHandler(NULL, TRUE)`, a handler
+/// routine is not inherited, so the child still gets the Ctrl+C.
+#[cfg(windows)]
+mod ctrl_c {
+    type Handler = unsafe extern "system" fn(u32) -> i32;
+
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(handler: Option<Handler>, add: i32) -> i32;
+    }
+
+    const CTRL_C_EVENT: u32 = 0;
+    const CTRL_BREAK_EVENT: u32 = 1;
+
+    unsafe extern "system" fn ignore_interrupts(event: u32) -> i32 {
+        // TRUE = handled; close/logoff/shutdown fall through to the default.
+        (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT) as i32
+    }
+
+    pub(super) struct SurviveWhileChildRuns;
+
+    impl SurviveWhileChildRuns {
+        pub(super) fn install() -> Self {
+            // SAFETY: registering a plain function that touches no state.
+            unsafe { SetConsoleCtrlHandler(Some(ignore_interrupts), 1) };
+            SurviveWhileChildRuns
+        }
+    }
+
+    impl Drop for SurviveWhileChildRuns {
+        fn drop(&mut self) {
+            // SAFETY: removes exactly the handler `install` added.
+            unsafe { SetConsoleCtrlHandler(Some(ignore_interrupts), 0) };
+        }
+    }
 }
 
 /// Journaled (teed) execution — the `Journaling::Full` path. Returns
@@ -224,7 +267,14 @@ mod journaled {
             let masker = masker.clone();
             let done = Arc::clone(&out_done);
             std::thread::spawn(move || {
-                tee(stdout, std::io::stdout(), journal, &masker, "stdout", done)
+                tee(
+                    stdout,
+                    ConsoleSafe::new(std::io::stdout()),
+                    journal,
+                    &masker,
+                    "stdout",
+                    done,
+                )
             });
         } else {
             out_done.store(true, Ordering::Relaxed);
@@ -234,7 +284,14 @@ mod journaled {
             let masker = masker.clone();
             let done = Arc::clone(&err_done);
             std::thread::spawn(move || {
-                tee(stderr, std::io::stderr(), journal, &masker, "stderr", done)
+                tee(
+                    stderr,
+                    ConsoleSafe::new(std::io::stderr()),
+                    journal,
+                    &masker,
+                    "stderr",
+                    done,
+                )
             });
         } else {
             err_done.store(true, Ordering::Relaxed);
@@ -300,6 +357,44 @@ mod journaled {
     /// exists — `Masker::apply_bytes` returns the original bytes unchanged
     /// otherwise, so a line with no secret in it forwards byte-identical,
     /// invalid UTF-8 and bare `\r` included.
+    /// A forwarding target that survives non-UTF-8 output. Rust's stdio on
+    /// a Windows *console* refuses any write that isn't valid UTF-8 (a pipe
+    /// or file takes raw bytes), and `tee` drops forwarding errors — so a
+    /// child printing in a legacy code page would lose those lines from the
+    /// terminal entirely. On a Windows console such a line goes out lossily
+    /// (`�` for the bad bytes); everywhere else bytes pass through as is.
+    /// `tee` writes whole lines, so a character is never split across calls.
+    pub(super) struct ConsoleSafe<W> {
+        inner: W,
+        lossy: bool,
+    }
+
+    impl<W: Write + std::io::IsTerminal> ConsoleSafe<W> {
+        pub(super) fn new(inner: W) -> Self {
+            let lossy = cfg!(windows) && inner.is_terminal();
+            ConsoleSafe { inner, lossy }
+        }
+    }
+
+    impl<W: Write> Write for ConsoleSafe<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(buf)
+        }
+
+        fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+            if self.lossy && std::str::from_utf8(buf).is_err() {
+                self.inner
+                    .write_all(String::from_utf8_lossy(buf).as_bytes())
+            } else {
+                self.inner.write_all(buf)
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
     fn tee(
         reader: impl Read,
         mut out: impl Write,
@@ -330,6 +425,27 @@ mod journaled {
     mod tests {
         use super::*;
         use crate::journal::{StartInfo, repo_key};
+
+        #[test]
+        fn console_safe_replaces_invalid_utf8_only_when_lossy() {
+            let line = b"caf\xe9 ok\n";
+            let mut console = ConsoleSafe {
+                inner: Vec::new(),
+                lossy: true,
+            };
+            console.write_all(line).unwrap();
+            assert_eq!(console.inner, "caf\u{fffd} ok\n".as_bytes());
+            console.inner.clear();
+            console.write_all("café\n".as_bytes()).unwrap();
+            assert_eq!(console.inner, "café\n".as_bytes());
+
+            let mut pipe = ConsoleSafe {
+                inner: Vec::new(),
+                lossy: false,
+            };
+            pipe.write_all(line).unwrap();
+            assert_eq!(pipe.inner, line);
+        }
         use indexmap::IndexMap;
         use std::sync::Mutex;
         use std::time::Instant;
@@ -1023,12 +1139,32 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 
 #[cfg(not(unix))]
 fn exit_code(status: std::process::ExitStatus) -> i32 {
-    status.code().unwrap_or(1)
+    status.code().map(windows_exit_code).unwrap_or(1)
+}
+
+/// A child killed by Ctrl+C exits `STATUS_CONTROL_C_EXIT` (`0xC000013A`,
+/// -1073741510 as an `i32`); report it as 130, what a unix shell and pult's
+/// own unix path (`128 + SIGINT`) say for the same event.
+#[cfg_attr(unix, allow(dead_code))]
+fn windows_exit_code(code: i32) -> i32 {
+    const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+    if code as u32 == STATUS_CONTROL_C_EXIT {
+        130
+    } else {
+        code
+    }
 }
 
 #[cfg(test)]
 mod mask_event_tests {
     use super::*;
+
+    #[test]
+    fn a_ctrl_c_exit_on_windows_reports_130() {
+        assert_eq!(windows_exit_code(-1_073_741_510), 130);
+        assert_eq!(windows_exit_code(0), 0);
+        assert_eq!(windows_exit_code(3), 3);
+    }
 
     /// Drives `mask_event` directly, covering the logic itself (unlike the
     /// one call site inside `claim_events_channel`, which this can't reach —

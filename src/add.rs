@@ -256,11 +256,31 @@ fn render_entry(
     out
 }
 
+/// [`insert_include_lf`], keeping the file's own conventions: a leading
+/// UTF-8 BOM (Windows PowerShell's `-Encoding UTF8` writes one, and it would
+/// hide the `includes:` key from a line-start match) and CRLF line endings,
+/// so the diff is the new entry rather than every line.
+fn insert_include(
+    text: &str,
+    source: &str,
+    prefix: Option<&str>,
+    vars: &[(String, String)],
+) -> Result<String> {
+    let (bom, body) = match text.strip_prefix('\u{feff}') {
+        Some(body) => ("\u{feff}", body),
+        None => ("", text),
+    };
+    let crlf = body.contains("\r\n");
+    let out = insert_include_lf(&body.replace("\r\n", "\n"), source, prefix, vars)?;
+    let out = if crlf { out.replace('\n', "\r\n") } else { out };
+    Ok(format!("{bom}{out}"))
+}
+
 /// Append the entry into an existing manifest textually — comments and
 /// formatting survive. New entries go first in the `includes:` block (any
 /// duplicate-name collision errors at resolve either way); the indentation of
 /// the existing first item is copied so mixed-indent blocks can't happen.
-fn insert_include(
+fn insert_include_lf(
     text: &str,
     source: &str,
     prefix: Option<&str>,
@@ -323,6 +343,16 @@ mod tests {
         assert_eq!(
             strip_pin("git::ssh://git@corp/ops.git"),
             "git::ssh://git@corp/ops.git"
+        );
+    }
+
+    #[test]
+    fn keeps_crlf_endings_and_a_bom() {
+        let text = "\u{feff}version: 1\r\nincludes:\r\n  - source: ./a\r\ncommands: []\r\n";
+        let out = insert_include(text, "./b", None, &[]).unwrap();
+        assert_eq!(
+            out,
+            "\u{feff}version: 1\r\nincludes:\r\n  - source: ./b\r\n  - source: ./a\r\ncommands: []\r\n"
         );
     }
 
