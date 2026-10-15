@@ -690,6 +690,8 @@ mod tests {
             prompt::question("only", None, Some("item 1")),
             "only? (item 1)"
         );
+        // An empty description is none, for a module var as for a param.
+        assert_eq!(prompt::question("v", Some(""), None), "v?");
     }
 
     /// Text values, as the argv binding builds them for pick and input params.
