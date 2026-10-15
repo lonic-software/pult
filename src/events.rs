@@ -7,6 +7,9 @@
 //! step <k>/<n> <name>          # entering step k of n
 //! ```
 //!
+//! A percentage over 100 saturates at any magnitude, and one `+` may lead it
+//! (`parse_progress`; the rule is stated in docs/reference.md).
+//!
 //! Unknown verbs and malformed lines are silently ignored — never an error.
 //! This is load-bearing for forward compatibility: a script or surface built
 //! against a later vocabulary must never break an older pult, and vice versa.
@@ -476,6 +479,9 @@ mod tests {
             ("progress 99999999999999999999999999", 100),
             ("progress +50", 50),
             ("progress 007", 7),
+            // Padding is not magnitude: a length shortcut would read 100 here.
+            ("progress 0000000000050", 50),
+            ("progress 0000000000101", 100),
         ] {
             assert_eq!(pct(line), Some(want), "{line}");
         }
@@ -487,6 +493,10 @@ mod tests {
             "progress +",
             "progress ++5",
             "progress +-5",
+            // Non-ASCII digits: once a parse fails it reads as overflow, so a
+            // looser digit check would turn these into a full bar.
+            "progress \u{663}",
+            "progress \u{ff15}",
         ] {
             assert_eq!(parse(line), None, "{line}");
         }
