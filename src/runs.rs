@@ -201,9 +201,7 @@ fn tail(resolved: &Resolved, run_id: &str, follow: bool, jsonl: bool) -> Result<
     let mut file = std::fs::File::open(&events_path)
         .with_context(|| format!("failed to open {}", events_path.display()))?;
     let mut offset: u64 = 0;
-    // Once a line is out, stdout is a JSONL stream: a later failure must not
-    // append an error document to it.
-    let mut stdout = crate::machine::StreamStdout::new();
+    let mut stdout = std::io::stdout();
 
     follow_events(&mut file, &mut offset, follow, jsonl, &mut stdout, || {
         journal::read_meta(&run_dir)

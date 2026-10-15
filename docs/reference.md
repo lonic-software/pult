@@ -650,9 +650,8 @@ Lonic tool:
   a `schema`; new ones may be added, so treat an unknown code as `generic`.
 - JSON mode is a bare `--json` argument before any `--`. Help and version
   output stay plain text.
-- `runs tail --jsonl` writes an error document only when it fails before
-  streaming its first event line; a failure after that ends the stream with the
-  prose line on stderr.
+- `runs tail --jsonl` is a stream, not JSON mode: it never writes an error
+  document, and a failure is the prose line on stderr.
 
 | Code | Exit | Meaning |
 |---|---|---|
