@@ -378,8 +378,10 @@ the program's commands and exits `2`. No manifest is involved, so it works
 anywhere.
 
 - **`BIN`** is a path (absolute, or relative to the invocation directory) when it
-  contains a path separator, and otherwise a name looked up on `PATH` (with
-  `PATHEXT` on Windows). Commands run in the invocation directory.
+  contains a path separator. Otherwise it is a name looked up on `PATH`, where
+  relative entries are skipped. On Windows `PATHEXT` is honoured, and only a file
+  with one of its extensions counts as a program. Symlinks are not resolved.
+  Commands run in the invocation directory.
 - **No trust prompt and no journal.** `BIN` is a program you already chose to
   run — Pult adds no code of its own and no shell. Nothing is recorded.
 - **Only what a program can mean is accepted.** The document is the same manifest
@@ -389,12 +391,20 @@ anywhere.
   duplicate key is refused, as in every manifest.
 - **`run:` is an argv, not a script.** It is words separated by single spaces,
   where each word is a plain literal (`[A-Za-z0-9][A-Za-z0-9_.-]*`), `--`, or a
-  whole `{param}`. Pult spawns `BIN` directly with those words as arguments. A
-  param's value is always one argument, whatever characters it contains, and no
-  shell ever sees it. `${…}` interpolation does not apply.
-- **A dash-led value stays a value.** When a repeat param with an `arg:` of the
-  form `--name` gets an item that starts with `-`, it is passed as one word,
-  `--name=item`, so that the program can't read the item as a flag of its own.
+  whole `{param}`. Pult spawns `BIN` directly with those words as arguments, and
+  `${…}` interpolation does not apply. A placeholder becomes whole arguments,
+  never part of one, and no characters in a value are interpreted. A text value
+  becomes one argument. A set flag becomes its `arg`, and an unset one becomes
+  nothing. Each repeat item becomes `arg item`, or just `item` when there is no
+  `arg`. Where a value goes relative to `--` is the document's choice, so a
+  document that puts a free-text param before `--` lets a typed `--x` reach the
+  program as an option. A `.bat` or `.cmd` BIN on Windows is the one place a
+  shell is involved: Rust runs it through `cmd.exe` and refuses any argument it
+  cannot escape safely.
+- **A dash-led option value stays a value.** When a repeat param with an `arg:`
+  of the form `--name` gets an item that starts with `-`, it is passed as one
+  word, `--name=item`, so that the program can't read the item as a flag of its
+  own.
   Otherwise it is passed as two words, `--name item`. This applies to
   `pult tool` only.
 - **Binding** is as for `pult <command>` (see "On the command line"; `pult tool BIN
@@ -403,8 +413,9 @@ anywhere.
   once to print its document.
 - **stdout is the program's.** Pult's header, `running:` banner and errors go
   to stderr, so `pult tool forklift history --oneline | head` sees only Forklift's
-  output. A `--json` after `COMMAND` is a param of the program (if it declares
-  one), never Pult's.
+  output. A `--json` before `--` keeps its usual meaning: Pult's own machine
+  mode, never passed to the program. `json` is a reserved param name, so a
+  document cannot declare it.
 
 ## Trust model
 

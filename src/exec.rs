@@ -209,10 +209,10 @@ pub fn execute(
         // The same two-pass display as a script's: by name, then by value.
         ResolvedRun::Argv(words) => runner::run_argv(
             &resolved.path,
-            &argv(cmd, words, &values),
+            &argv(cmd, words, &values, &values),
             &masker.apply(&display_argv(
                 &resolved.path,
-                &argv(cmd, words, &redact(cmd, &values)),
+                &argv(cmd, words, &values, &redact(cmd, &values)),
             )),
             &resolved.run_dir,
             journaling,
@@ -581,7 +581,10 @@ fn compose(resolved: &Resolved, cmd: &ResolvedCommand, values: &Values) -> Resul
             interp::interpolate(template, &value::words(&cmd.params, values))
         }
         ResolvedRun::Steps(_) => compile::compile(cmd, values, Guards::None),
-        ResolvedRun::Argv(words) => Ok(display_argv(&resolved.path, &argv(cmd, words, values))),
+        ResolvedRun::Argv(words) => Ok(display_argv(
+            &resolved.path,
+            &argv(cmd, words, values, values),
+        )),
     }
 }
 
@@ -596,7 +599,17 @@ fn compose(resolved: &Resolved, cmd: &ResolvedCommand, values: &Values) -> Resul
 /// rather than refusing it as an unknown flag. `value::render` keeps the
 /// two-word form, since a hand-written manifest calls tools whose option
 /// syntax pult cannot know.
-pub(crate) fn argv(cmd: &ResolvedCommand, words: &[ArgvWord], values: &Values) -> Vec<String> {
+///
+/// `shown` supplies the words actually emitted: `values` itself for the run,
+/// or its redaction for the banner. The shape, including that join, always
+/// follows `values`, so the banner shows the argv that ran even when a
+/// secret is masked.
+pub(crate) fn argv(
+    cmd: &ResolvedCommand,
+    words: &[ArgvWord],
+    values: &Values,
+    shown: &Values,
+) -> Vec<String> {
     let mut out = Vec::new();
     for word in words {
         let name = match word {
@@ -607,10 +620,10 @@ pub(crate) fn argv(cmd: &ResolvedCommand, words: &[ArgvWord], values: &Values) -
             ArgvWord::Param(name) => name,
         };
         let def = &cmd.params[name.as_str()];
-        match &values[name.as_str()] {
-            Value::Text(s) => out.push(s.clone()),
-            Value::Flag(false) => {}
-            Value::Flag(true) => {
+        match (&values[name.as_str()], &shown[name.as_str()]) {
+            (Value::Text(_), Value::Text(s)) => out.push(s.clone()),
+            (Value::Flag(false), _) => {}
+            (Value::Flag(true), _) => {
                 let ParamKind::Flag(flag) = def.kind() else {
                     unreachable!("a flag value belongs to a flag param");
                 };
@@ -620,21 +633,22 @@ pub(crate) fn argv(cmd: &ResolvedCommand, words: &[ArgvWord], values: &Values) -
                         .expect("a resolved flag always has an `arg`"),
                 );
             }
-            Value::List(items) => {
+            (Value::List(items), Value::List(shown)) => {
                 let arg = match def.kind() {
                     ParamKind::Repeat(repeat) => repeat.arg.as_deref(),
                     _ => unreachable!("a list value belongs to a repeat param"),
                 };
-                for item in items {
+                for (item, word) in items.iter().zip(shown) {
                     match arg {
                         Some(arg) if arg.starts_with("--") && item.starts_with('-') => {
-                            out.push(format!("{arg}={item}"))
+                            out.push(format!("{arg}={word}"))
                         }
-                        Some(arg) => out.extend([arg.to_string(), item.clone()]),
-                        None => out.push(item.clone()),
+                        Some(arg) => out.extend([arg.to_string(), word.clone()]),
+                        None => out.push(word.clone()),
                     }
                 }
             }
+            _ => unreachable!("a redaction keeps each value's kind"),
         }
     }
     out

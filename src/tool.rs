@@ -198,14 +198,29 @@ fn resolve_bin(bin: &str, cwd: &Path, path_var: Option<&OsStr>) -> Result<PathBu
 fn candidate_names(bin: &str) -> Vec<String> {
     let mut names = vec![bin.to_string()];
     if cfg!(windows) {
-        let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-        names.extend(
-            exts.split(';')
-                .filter(|e| !e.is_empty())
-                .map(|e| format!("{bin}{e}")),
-        );
+        names.extend(pathext().iter().map(|e| format!("{bin}{e}")));
     }
     names
+}
+
+fn pathext() -> Vec<String> {
+    std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Windows runs a file only by its extension, so an extensionless file
+/// (a POSIX shell script beside `name.exe`, say) is not a program there.
+fn has_pathext(path: &Path, pathext: &[String]) -> bool {
+    path.extension().is_some_and(|ext| {
+        pathext.iter().any(|e| {
+            e.strip_prefix('.')
+                .is_some_and(|e| ext.eq_ignore_ascii_case(e))
+        })
+    })
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -214,6 +229,9 @@ fn is_executable(path: &Path) -> bool {
     };
     if !meta.is_file() {
         return false;
+    }
+    if cfg!(windows) {
+        return has_pathext(path, &pathext());
     }
     #[cfg(unix)]
     {
@@ -422,7 +440,46 @@ mod tests {
         let ResolvedRun::Argv(words) = &cmd.run else {
             panic!("{id}: not an argv run");
         };
-        exec::argv(cmd, words, &values)
+        exec::argv(cmd, words, &values, &values)
+    }
+
+    #[test]
+    fn the_banner_shows_the_shape_that_ran_with_a_secret_masked() {
+        let stdout = doc(
+            r#"{"id":"c","title":"T","run":"c {token}","params":{"token":{"repeat":{"arg":"--token","secret":true}}}}"#,
+        );
+        let resolved = from_envelope(&stdout, Path::new("/opt/t")).unwrap();
+        let cmd = &resolved.commands[0];
+        let ResolvedRun::Argv(words) = &cmd.run else {
+            panic!("not an argv run");
+        };
+        let list = |item: &str| {
+            [(
+                "token".to_string(),
+                crate::value::Value::List(vec![item.to_string()]),
+            )]
+            .into_iter()
+            .collect()
+        };
+        let (values, shown) = (list("-s3cr3t"), list("••••••"));
+        assert_eq!(
+            exec::argv(cmd, words, &values, &values),
+            ["c", "--token=-s3cr3t"]
+        );
+        assert_eq!(
+            exec::argv(cmd, words, &values, &shown),
+            ["c", "--token=••••••"]
+        );
+    }
+
+    #[test]
+    fn windows_runs_only_a_file_with_a_pathext_extension() {
+        let pathext = [".COM".to_string(), ".EXE".to_string()];
+        assert!(has_pathext(Path::new(r"C:inorklift.exe"), &pathext));
+        assert!(has_pathext(Path::new(r"C:inorklift.EXE"), &pathext));
+        assert!(!has_pathext(Path::new(r"C:inorklift"), &pathext));
+        assert!(!has_pathext(Path::new(r"C:inorklift.sh"), &pathext));
+        assert!(!has_pathext(Path::new(r"C:inorklift.exe"), &[]));
     }
 
     fn envelope(data: &str) -> String {
