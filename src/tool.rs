@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn every_forklift_command_parses_into_the_tool_subset() {
         let resolved = forklift();
-        assert_eq!(resolved.commands.len(), 101);
+        assert_eq!(resolved.commands.len(), 100);
         assert_eq!(resolved.name, "forklift");
         assert!(
             resolved
@@ -598,6 +598,18 @@ mod tests {
                 "self-alias-install",
                 &["fl2"],
                 &["self", "alias", "install", "--", "fl2"],
+            ),
+            // Recorded text is an option, and a destructive command acts only when confirmed.
+            ("stack", &["--message", "x"], &["stack", "--message", "x"]),
+            (
+                "scope-prune",
+                &["--confirm", "docs"],
+                &["scope", "prune", "--confirm", "--", "docs"],
+            ),
+            (
+                "restore",
+                &["--confirm", "a"],
+                &["restore", "--confirm", "--", "a"],
             ),
             ("version", &[], &["version"]),
         ];

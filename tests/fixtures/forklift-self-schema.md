@@ -7,8 +7,8 @@ composes to the argv Forklift's own CLI accepts, and every param carries its
 help as its description (one is pinned, so a change to that help shows up there).
 
 **Provenance.** Captured from lonic-software/forklift at commit
-`0b8d8742d2dd183eab4770a4e9497140fb965ec7` (`forklift version` 0.3.1, the
-command-surface redesign through its `self` family), debug build:
+`2cd0504469dc9ac039e347f82ffa3ec9693b0369` (`forklift version` 0.3.1, the
+completed command-surface redesign), debug build:
 
 ```sh
 cargo build -p forklift
