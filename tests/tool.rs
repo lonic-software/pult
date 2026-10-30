@@ -1,5 +1,5 @@
 //! `pult tool` end to end, against examples/argv_echo.rs: a program whose
-//! self-schema document declares one command and which prints the argv it
+//! `self schema` document declares one command and which prints the argv it
 //! received. Runs on windows-latest too (see .github/workflows/ci.yml), which
 //! is the point — argv must reach the program byte for byte with no shell in
 //! between, under Windows' command-line quoting as much as anywhere.
@@ -129,7 +129,7 @@ fn tool_live_forklift_matches_the_fixture() {
     };
     let forklift = PathBuf::from(forklift);
     let live = Command::new(&forklift)
-        .args(["self-schema", "--json"])
+        .args(["self", "schema", "--json"])
         .output()
         .unwrap();
     assert!(live.status.success(), "{live:?}");

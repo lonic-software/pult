@@ -1,11 +1,11 @@
 //! A stand-in program for `pult tool`'s tests (tests/tool.rs): it describes
-//! one command in a self-schema document, and otherwise prints the arguments
+//! one command in a `self schema` document, and otherwise prints the arguments
 //! it received as a JSON array — exactly what the OS handed it, so a test can
 //! compare argv byte for byte on every platform, Windows' quoting included.
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args == ["self-schema", "--json"] {
+    if args == ["self", "schema", "--json"] {
         print!("{DOCUMENT}");
         return;
     }
@@ -15,7 +15,7 @@ fn main() {
     );
 }
 
-const DOCUMENT: &str = r#"{"lonic_json":1,"tool":"argv-echo","schema":1,"command":"self-schema","ok":true,"data":{
+const DOCUMENT: &str = r#"{"lonic_json":1,"tool":"argv-echo","schema":1,"command":"self","ok":true,"data":{
   "version": 1,
   "name": "argv-echo",
   "commands": [

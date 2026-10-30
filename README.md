@@ -231,7 +231,7 @@ the same thing.
 
 ## A program's own commands — `pult tool`
 
-A program that prints a Pult manifest on `self-schema --json` needs no manifest
+A program that prints a Pult manifest on `self schema --json` needs no manifest
 at all: **`pult tool forklift`** opens a guided menu of Forklift's own
 commands, and `pult tool forklift history --limit 5` runs one directly. Pult
 spawns the program with an argv, not through a shell, so nothing in a value is

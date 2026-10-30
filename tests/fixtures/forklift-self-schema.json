@@ -1,63 +1,14 @@
 {
   "lonic_json": 1,
   "tool": "forklift",
-  "schema": 3,
-  "command": "self-schema",
+  "schema": 13,
+  "command": "self",
   "ok": true,
   "data": {
     "version": 1,
     "name": "forklift",
     "description": "Forklift — a version control system designed for serverless hosting.",
     "commands": [
-      {
-        "id": "alias",
-        "title": "Manage the `fl` short alias for this binary",
-        "category": "alias",
-        "description": "Manage the `fl` short alias: a shell-agnostic symlink (a shim on Windows) placed next to this binary, not a per-shell alias — it works in scripts, non-interactive shells and every shell dialect alike, and is trivially discoverable and removable. This is the one implementation every install method (the curl script, pult, `cargo install`) calls, so the alias never drifts between install paths. Without a subcommand, reports whether the alias is installed and where.",
-        "params": {},
-        "run": "alias",
-        "interactive": false
-      },
-      {
-        "id": "alias-install",
-        "title": "Create the alias next to this binary (default name: \"fl\")",
-        "category": "alias",
-        "description": "Create the alias next to this binary: on Unix, a symlink; on Windows (where a symlink needs elevated privilege), a `.cmd` shim that forwards to this binary. Resolves this binary's own path (`current_exe`), so it always points at whichever `forklift` is actually running the command. Idempotent: an alias that already points here succeeds without change. Refuses — without a --force, there isn't one — if the name is already taken by something else (a real file, or a symlink to a different target): removing an unrelated file automatically would be a surprise no flag should paper over.",
-        "params": {
-          "name": {
-            "repeat": {
-              "max": 1
-            },
-            "description": "The alias name (default: \"fl\")"
-          }
-        },
-        "run": "alias install -- {name}",
-        "interactive": false
-      },
-      {
-        "id": "alias-uninstall",
-        "title": "Remove the alias next to this binary (default name: \"fl\")",
-        "category": "alias",
-        "description": "Remove the alias next to this binary. A no-op (success) if it is not installed. Refuses if the name exists but was not created by this command (a real file, e.g.). A symlink (Unix) or a recognized shim (Windows) is removed even if it points at a different forklift binary — deleting a symlink can never lose data, unlike a real file.",
-        "params": {
-          "name": {
-            "repeat": {
-              "max": 1
-            },
-            "description": "The alias name (default: \"fl\")"
-          }
-        },
-        "run": "alias uninstall -- {name}",
-        "interactive": false
-      },
-      {
-        "id": "alias-status",
-        "title": "Report whether the alias is installed and where it points (the default)",
-        "category": "alias",
-        "params": {},
-        "run": "alias status",
-        "interactive": false
-      },
       {
         "id": "audit",
         "title": "Verify the warehouse's signed history offline",
@@ -92,7 +43,7 @@
         "id": "bay-add",
         "title": "Open a new bay (a new working directory on a new pallet)",
         "category": "bay",
-        "description": "Open a bay: a new working directory bound to this warehouse, checked out to a new pallet named after the bay (branched from the current head). The bay shares this warehouse's objects, refs and trust; it has its own working tree, inventory and current pallet. cd into it to work there.",
+        "description": "Open a bay: a new working directory bound to this warehouse, checked out to a new pallet named after the bay (branched from the current head). The bay shares this warehouse's objects, refs and trust; it has its own working tree, inventory and current pallet. cd into it to work there. A scoped bay (--scope) is how an orchestrator hands a sub-agent a task-scoped sandbox.",
         "params": {
           "scope": {
             "repeat": {
@@ -149,72 +100,141 @@
         "interactive": false
       },
       {
-        "id": "cherry-pick",
-        "title": "Apply a parcel's changes onto the current pallet as a new, author-preserving parcel",
-        "description": "Apply a parcel's diff (its change against its first parent) onto the current pallet as a new, author-preserving, freshly-signed parcel. Unlike rebase, cherry-pick only *adds* — no rewrite, no force-push: the picked parcel's authors are preserved and this operator is recorded as the stacker. A clean pick is stacked immediately; a conflicting one leaves markers to resolve, \"load\" and \"stack\" (which completes the pick single-parent).",
+        "id": "clone",
+        "title": "Clone a remote warehouse into a new directory",
+        "description": "Clone a remote warehouse: prepare a fresh warehouse in the target directory, remember the remote, adopt its trust anchor, download the history (using the remote's bundle when it has one) and materialize the chosen pallet in the working directory. With --only, clone sparsely: fetch the full signed history but only the named subtree(s) of content, leaving the rest sealed by hash. With --cache, mark the warehouse as a cache, which may lack content its history reaches.",
         "params": {
-          "message": {
+          "pallet": {
             "repeat": {
-              "arg": "--message",
+              "arg": "--pallet",
               "max": 1
             },
-            "description": "The new parcel's message (default: the source parcel's message)"
+            "description": "The pallet to check out (default: the remote's default pallet)"
           },
-          "revision": {
+          "token": {
+            "repeat": {
+              "arg": "--token",
+              "max": 1,
+              "secret": true
+            },
+            "description": "The bearer token, when the remote requires one (remembered as \"remote.token\")"
+          },
+          "only": {
+            "repeat": {
+              "arg": "--only"
+            },
+            "description": "Clone sparsely: fetch only the named subtree path(s) of content. Repeatable"
+          },
+          "cache": {
+            "flag": {
+              "arg": "--cache"
+            },
+            "description": "Clone as a cache: a warehouse that may lack content its history reaches"
+          },
+          "expect": {
+            "repeat": {
+              "arg": "--expect",
+              "max": 1
+            },
+            "description": "Refuse unless the remote's trust anchor is this genesis (an out-of-band pin)"
+          },
+          "url": {
             "input": {},
-            "description": "The parcel to cherry-pick: a pallet name, or a parcel hash / unique prefix"
-          }
-        },
-        "run": "cherry-pick {message} -- {revision}",
-        "interactive": false
-      },
-      {
-        "id": "compact",
-        "title": "Compact the object store: pack loose objects into a few dense pack files",
-        "description": "Compact the object store: sweep the loose objects (each its own zstd-compressed file) into a few dense pack files — an append-only data file plus a sorted index. At scale that turns hundreds of thousands of tiny files into a handful of large ones, so a history walk stops paying an open-per-object and the store stops paying per-file slack. Objects are only moved, never re-hashed; a loose file is deleted only after the pack that holds it is durably written, so compacting can never lose an object. Packs roll over at a size/count threshold, so no single pack grows unbounded. Run it after a large \"import-git\" or periodically as maintenance. With --all, also rewrite the existing packs: drop unreachable (garbage) objects that were stuck in packs and consolidate many packs into few — a heavier full repack, worth running occasionally. Add --redelta to a full repack to also re-delta-compress every object instead of copying already-packed records verbatim — denser, but a one-shot CPU-bound pass.",
-        "params": {
-          "all": {
-            "flag": {
-              "arg": "--all"
-            },
-            "description": "Repack existing packs too: drop unreachable objects and consolidate (a full repack)"
+            "description": "The URL of the remote warehouse (e.g. http://forklift.example.com:9418)"
           },
-          "redelta": {
-            "flag": {
-              "arg": "--redelta"
-            },
-            "description": "Re-encode every object to delta-compress across the whole store (only with --all)"
+          "directory": {
+            "input": {},
+            "description": "The directory to create the warehouse in (must be new or empty)"
           }
         },
-        "run": "compact {all} {redelta}",
+        "run": "clone {pallet} {token} {only} {cache} {expect} -- {url} {directory}",
         "interactive": false
       },
       {
         "id": "config",
         "title": "Read or change configuration values",
-        "description": "Read or change configuration values (e.g. \"operator.name\"). Without a key, every known key is listed; with a key, its value is printed; with a key and a value, the value is set; with --unset, the key is removed (e.g. clearing a \"remote.token\"). Values are stored in the current warehouse by default; when reading, the warehouse value wins over the global one.",
+        "category": "config",
+        "description": "Read or change configuration values (e.g. \"remote.url\"): list every known key, get one, set one or unset one. Values are stored in the current warehouse by default, and each subcommand's --global targets the per-user configuration that applies to all warehouses; when reading, the warehouse value wins over the global one. Without a subcommand, every known key is listed with its effective value.",
+        "params": {},
+        "run": "config",
+        "interactive": false
+      },
+      {
+        "id": "config-list",
+        "title": "List every known key and its value (the default)",
+        "category": "config",
         "params": {
           "global": {
             "flag": {
               "arg": "--global"
             },
-            "description": "Operate on the per-user configuration that applies to all warehouses"
-          },
-          "unset": {
-            "flag": {
-              "arg": "--unset"
-            },
-            "description": "Remove the key from the configuration (e.g. \"config --unset remote.token\")"
-          },
-          "key-value": {
-            "repeat": {
-              "max": 2,
-              "secret": true
-            },
-            "description": "key: The configuration key (e.g. \"operator.name\"); omit it to list every key | value: The value to set the key to; omit it to print the current value"
+            "description": "List the per-user configuration that applies to all warehouses"
           }
         },
-        "run": "config {global} {unset} -- {key-value}",
+        "run": "config list {global}",
+        "interactive": false
+      },
+      {
+        "id": "config-get",
+        "title": "Print the value of a key",
+        "category": "config",
+        "params": {
+          "global": {
+            "flag": {
+              "arg": "--global"
+            },
+            "description": "Read the per-user configuration that applies to all warehouses"
+          },
+          "key": {
+            "input": {},
+            "description": "The configuration key (e.g. \"remote.url\")"
+          }
+        },
+        "run": "config get {global} -- {key}",
+        "interactive": false
+      },
+      {
+        "id": "config-set",
+        "title": "Set a key to a value",
+        "category": "config",
+        "params": {
+          "global": {
+            "flag": {
+              "arg": "--global"
+            },
+            "description": "Write the per-user configuration that applies to all warehouses"
+          },
+          "key": {
+            "input": {},
+            "description": "The configuration key (e.g. \"remote.url\")"
+          },
+          "value": {
+            "input": {
+              "secret": true
+            },
+            "description": "The value to set the key to"
+          }
+        },
+        "run": "config set {global} -- {key} {value}",
+        "interactive": false
+      },
+      {
+        "id": "config-unset",
+        "title": "Remove a key (e.g. clearing a \"remote.token\")",
+        "category": "config",
+        "params": {
+          "global": {
+            "flag": {
+              "arg": "--global"
+            },
+            "description": "Remove the key from the per-user configuration that applies to all warehouses"
+          },
+          "key": {
+            "input": {},
+            "description": "The configuration key (e.g. \"remote.token\")"
+          }
+        },
+        "run": "config unset {global} -- {key}",
         "interactive": false
       },
       {
@@ -240,7 +260,7 @@
       },
       {
         "id": "deliver",
-        "title": "Squash the current draft pallet onto a target as one clean parcel, keeping the trail (`dv`)",
+        "title": "Squash the current draft pallet onto a target as one clean parcel, keeping the trail",
         "description": "Deliver the current (draft) pallet's checkpoint trail onto a target pallet as a single clean signed parcel — the squash agents need, without losing the trail. The delivered parcel carries the draft head's tree with the target as its only parent, so the checkpoints stay out of the target's history; the full trail is kept (the draft pallet is left intact) and recorded as a signed \"delivery\" entry on the parcel's manifest, so \"what the agent tried, in what order\" stays discoverable. Needs an enrolled key (the trail is signed evidence). The current pallet becomes the target; the working directory is unchanged (the tree is identical).",
         "params": {
           "message": {
@@ -261,13 +281,13 @@
       {
         "id": "diff",
         "title": "Show line-by-line changes",
-        "description": "Show the line-by-line changes between the working directory and the inventory (what \"load\" would stage). With --staged, show the changes between the inventory and the pallet head (what \"stack\" would record). With two revisions (pallet names or parcel hashes), compare those instead — use \":empty\" as either revision to compare against the empty tree (every file on the other side then lists as added). An optional trailing path limits the report to a file or directory.",
+        "description": "Show the line-by-line changes between the working directory and the inventory (what \"forklift load\" would stage). With --staged, show the changes between the inventory and the pallet head (what \"forklift stack\" would record). With two revisions (pallet names or parcel hashes), compare those instead — use \":empty\" as either revision to compare against the empty tree (every file on the other side then lists as added). An optional trailing path limits the report to a file or directory.",
         "params": {
           "staged": {
             "flag": {
               "arg": "--staged"
             },
-            "description": "Compare the inventory against the pallet head (what \"stack\" would record)"
+            "description": "Compare the inventory against the pallet head (what \"forklift stack\" would record)"
           },
           "targets": {
             "repeat": {},
@@ -278,8 +298,29 @@
         "interactive": false
       },
       {
-        "id": "export-git",
+        "id": "git-import",
+        "title": "Import a git repository's history into this warehouse (one-way migration)",
+        "category": "git",
+        "description": "One-way migration of a git repository's history into this warehouse: git commits become parcels, trees become trees, blobs become blobs, and each local branch becomes a pallet. The imported history is unsigned (it predates trust), so import into a fresh warehouse and then run \"forklift office enroll\" to anchor it. Run it from the git repo's directory (\"forklift git import .\") so the checked-out working tree already holds the imported HEAD. Forklift converts nothing on checkout, so a file git converted (line endings, ident, a filter) reads as modified, and the import warns about it. Requires git on PATH.",
+        "params": {
+          "no-compact": {
+            "flag": {
+              "arg": "--no-compact"
+            },
+            "description": "Store the imported objects loose instead of packing (and delta-compressing) them on the way in"
+          },
+          "path": {
+            "input": {},
+            "description": "The git repository to import from (e.g. \\\".\\\")"
+          }
+        },
+        "run": "git import {no-compact} -- {path}",
+        "interactive": false
+      },
+      {
+        "id": "git-export",
         "title": "Export this warehouse's history into a new git repository (one-way, lossy)",
+        "category": "git",
         "description": "One-way export of this warehouse's history into a new git repository: parcels become commits, trees become trees, blobs become blobs, and each user pallet becomes a branch. The escape hatch that makes trying forklift reversible — but lossy in this direction: git has no home for the signed office, the @manifest, or per-parcel signatures, so those are dropped. The path must be empty or new. Requires git on PATH.",
         "params": {
           "path": {
@@ -287,59 +328,23 @@
             "description": "Where to create the git repository (must be empty or new)"
           }
         },
-        "run": "export-git -- {path}",
+        "run": "git export -- {path}",
         "interactive": false
       },
       {
-        "id": "franchise",
-        "title": "Open a local franchise of a remote warehouse (clone)",
-        "description": "Open a local franchise of a remote warehouse: prepare a fresh warehouse in the target directory, remember the remote, adopt its trust anchor, download the history (using the remote's bundle when it has one) and materialize the chosen pallet in the working directory. With --only, franchise sparsely: fetch the full signed history but only the named subtree(s) of content, leaving the rest sealed by hash.",
-        "params": {
-          "pallet": {
-            "repeat": {
-              "arg": "--pallet",
-              "max": 1
-            },
-            "description": "The pallet to check out (default: the remote's default pallet)"
-          },
-          "token": {
-            "repeat": {
-              "arg": "--token",
-              "max": 1,
-              "secret": true
-            },
-            "description": "The bearer token, when the remote requires one (remembered as \"remote.token\")"
-          },
-          "only": {
-            "repeat": {
-              "arg": "--only"
-            },
-            "description": "Franchise sparsely: fetch only the named subtree path(s) of content. Repeatable"
-          },
-          "expect": {
-            "repeat": {
-              "arg": "--expect",
-              "max": 1
-            },
-            "description": "Refuse unless the remote's trust anchor is this genesis (an out-of-band pin)"
-          },
-          "url": {
-            "input": {},
-            "description": "The URL of the remote warehouse (e.g. http://forklift.example.com:9418)"
-          },
-          "directory": {
-            "input": {},
-            "description": "The directory to create the warehouse in (must be new or empty)"
-          }
-        },
-        "run": "franchise {pallet} {token} {only} {expect} -- {url} {directory}",
+        "id": "git-mirror",
+        "title": "Mirror the remote's pallets to a git remote (mirror.url), never by force",
+        "category": "git",
+        "description": "Keep the git remote at mirror.url in step with the pallets the Forklift remote holds (mirror.pallets, or every user pallet). Each pallet's remote head is fetched, exported incrementally into .forklift/mirror.git, and pushed to the git branch of the same name, never by force: a git branch holding a commit the export does not is refused, and left as it is. Only lifted heads are mirrored. Tags, the signed office, the @manifest and signatures are not mirrored. A head is exported only once its history verifies against the trust anchor (the one held, or the one the remote serves). With mirror.auto on (the default), every lift mirrors the pallet it lifted. Requires git on PATH.",
+        "params": {},
+        "run": "git mirror",
         "interactive": false
       },
       {
         "id": "haul",
         "title": "Reviewable merge proposals (pull requests) on the @haul meta pallet",
         "category": "haul",
-        "description": "Propose merging one pallet into another, with discussion and signed reviews — pull requests, in Forklift's vocabulary. A haul is an append-only log of signed events on the @haul meta pallet, so authorship — and who approved — is forge-proof and carries the operator's identity class (a human's approval is distinguishable from an agent's). Reviews are recorded; merging is not gated on them in this release. Intra-warehouse (pallet → pallet).",
+        "description": "Propose merging one pallet into another, with discussion and signed reviews — pull requests, in Forklift's vocabulary. A haul is a set of signed cells on the @haul meta pallet — its proposal, its proposed head, its status, one review per reviewer and its comments — so authorship, and who approved, is forge-proof and carries the operator's identity class (a human's approval is distinguishable from an agent's). A review names the head it reviewed, and a merged haul stays merged. Reviews are recorded; merging is not gated on them in this release. Intra-warehouse (pallet → pallet).",
         "params": {},
         "run": "haul",
         "interactive": false
@@ -413,6 +418,20 @@
         "interactive": false
       },
       {
+        "id": "haul-update",
+        "title": "Propose the source pallet's current head",
+        "category": "haul",
+        "description": "Move an open haul to the source pallet's current head. Only the haul's opener moves it; a rewound or rebased source moves the haul with it. Reviews record the head they reviewed, so a review of an earlier head stays listed but no longer counts as an approval of the haul.",
+        "params": {
+          "id": {
+            "input": {},
+            "description": "The haul id (or a unique prefix)"
+          }
+        },
+        "run": "haul update -- {id}",
+        "interactive": false
+      },
+      {
         "id": "haul-comment",
         "title": "Add a comment",
         "category": "haul",
@@ -437,7 +456,7 @@
         "id": "haul-review",
         "title": "Record a signed review (approve by default)",
         "category": "haul",
-        "description": "Record a signed review of a haul. Approves by default; pass --request-changes or --comment for the other verdicts. Because the review is signed, the approval carries your identity class — an agent's approval is distinguishable from a human's. Requires an enrolled signing key.",
+        "description": "Record a signed review of a haul's current head. Approves by default; pass --request-changes or --comment for the other verdicts. Because the review is signed, the approval carries your identity class — an agent's approval is distinguishable from a human's. Requires an enrolled signing key.",
         "params": {
           "request-changes": {
             "flag": {
@@ -467,8 +486,8 @@
         "interactive": false
       },
       {
-        "id": "haul-merge",
-        "title": "Merge a proposal (consolidate its source into the target)",
+        "id": "haul-consolidate",
+        "title": "Land a proposal: consolidate its source into the target",
         "category": "haul",
         "params": {
           "id": {
@@ -476,7 +495,7 @@
             "description": "The haul id (or a unique prefix)"
           }
         },
-        "run": "haul merge -- {id}",
+        "run": "haul consolidate -- {id}",
         "interactive": false
       },
       {
@@ -507,8 +526,8 @@
       },
       {
         "id": "heal",
-        "title": "Resolve a standing durability taint automated recovery could not clear on its own",
-        "description": "Resolve a standing durability taint (\"durability_taint\" refusals, exit 21): a write's final path(s) were left visible after a failed durability sync, and the automatic entry-heal every command runs could not restage every one of them on its own. This verb runs the deeper recovery pass — restage whatever it can, then walk every durable ref source (pallet heads, parked work, tags, and staged inventory shards) to tell a vanished-but-never-referenced object (safe to drop) from one something still points at (reported, with remedies). A torn taint (its own record was cut short by a crash) cannot be resolved this way at all and needs a heavyweight recovery instead. Exits 0 once every recorded path is resolved; exits 21, with the taint left standing on exactly what remains, otherwise.",
+        "title": "Resolve a standing durability taint, or finish or undo an interrupted operation",
+        "description": "Resolve a standing durability taint (\"durability_taint\" refusals, exit 21): a write's final path(s) were left visible after a failed durability sync, and the automatic entry-heal every command runs could not restage every one of them on its own. This verb runs the deeper recovery pass — restage whatever it can, then walk every durable ref source (pallet heads, parked work, and staged inventory shards) to tell a vanished-but-never-referenced object (safe to drop) from one something still points at (reported, with remedies). A torn taint (its own record was cut short by a crash) is resolved by rescanning the whole store, which takes longer. Exits 0 once every recorded path is resolved; exits 21, with the taint left standing on exactly what remains, otherwise.\n\nIt then finishes or undoes an operation that rewrites the whole staging area (shift, park, a merge, pick or fast-forward, lower, git import, bay creation) and was interrupted (\"incomplete_load\" refusals naming it, exit 20): rolled forward where the bay's state shows it got far enough, rolled back otherwise. Either way it rewrites only files that still hold one side's content or are missing; any other file (an edit made since, or a merge's combination of both sides) is left and reported as a local change, never staged.",
         "params": {},
         "run": "heal",
         "interactive": false
@@ -516,15 +535,8 @@
       {
         "id": "history",
         "title": "Print the parcels of a revision, newest first",
-        "description": "Print the parcels of the current pallet (or of the given revision — a pallet name or a parcel hash), newest first: hash, operators, timestamps and description.",
+        "description": "Print the parcels of the current pallet (or of the given revision — a pallet name or a parcel hash), newest first: hash, operators, timestamps and description. Read a long history in pages: --limit caps a page, and --after resumes from the cursor the previous page returned. To filter on identity, signer or provenance, use \"forklift query\".",
         "params": {
-          "class": {
-            "repeat": {
-              "arg": "--class",
-              "max": 1
-            },
-            "description": "Show only parcels authored by this identity class: human | agent | bot | service"
-          },
           "limit": {
             "repeat": {
               "arg": "--limit",
@@ -552,34 +564,22 @@
             "description": "A pallet name or a parcel hash prefix (default: the current pallet)"
           }
         },
-        "run": "history {class} {limit} {after} {oneline} -- {revision}",
-        "interactive": false
-      },
-      {
-        "id": "import-git",
-        "title": "Import a git repository's history into this warehouse (one-way migration)",
-        "description": "One-way migration of a git repository's history into this warehouse: git commits become parcels, trees become trees, blobs become blobs, and each local branch becomes a pallet. The imported history is unsigned (it predates trust), so import into a fresh warehouse and then run \"office enroll\" to anchor it. Run it from the git repo's directory (\"forklift import-git .\") so the checked-out working tree matches the imported HEAD. Requires git on PATH.",
-        "params": {
-          "no-compact": {
-            "flag": {
-              "arg": "--no-compact"
-            },
-            "description": "Store the imported objects loose instead of packing (and delta-compressing) them on the way in"
-          },
-          "path": {
-            "input": {},
-            "description": "The git repository to import from (e.g. \\\".\\\")"
-          }
-        },
-        "run": "import-git {no-compact} -- {path}",
+        "run": "history {limit} {after} {oneline} -- {revision}",
         "interactive": false
       },
       {
         "id": "lift",
         "title": "Upload the current pallet's new parcels to the remote (push)",
-        "description": "Upload the current pallet's new parcels to the configured remote (\"remote.url\") and move the remote's ref. When trust is established, the office pallet and the trust anchor are lifted first — the remote verifies every signature before it accepts the update. A remote that is ahead or has diverged is never overwritten: lower first.",
-        "params": {},
-        "run": "lift",
+        "description": "Upload the current pallet's new parcels to the configured remote (\"remote.url\") and move the remote's ref. When trust is established, the office pallet and the trust anchor are lifted first — the remote verifies every signature before it accepts the update. A remote that is ahead or has diverged is never overwritten: lower first when it is ahead; when both sides moved and the changes do not auto-merge, the refusal names how to merge the remote head in. A pallet deleted on the remote is re-created only with \"--recreate\", from work that descends from the head it was deleted at.",
+        "params": {
+          "recreate": {
+            "flag": {
+              "arg": "--recreate"
+            },
+            "description": "Re-create the pallet on the remote where it was deleted, acknowledging the deletion: refused unless the local work descends from the head the remote's tombstone holds"
+          }
+        },
+        "run": "lift {recreate}",
         "interactive": false
       },
       {
@@ -596,8 +596,8 @@
       },
       {
         "id": "lower",
-        "title": "Download the remote's new parcels and fast-forward the current pallet (pull)",
-        "description": "Download the remote's new parcels for the current pallet from the configured remote (\"remote.url\") and fast-forward to them — working directory and inventory included. On first contact with a trusted remote its trust anchor is adopted (one-way, like \"office enroll\"), and the adopted genesis is reported. A diverged pallet is reported, never merged implicitly.",
+        "title": "Download the remote's new parcels and fast-forward the current pallet, or another (pull)",
+        "description": "Download the remote's new parcels for the current pallet from the configured remote (\"remote.url\") and fast-forward to them — working directory and inventory included. Naming another pallet downloads the remote's history of that pallet and creates or fast-forwards its ref alone: this bay, its files and its inventory stay where they are, and \"forklift shift\" moves onto it. On first contact with a trusted remote its trust anchor is adopted (one-way, like \"forklift office enroll\"), and the adopted genesis is reported. A diverged pallet is reported, never merged implicitly. A diverged metadata pallet (@kv, @tags, @manifest, @haul) replays the local changes onto the remote's; paths both sides changed refuse the lower with a meta_conflict error (exit 24) naming every pallet, path and both sides, until --keep resolves each one.",
         "params": {
           "expect": {
             "repeat": {
@@ -605,16 +605,28 @@
               "max": 1
             },
             "description": "Refuse unless the remote's trust anchor is this genesis (an out-of-band pin)"
+          },
+          "keep": {
+            "repeat": {
+              "arg": "--keep"
+            },
+            "description": "Resolve a metadata conflict: keep ours or theirs at a path (repeatable)"
+          },
+          "pallet": {
+            "repeat": {
+              "max": 1
+            },
+            "description": "The pallet to lower (default: the current pallet); \"forklift pallet list --remote\" lists the remote's"
           }
         },
-        "run": "lower {expect}",
+        "run": "lower {expect} {keep} -- {pallet}",
         "interactive": false
       },
       {
         "id": "manifest",
-        "title": "Attach signed post-metadata to a parcel: approvals, review notes (`mf`)",
+        "title": "Facts recorded about a parcel after the fact: notes, approvals, provenance, keyed values",
         "category": "manifest",
-        "description": "Record and read the manifest — signed post-metadata attached to a parcel after the fact (approvals, review notes; later, machine-authorship provenance). Entries are tracked metadata on the \"@manifest\" meta pallet: forge-proof, portable and auditable, and they reference parcels without ever mutating them. Recording needs an enrolled signing key (like the office). Without a subcommand, the whole manifest is listed.",
+        "description": "Record and read the manifest — signed facts attached to a parcel after the fact. Notes, approvals and machine-authorship provenance are entries on the \"@manifest\" meta pallet (subcommands note, approve, provenance and show). Keyed values, such as a build status or a ticket link, live on the \"@kv\" meta pallet (subcommands set, get, unset, keys and log): a key holds one text value per parcel, and lower combines changes to different keys, while a key changed differently on both sides is a conflict that \"forklift lower --keep\" resolves. Every change is signed by its writer, verifiable offline against the office chain, and references the parcel without ever changing it. Recording needs an enrolled signing key; a keyed value also needs a writer or admin role. Without a subcommand, every \"@manifest\" entry is listed.",
         "params": {},
         "run": "manifest",
         "interactive": false
@@ -666,7 +678,7 @@
         "id": "manifest-provenance",
         "title": "Record how a parcel was produced: model, tool, session (AI provenance)",
         "category": "manifest",
-        "description": "Record signed machine-authorship provenance for a parcel — which model produced the change, with which tool, in which session, and (optionally) a transcript fingerprint. Because the entry is signed, it is evidence: paired with an agent-class identity (\"office admit --agent --supervisor\"), it answers \"which model produced this, under whose supervision\" forge-proof and offline — the AI-traceability question git cannot answer. Requires an enrolled signing key.",
+        "description": "Record signed machine-authorship provenance for a parcel — which model produced the change, with which tool, in which session, and (optionally) a transcript fingerprint. Because the entry is signed, it is evidence: paired with an agent-class identity (\"forklift office admit --agent --supervisor\"), it answers \"which model produced this, under whose supervision\" forge-proof and offline — the AI-traceability question git cannot answer. Requires an enrolled signing key.",
         "params": {
           "model": {
             "repeat": {
@@ -727,6 +739,96 @@
         "interactive": false
       },
       {
+        "id": "manifest-set",
+        "title": "Set a keyed value on a parcel",
+        "category": "manifest",
+        "description": "Set a key on a parcel to a text value, replacing any value it held. A key is ASCII letters, digits, \".\", \"_\" and \"-\", at most 128 bytes, and never begins with \".\" or \"-\"; a value is at most 64 KiB of text. Requires an enrolled signing key and a writer or admin role.",
+        "params": {
+          "revision": {
+            "input": {},
+            "description": "The parcel the value is about (a pallet name, or a parcel hash / unique prefix)"
+          },
+          "key": {
+            "input": {},
+            "description": "The key"
+          },
+          "value": {
+            "input": {},
+            "description": "The value"
+          }
+        },
+        "run": "manifest set -- {revision} {key} {value}",
+        "interactive": false
+      },
+      {
+        "id": "manifest-get",
+        "title": "Show a keyed value on a parcel",
+        "category": "manifest",
+        "params": {
+          "revision": {
+            "input": {},
+            "description": "The parcel (a pallet name, or a parcel hash / unique prefix)"
+          },
+          "key": {
+            "input": {},
+            "description": "The key"
+          }
+        },
+        "run": "manifest get -- {revision} {key}",
+        "interactive": false
+      },
+      {
+        "id": "manifest-unset",
+        "title": "Remove a keyed value from a parcel",
+        "category": "manifest",
+        "description": "Remove a key from a parcel. A key that holds no value is refused. Requires an enrolled signing key and a writer or admin role.",
+        "params": {
+          "revision": {
+            "input": {},
+            "description": "The parcel (a pallet name, or a parcel hash / unique prefix)"
+          },
+          "key": {
+            "input": {},
+            "description": "The key"
+          }
+        },
+        "run": "manifest unset -- {revision} {key}",
+        "interactive": false
+      },
+      {
+        "id": "manifest-keys",
+        "title": "List every keyed value, or a parcel's",
+        "category": "manifest",
+        "params": {
+          "revision": {
+            "repeat": {
+              "max": 1
+            },
+            "description": "Only this parcel's values (a pallet name, or a parcel hash / unique prefix)"
+          }
+        },
+        "run": "manifest keys -- {revision}",
+        "interactive": false
+      },
+      {
+        "id": "manifest-log",
+        "title": "Show every change to a key, newest first, with who made it",
+        "category": "manifest",
+        "description": "Show every change to a key on a parcel, newest first: the parcel that made it, when, by whom, and the value after it. Walks the whole history of the @kv meta pallet.",
+        "params": {
+          "revision": {
+            "input": {},
+            "description": "The parcel (a pallet name, or a parcel hash / unique prefix)"
+          },
+          "key": {
+            "input": {},
+            "description": "The key"
+          }
+        },
+        "run": "manifest log -- {revision} {key}",
+        "interactive": false
+      },
+      {
         "id": "office",
         "title": "Manage the warehouse office: users and signing keys",
         "category": "office",
@@ -758,26 +860,10 @@
         "interactive": false
       },
       {
-        "id": "office-keygen",
-        "title": "Generate a keypair locally and print its public half + proof-of-possession",
-        "category": "office",
-        "description": "Generate a keypair locally and print its public half plus a proof-of-possession (a self-signature binding the key to your operator UUID). The private key stays on this machine. Hand the printed admit line to an office admin to be enrolled, or the printed link line to a machine that already holds one of your keys to add this as another device.",
-        "params": {
-          "passphrase": {
-            "flag": {
-              "arg": "--passphrase"
-            },
-            "description": "Protect the new key with a passphrase (recommended for human operators)"
-          }
-        },
-        "run": "office keygen {passphrase}",
-        "interactive": false
-      },
-      {
         "id": "office-admit",
         "title": "Enroll another operator with their public key — admins only",
         "category": "office",
-        "description": "Enroll another operator: their UUID, public key and proof-of-possession, exactly as printed by their \"forklift office keygen\" run. The key becomes their identity root, endorsed by your admin key. Office records are pseudonymous — no names or emails ever go on-chain. Mark automated principals with --agent / --bot / --service: the class rides in the signed record, so \"an agent wrote this, supervised by <human>\" is forge-proof. An agent requires a --supervisor; a supervisor must be an enrolled human. Automated identities should hold passphraseless keys (they sign autonomously under their own marked identity, never as a human).",
+        "description": "Enroll another operator: their UUID, public key and proof-of-possession, exactly as printed by their \"forklift profile keygen\" run. The key becomes their identity root, endorsed by your admin key. Office records are pseudonymous — no names or emails ever go on-chain. Mark automated principals with --agent / --bot / --service: the class rides in the signed record, so \"an agent wrote this, supervised by <human>\" is forge-proof. An agent requires a --supervisor; a supervisor must be an enrolled human. Automated identities should hold passphraseless keys (they sign autonomously under their own marked identity, never as a human).",
         "params": {
           "role": {
             "repeat": {
@@ -819,7 +905,7 @@
           },
           "operator-id": {
             "input": {},
-            "description": "The operator's UUID (printed by their \"office keygen\")"
+            "description": "The operator's UUID (printed by their \"forklift profile keygen\")"
           },
           "public-key": {
             "input": {},
@@ -827,7 +913,7 @@
           },
           "pop": {
             "input": {},
-            "description": "The key's proof-of-possession (printed by their \"office keygen\")"
+            "description": "The key's proof-of-possession (printed by their \"forklift profile keygen\")"
           }
         },
         "run": "office admit {role} {pallet} {agent} {bot} {service} {supervisor} -- {operator-id} {public-key} {pop}",
@@ -837,7 +923,7 @@
         "id": "office-link",
         "title": "Link another device's key to your own identity",
         "category": "office",
-        "description": "Link another device's key to your own identity: a sigchain endorsement — the new key is trusted because a key you already hold signs for it, so every warehouse that trusts your identity accepts it automatically. Run \"forklift office keygen\" on the other device (configured with the same operator.uuid) and pass the printed public key and proof-of-possession here.",
+        "description": "Link another device's key to your own identity: a sigchain endorsement — the new key is trusted because a key you already hold signs for it, so every warehouse that trusts your identity accepts it automatically. Run \"forklift profile keygen\" on the other device (configured with the same operator.uuid) and pass the printed public key and proof-of-possession here.",
         "params": {
           "public-key": {
             "input": {},
@@ -845,7 +931,7 @@
           },
           "pop": {
             "input": {},
-            "description": "The new key's proof-of-possession (printed by \"office keygen\")"
+            "description": "The new key's proof-of-possession (printed by \"forklift profile keygen\")"
           }
         },
         "run": "office link -- {public-key} {pop}",
@@ -855,11 +941,11 @@
         "id": "office-authorize",
         "title": "Authorize a new key for an already-enrolled operator — admins only",
         "category": "office",
-        "description": "Authorize a new key for an already-enrolled operator: the recovery path for someone who lost every device (the scope of a key-authorization equals the scope of the authorizer's authority, so an admin's endorsement is valid exactly here, in the office they administer). The operator runs \"forklift office keygen\" on their new machine and hands you the printed line over a channel where you can confirm it is really them; their proof-of-possession still co-signs the record, so you cannot attribute a key they do not hold. For your own devices use \"office link\"; for a new operator use \"office admit\".",
+        "description": "Authorize a new key for an already-enrolled operator: the recovery path for someone who lost every device (the scope of a key-authorization equals the scope of the authorizer's authority, so an admin's endorsement is valid exactly here, in the office they administer). The operator runs \"forklift profile keygen\" on their new machine and hands you the printed line over a channel where you can confirm it is really them; their proof-of-possession still co-signs the record, so you cannot attribute a key they do not hold. For your own devices use \"forklift office link\"; for a new operator use \"forklift office admit\".",
         "params": {
           "operator-id": {
             "input": {},
-            "description": "The enrolled operator's UUID (printed by their \"office keygen\")"
+            "description": "The enrolled operator's UUID (printed by their \"forklift profile keygen\")"
           },
           "public-key": {
             "input": {},
@@ -867,7 +953,7 @@
           },
           "pop": {
             "input": {},
-            "description": "The new key's proof-of-possession (printed by \"office keygen\")"
+            "description": "The new key's proof-of-possession (printed by \"forklift profile keygen\")"
           }
         },
         "run": "office authorize -- {operator-id} {public-key} {pop}",
@@ -987,31 +1073,107 @@
         "interactive": false
       },
       {
-        "id": "palletize",
-        "title": "Create a new pallet (branch) and shift to it; without a name, list the pallets",
-        "description": "Create a new pallet at the current head — or at the given revision (a pallet name or a parcel hash) — and shift to it. Without arguments, the pallets are listed with the current one marked.",
+        "id": "pallet",
+        "title": "Manage pallets (branches): list, create, delete and restore them",
+        "category": "pallet",
+        "description": "Manage pallets, Forklift's branches. Without a subcommand, the pallets are listed, as \"forklift pallet list\" does.",
+        "params": {},
+        "run": "pallet",
+        "interactive": false
+      },
+      {
+        "id": "pallet-list",
+        "title": "List the pallets, marking the current one (the default)",
+        "category": "pallet",
+        "description": "List the pallets, marking the current one. With \"--remote\", list the remote's pallets instead, each with how it relates to the local one, and the pallets deleted there.",
         "params": {
           "all": {
             "flag": {
               "arg": "--all"
             },
-            "description": "When listing, also show the meta pallets (the office and other tracked metadata; reach them with the \"@\" qualifier, e.g. \"history @office\")"
+            "description": "Also show the meta pallets (the office and other tracked metadata; reach them with the \"@\" qualifier, e.g. \"forklift history @office\")"
           },
-          "name-revision": {
-            "repeat": {
-              "max": 2
+          "remote": {
+            "flag": {
+              "arg": "--remote"
             },
-            "description": "name: The name of the new pallet; omit it to list the pallets | revision: Where the new pallet starts: a pallet name or a parcel hash prefix (default: the current pallet's head)"
+            "description": "List the remote's pallets instead: each with its remote head, the local head, and whether the two are the same, the local one is ahead, or they differ (lower decides), and the pallets deleted there. Downloads and writes nothing"
           }
         },
-        "run": "palletize {all} -- {name-revision}",
+        "run": "pallet list {all} {remote}",
+        "interactive": false
+      },
+      {
+        "id": "pallet-create",
+        "title": "Create a new pallet and shift to it",
+        "category": "pallet",
+        "description": "Create a new pallet at the current head, or at the given revision (a pallet name or a parcel hash), and shift to it.",
+        "params": {
+          "name": {
+            "input": {},
+            "description": "The name of the new pallet"
+          },
+          "revision": {
+            "repeat": {
+              "max": 1
+            },
+            "description": "Where the new pallet starts: a pallet name or a parcel hash prefix (default: the current pallet's head)"
+          }
+        },
+        "run": "pallet create -- {name} {revision}",
+        "interactive": false
+      },
+      {
+        "id": "pallet-delete",
+        "title": "Delete a pallet: remove its ref, keeping its parcels",
+        "category": "pallet",
+        "description": "Delete a pallet: its ref goes, its parcels stay, and \"forklift undo\" brings it back. Refused for the pallet a bay stands on, one an open haul names, and, without \"--force\", one whose work no other pallet here or on the remote holds. With \"--remote\", delete the remote's pallet instead: it keeps its history on the remote, and no clone's own pallet changes.",
+        "params": {
+          "force": {
+            "flag": {
+              "arg": "--force"
+            },
+            "description": "Delete even when no other pallet holds the pallet's work. It stays recoverable by \"forklift undo\" while the delete is in this bay's undo journal, and in a warehouse a server has served by \"forklift pallet restore\" while its tombstone stands"
+          },
+          "remote": {
+            "flag": {
+              "arg": "--remote"
+            },
+            "description": "Delete the remote's pallet instead of the local one"
+          },
+          "name": {
+            "input": {},
+            "description": "The pallet to delete"
+          }
+        },
+        "run": "pallet delete {force} {remote} -- {name}",
+        "interactive": false
+      },
+      {
+        "id": "pallet-restore",
+        "title": "Bring back a deleted pallet at the head its tombstone holds",
+        "category": "pallet",
+        "description": "Bring back a pallet deleted in this warehouse after it was served, at the head its tombstone holds. Refused while a bay stands on the name at another head. With \"--remote\", bring it back on the remote, which needs no history here.",
+        "params": {
+          "remote": {
+            "flag": {
+              "arg": "--remote"
+            },
+            "description": "Bring the remote's pallet back instead of the local one"
+          },
+          "name": {
+            "input": {},
+            "description": "The pallet to bring back"
+          }
+        },
+        "run": "pallet restore {remote} -- {name}",
         "interactive": false
       },
       {
         "id": "park",
         "title": "Park the work in progress and reset to the pallet head",
         "category": "park",
-        "description": "Park the work in progress (the staged and unstaged changes of tracked files) as a parked parcel and reset the warehouse to the pallet head. Untracked files are left alone. \"park pop\" re-applies the latest parked changes; \"park list\" lists them.",
+        "description": "Park the work in progress (the staged and unstaged changes of tracked files) as a parked parcel and reset the warehouse to the pallet head. Untracked files are left alone. \"forklift park pop\" re-applies the latest parked changes; \"forklift park list\" lists them.",
         "params": {},
         "run": "park",
         "interactive": false
@@ -1033,31 +1195,29 @@
         "interactive": false
       },
       {
-        "id": "peek",
-        "title": "Peek into an object (print its content)",
-        "description": "Print the content of an object: a blob's bytes, a tree's entries, or a parcel's fields. With --inventory, print the inventory of a working-directory folder instead.",
+        "id": "pick",
+        "title": "Apply a parcel's changes onto the current pallet as a new, author-preserving parcel",
+        "description": "Apply a parcel's diff (its change against its first parent) onto the current pallet as a new, author-preserving, freshly-signed parcel. Unlike rebase, pick only *adds* — no rewrite, no force-push: the picked parcel's authors are preserved and this operator is recorded as the stacker. A clean pick is stacked immediately; a conflicting one leaves markers to resolve, \"forklift load\" and \"forklift stack\" (which completes the pick single-parent).",
         "params": {
-          "inventory": {
+          "message": {
             "repeat": {
-              "arg": "--inventory",
+              "arg": "--message",
               "max": 1
             },
-            "description": "Peek into the inventory of a working-directory folder instead of an object"
+            "description": "The new parcel's message (default: the source parcel's message)"
           },
-          "object": {
-            "repeat": {
-              "max": 1
-            },
-            "description": "The hash of the object to peek into"
+          "revision": {
+            "input": {},
+            "description": "The parcel to pick: a pallet name, or a parcel hash / unique prefix"
           }
         },
-        "run": "peek {inventory} -- {object}",
+        "run": "pick {message} -- {revision}",
         "interactive": false
       },
       {
         "id": "prepare",
         "title": "Prepare a new warehouse in the current directory",
-        "description": "Prepare a new warehouse in the current directory: the \".forklift\" folder with the object store, the staging area, the configuration template and the ignore file. Preparing is idempotent — only the missing pieces are created.",
+        "description": "Prepare a new warehouse in the current directory: the \".forklift\" folder with the object store, the staging area and the configuration template. No ignore file is written: \".forkliftignore\" is tracked content, created when you need one. Preparing is idempotent — only the missing pieces are created.",
         "params": {},
         "run": "prepare",
         "interactive": false
@@ -1066,7 +1226,7 @@
         "id": "profile",
         "title": "Manage identity profiles (named operator ids) and select one per warehouse",
         "category": "profile",
-        "description": "Manage identity profiles: named identity bundles (an operator id and a display name) stored in the global configuration. A warehouse selects one with \"profile use\", so one machine can act as different operators in different warehouses — e.g. a personal identity and one per organization. Without a subcommand, the profiles are listed.",
+        "description": "Manage identity profiles: named operator ids stored in the global configuration. A warehouse selects one with \"forklift profile use\", so one machine can act as different operators in different warehouses — e.g. a personal identity and one per organization. \"forklift profile keygen\" generates a signing key for one. Without a subcommand, the profiles are listed.",
         "params": {},
         "run": "profile",
         "interactive": false
@@ -1084,13 +1244,6 @@
         "title": "Create a named profile (mints an operator id unless one is given)",
         "category": "profile",
         "params": {
-          "display-name": {
-            "repeat": {
-              "arg": "--display-name",
-              "max": 1
-            },
-            "description": "The display name (local only; falls back to the operator id)"
-          },
           "id": {
             "repeat": {
               "arg": "--id",
@@ -1103,7 +1256,7 @@
             "description": "The profile name (e.g. \"work\")"
           }
         },
-        "run": "profile create {display-name} {id} -- {name}",
+        "run": "profile create {id} -- {name}",
         "interactive": false
       },
       {
@@ -1120,9 +1273,31 @@
         "interactive": false
       },
       {
+        "id": "profile-keygen",
+        "title": "Generate a keypair locally and print its public half + proof-of-possession",
+        "category": "profile",
+        "description": "Generate a keypair locally and print its public half plus a proof-of-possession (a self-signature binding the key to an operator id). The private key stays on this machine. Hand the printed admit line to an office admin to be enrolled, or the printed link line to a machine that already holds one of your keys to add this as another device. With a profile name, the key belongs to that profile's operator id. Without one, it belongs to the identity this directory acts as: the profile the enclosing warehouse selects, else the globally selected profile, else the warehouse's operator.identifier, else the global one (the default identity). It says which one it used. Runs outside a warehouse too, and records nothing in one.",
+        "params": {
+          "passphrase": {
+            "flag": {
+              "arg": "--passphrase"
+            },
+            "description": "Protect the new key with a passphrase (recommended for human operators)"
+          },
+          "name": {
+            "repeat": {
+              "max": 1
+            },
+            "description": "The profile whose operator id the key belongs to; omit it for the current identity"
+          }
+        },
+        "run": "profile keygen {passphrase} -- {name}",
+        "interactive": false
+      },
+      {
         "id": "query",
         "title": "Query parcel history by signed identity, signer and parcel facts",
-        "description": "Filter parcel history on its signed dimensions — identity class, supervisor, role, signing key, recorded machine-authorship provenance, signed tags — plus parcel-local facts (dates, description, merge-ness, touched paths). By default identity answers are VERIFIED: the signature is checked and the office joined off the verified signer, never off the parcel's own (forgeable) claim; --recorded opts into the cheap, self-declared reading and labels every answer accordingly. A parcel with no provenance recorded at all never matches a --model/--tool predicate in either direction (absence isn't a claim to negate); an untagged parcel plainly does not carry a --tag. Flags AND together; --where takes a JSON predicate tree for or/not/nesting. Scope the walk with revisions and --from — that (not --limit) is what bounds verification work.",
+        "description": "Filter parcel history on its signed dimensions — identity class, supervisor, role, signing key, recorded machine-authorship provenance, signed tags — plus parcel-local facts (dates, description, merge-ness, touched paths). By default identity answers are VERIFIED: the signature is checked and the office joined off the verified signer, never off the parcel's own (forgeable) claim; --recorded opts into the cheap, self-declared reading and labels every answer accordingly. A parcel with no provenance recorded at all never matches a --model/--tool predicate in either direction (absence isn't a claim to negate); an untagged parcel plainly does not carry a --tag. Flags AND together; --where takes a JSON predicate tree for or/not/nesting. Scope the walk with revisions and --from — that (not --limit) is what bounds verification work. A match signed by a since-revoked key carries signer.boundary: vouched (inside the history its revocation vouched for), suspect (outside it: a forged backdate, or the key's holder kept signing after the revocation), or unresolved (a partial clone lacks a boundary head or an ancestor of one, so the question cannot be answered here; never read it as suspect). A --where leaf on signer.boundary filters on vouched or suspect.",
         "params": {
           "from": {
             "repeat": {
@@ -1269,7 +1444,7 @@
       {
         "id": "remove",
         "title": "Stage a file or directory for removal",
-        "description": "Stage a file or directory for removal: its inventory entries are marked as deleted, so they will not be part of the next parcel. The working directory is not touched. To unstage changes instead (undo a \"load\"), use \"unload\".",
+        "description": "Stage a file or directory for removal: its inventory entries are marked as deleted, so they will not be part of the next parcel. The working directory is not touched. To unstage changes instead (undo a \"forklift load\"), use \"forklift unload\".",
         "params": {
           "path": {
             "input": {},
@@ -1299,9 +1474,59 @@
         "interactive": false
       },
       {
+        "id": "self-alias",
+        "title": "Manage the `fl` short alias for this binary",
+        "category": "self",
+        "description": "Manage the `fl` short alias: a shell-agnostic symlink (a shim on Windows) placed next to this binary, not a per-shell alias — it works in scripts, non-interactive shells and every shell dialect alike, and is trivially discoverable and removable. This is the one implementation every install method (the curl script, pult, `cargo install`) calls, so the alias never drifts between install paths. Without a subcommand, reports whether the alias is installed and where.",
+        "params": {},
+        "run": "self alias",
+        "interactive": false
+      },
+      {
+        "id": "self-alias-install",
+        "title": "Create the alias next to this binary (default name: \"fl\")",
+        "category": "self",
+        "description": "Create the alias next to this binary: on Unix, a symlink; on Windows (where a symlink needs elevated privilege), a `.cmd` shim that forwards to this binary. Resolves this binary's own path (`current_exe`), so it always points at whichever `forklift` is actually running the command. Idempotent: an alias that already points here succeeds without change. Refuses — without a --force, there isn't one — if the name is already taken by something else (a real file, or a symlink to a different target): removing an unrelated file automatically would be a surprise no flag should paper over.",
+        "params": {
+          "name": {
+            "repeat": {
+              "max": 1
+            },
+            "description": "The alias name (default: \"fl\")"
+          }
+        },
+        "run": "self alias install -- {name}",
+        "interactive": false
+      },
+      {
+        "id": "self-alias-uninstall",
+        "title": "Remove the alias next to this binary (default name: \"fl\")",
+        "category": "self",
+        "description": "Remove the alias next to this binary. A no-op (success) if it is not installed. Refuses if the name exists but was not created by this command (a real file, e.g.). A symlink (Unix) or a recognized shim (Windows) is removed even if it points at a different forklift binary — deleting a symlink can never lose data, unlike a real file.",
+        "params": {
+          "name": {
+            "repeat": {
+              "max": 1
+            },
+            "description": "The alias name (default: \"fl\")"
+          }
+        },
+        "run": "self alias uninstall -- {name}",
+        "interactive": false
+      },
+      {
+        "id": "self-alias-status",
+        "title": "Report whether the alias is installed and where it points (the default)",
+        "category": "self",
+        "params": {},
+        "run": "self alias status",
+        "interactive": false
+      },
+      {
         "id": "self-update",
         "title": "Check for a newer release and update this binary (client only)",
-        "description": "Check the latest published release against this binary and, for a script/manual install, update in place by re-running the verified install script. A package-manager install (cargo/brew) is never overwritten — self-update shows the right upgrade command instead. There is deliberately no server self-update: a server is redeployed, not self-mutated.",
+        "category": "self",
+        "description": "Check the latest published release against this binary and, for a script/manual install, update in place by re-running the verified install script. A package-manager install (cargo/brew) is never overwritten — self update shows the right upgrade command instead. There is deliberately no server self update: a server is redeployed, not self-mutated.",
         "params": {
           "check": {
             "flag": {
@@ -1310,13 +1535,13 @@
             "description": "Only report whether an update is available and how to get it; change nothing"
           }
         },
-        "run": "self-update {check}",
+        "run": "self update {check}",
         "interactive": false
       },
       {
         "id": "shift",
         "title": "Shift to another pallet",
-        "description": "Shift to another pallet: materialize its head parcel in the working directory and repopulate the inventory from it. Refuses to run while there are staged or unstaged changes (untracked files are tolerated).",
+        "description": "Shift to another pallet: materialize its head parcel in the working directory and repopulate the inventory from it. Refuses to run while there are staged or unstaged changes (untracked files are tolerated). Shifting to the current pallet catches up with it when another bay or process moved it: a clean bay's files move to its head.",
         "params": {
           "pallet": {
             "input": {},
@@ -1328,7 +1553,7 @@
       },
       {
         "id": "show",
-        "title": "Print a file's content at a revision (`git show <rev>:<path>`'s equivalent)",
+        "title": "Print a file's content at a revision, as git show does for REV:PATH",
         "description": "Print a file's content at a revision in one invocation: \"<revision>:<path>\", split on the first \":\" (a revision — a pallet name, an \"@\"-qualified meta pallet, or a parcel hash prefix — can never contain \":\", so the split is unambiguous even when the path itself has one). A chunked large file reports its metadata (content hash, size, chunk count) instead of assembling it; non-text content is reported binary. With --json, the envelope carries the resolved parcel hash, the tree entry's own hash, the binary/chunked signal, and the content when it is text.",
         "params": {
           "target": {
@@ -1357,7 +1582,7 @@
       {
         "id": "stocktake",
         "title": "Report the staged and unstaged changes of the warehouse",
-        "description": "Report the current pallet, the staged changes (inventory vs pallet head — what the next \"stack\" records) and the changes not yet loaded (working directory vs inventory). With --summary, report only the counts (a token-cheap overview for scripts and agents).",
+        "description": "Report the current pallet, the staged changes (inventory vs pallet head — what the next \"forklift stack\" records) and the changes not yet loaded (working directory vs inventory). With --summary, report only the counts (a token-cheap overview for scripts and agents).",
         "params": {
           "summary": {
             "flag": {
@@ -1372,7 +1597,7 @@
       {
         "id": "expand",
         "title": "Widen a sparse warehouse's fetch scope and download the newly in-scope subtree(s)",
-        "description": "Widen a sparse warehouse's fetch scope: add subtree path(s) to what the store fetches, then download their content across the whole history from the remote. Cheap and incremental — only the newly in-scope objects are fetched; what is already present is skipped. After expanding, a bay can be scoped to the new path (\"bay add --scope\"). A full (non-sparse) warehouse already holds everything, so there is nothing to expand.",
+        "description": "Widen a sparse warehouse's fetch scope: add subtree path(s) to what the store fetches, then download their content across the whole history from the remote. Cheap and incremental — only the newly in-scope objects are fetched; what is already present is skipped. After expanding, a bay can be scoped to the new path (\"forklift bay add --scope\"). A full (non-sparse) warehouse already holds everything, so there is nothing to expand.",
         "params": {
           "paths": {
             "repeat": {
@@ -1419,7 +1644,7 @@
       {
         "id": "scope-prune",
         "title": "Reclaim disk from a sparse warehouse: forget a fetched path and free its content",
-        "description": "Reclaim disk from a sparse warehouse: drop a fetched path from the shared warehouse fetch scope and free the objects under it from the object store. This is the deliberate, destructive counterpart of \"narrow\" — narrow is bay-local and frees nothing, because narrowed-away content is still reachable history that garbage collection correctly keeps; scope-prune forgets a path warehouse-wide and reclaims its disk. It is multi-bay-aware: it refuses to free a path any checkout (the main tree or a bay) still materializes. The pruned content is sealed by hash afterwards — re-fetchable from the origin with \"expand\". A full (non-sparse) warehouse has nothing to prune. If an earlier prune was interrupted before it finished freeing everything, running it again on the same path resumes and finishes the job rather than refusing. Use --dry-run to see what it would free without changing anything.",
+        "description": "Reclaim disk from a sparse warehouse: drop a fetched path from the shared warehouse fetch scope and free the objects under it from the object store. This is the deliberate, destructive counterpart of \"forklift narrow\" — narrow is bay-local and frees nothing, because narrowed-away content is still reachable history that garbage collection correctly keeps; scope-prune forgets a path warehouse-wide and reclaims its disk. It is multi-bay-aware: it refuses to free a path any checkout (the main tree or a bay) still materializes. It frees only history the remote holds, so it asks the remote first and refuses, changing nothing, when it cannot; work never lifted keeps its content until it is lifted and the prune is run again. What it frees is sealed by hash afterwards — re-fetchable from the origin with \"forklift expand\". A full (non-sparse) warehouse has nothing to prune. If an earlier prune was interrupted before it finished freeing everything, running it again on the same path resumes and finishes the job rather than refusing. Use --dry-run to see what it would free without changing anything.",
         "params": {
           "dry-run": {
             "flag": {
@@ -1438,11 +1663,122 @@
         "interactive": false
       },
       {
+        "id": "remote",
+        "title": "Show the remote and the origin, or move a partial warehouse's origin to another server",
+        "category": "remote",
+        "description": "Show where this warehouse lifts to and lowers from: the configured remote (\"remote.url\") and, in a partial warehouse (one cloned with \"--only\" or \"--cache\"), its origin, with any move of the origin that has not finished. A partial warehouse talks only to its origin, the remote it was cloned from, because only the origin was proved to hold the content it lacks; \"forklift remote move\" is the one way to change it. A full warehouse has no origin and may talk to any remote.",
+        "params": {},
+        "run": "remote",
+        "interactive": false
+      },
+      {
+        "id": "remote-move",
+        "title": "Move a partial warehouse's origin to another server that holds its content",
+        "category": "remote",
+        "description": "Point a partial warehouse at a new origin. The move first records that it is under way, so nothing fetches, lifts or changes what it checks until it ends. It then asks the new server for its pallets, judges its trust anchor as \"forklift lower\" would, fetches the parcels and signatures it lacks (no content), and checks that the new server holds everything this warehouse leans on its origin for: every tree, file and chunk that something here references and this warehouse does not hold. Only then does it rewrite the origin and \"remote.url\" (and \"remote.token\" with --token). If the check fails, nothing is rewritten and the origin stays; when the new server lacks content, copy the old server's warehouse to it server-side and run the move again. A move that stopped before it started rewriting can be abandoned with \"forklift remote abort\"; one that stopped while rewriting is finished by running the move again. A full warehouse has no origin: set \"remote.url\" with \"forklift config set\" instead.",
+        "params": {
+          "token": {
+            "repeat": {
+              "arg": "--token",
+              "max": 1,
+              "secret": true
+            },
+            "description": "The bearer token for the new origin, stored as remote.token when the move completes (default: the current remote.token)"
+          },
+          "url": {
+            "input": {},
+            "description": "The new origin's URL"
+          }
+        },
+        "run": "remote move {token} -- {url}",
+        "interactive": false
+      },
+      {
+        "id": "remote-abort",
+        "title": "Abandon a move that stopped before it started rewriting the origin",
+        "category": "remote",
+        "description": "Abandon a move of the origin that stopped before it started rewriting: the origin and \"remote.url\" stay as they were, and fetching and lifting work again. A move that stopped while rewriting cannot be abandoned, because part of this warehouse already points at the new server; run the move again to finish it. With no move under way, it reports that and changes nothing.",
+        "params": {},
+        "run": "remote abort",
+        "interactive": false
+      },
+      {
         "id": "store",
-        "title": "Report object-store health: loose vs packed objects, packs, and whether compaction is due",
-        "description": "Report the health of the object store — the counterpart of \"stocktake\" (which reports the working tree). Shows how many objects are loose (unpacked) versus packed, how many pack files there are and how delta-dense they are, the on-disk sizes, and whether an incremental compaction or a consolidating repack is currently due per the maintenance.loose / maintenance.packs thresholds. Read-only; run \"compact\" to act on it.",
+        "title": "Inspect and maintain the object store: its health, packing, raw records and cached content",
+        "category": "store",
+        "description": "Inspect and maintain the object store. Without a subcommand, report its health, as \"forklift store status\" does.",
         "params": {},
         "run": "store",
+        "interactive": false
+      },
+      {
+        "id": "store-status",
+        "title": "Report object-store health: loose vs packed objects, packs, and whether compaction is due (the default)",
+        "category": "store",
+        "description": "Report the health of the object store — the counterpart of \"forklift stocktake\" (which reports the working tree). Shows how many objects are loose (unpacked) versus packed, how many pack files there are and how delta-dense they are, the on-disk sizes, and whether an incremental compaction or a consolidating repack is currently due per the maintenance.loose / maintenance.packs thresholds. Read-only; run \"forklift store compact\" to act on it.",
+        "params": {},
+        "run": "store status",
+        "interactive": false
+      },
+      {
+        "id": "store-compact",
+        "title": "Compact the object store: pack loose objects into a few dense pack files",
+        "category": "store",
+        "description": "Compact the object store: sweep the loose objects (each its own zstd-compressed file) into a few dense pack files — an append-only data file plus a sorted index. At scale that turns hundreds of thousands of tiny files into a handful of large ones, so a history walk stops paying an open-per-object and the store stops paying per-file slack. Objects are only moved, never re-hashed; a loose file is deleted only after the pack that holds it is durably written, so compacting can never lose an object. Packs roll over at a size/count threshold, so no single pack grows unbounded. Run it after a large \"forklift git import\" or periodically as maintenance. With --all, also rewrite the existing packs: drop unreachable (garbage) objects that were stuck in packs and consolidate many packs into few — a heavier full repack, worth running occasionally. Add --redelta to a full repack to also re-delta-compress every object instead of copying already-packed records verbatim — denser, but a one-shot CPU-bound pass.",
+        "params": {
+          "all": {
+            "flag": {
+              "arg": "--all"
+            },
+            "description": "Repack existing packs too: drop unreachable objects and consolidate (a full repack)"
+          },
+          "redelta": {
+            "flag": {
+              "arg": "--redelta"
+            },
+            "description": "Re-encode every object to delta-compress across the whole store (only with --all)"
+          }
+        },
+        "run": "store compact {all} {redelta}",
+        "interactive": false
+      },
+      {
+        "id": "store-peek",
+        "title": "Peek into an object (print its content)",
+        "category": "store",
+        "description": "Print the content of an object: a blob's bytes, a tree's entries, or a parcel's fields. With --inventory, print the inventory of a working-directory folder instead.",
+        "params": {
+          "inventory": {
+            "repeat": {
+              "arg": "--inventory",
+              "max": 1
+            },
+            "description": "Peek into the inventory of a working-directory folder instead of an object"
+          },
+          "object": {
+            "repeat": {
+              "max": 1
+            },
+            "description": "The hash of the object to peek into"
+          }
+        },
+        "run": "store peek {inventory} -- {object}",
+        "interactive": false
+      },
+      {
+        "id": "store-evict",
+        "title": "Free cached content the origin holds, to be fetched again when read",
+        "category": "store",
+        "description": "Free disk in a cache warehouse (one cloned with \"--cache\"): delete the content its origin holds and nothing here needs, so that a later read fetches it again. Parcels and signatures always stay. It asks the origin which history it holds first, and refuses, changing nothing, when the configured remote is not the origin or the origin cannot be reached; work never lifted keeps its content. It keeps every checkout's files, metadata and trust records, staged work, and anything a parked or in-progress operation needs. If it is interrupted, running it again finishes the job. Objects inside packs are not freed yet. Use --dry-run to see what it would free without changing anything.",
+        "params": {
+          "dry-run": {
+            "flag": {
+              "arg": "--dry-run"
+            },
+            "description": "Report what would be freed and change nothing"
+          }
+        },
+        "run": "store evict {dry-run}",
         "interactive": false
       },
       {
@@ -1504,16 +1840,24 @@
       },
       {
         "id": "undo",
-        "title": "Undo the last stack on the current pallet (soft — keeps your changes)",
-        "description": "Undo the last \"stack\" on the current pallet: move the pallet head back to the previous parcel, keeping the working directory and the inventory as they are (like git's \"reset --soft HEAD~1\"). The undone parcel's changes are staged again, so you can re-stack them — e.g. with a corrected message or author — or adjust them first. The parcel is not deleted, only taken off the pallet. Merge parcels (completed consolidations) are not undone yet.",
-        "params": {},
-        "run": "undo",
+        "title": "Undo the last stack, consolidate, cherry-pick or shift (soft — keeps your changes)",
+        "description": "Undo the last journaled operation: a \"forklift stack\", \"forklift consolidate\", \"forklift pick\" or \"forklift shift\". A stack, consolidate or pick is reversed softly: the pallet head moves back while the working directory and the inventory stay as they are (like git's \"reset --soft HEAD~1\"), so the undone changes are staged again and can be re-stacked — e.g. with a corrected message or author. A shift is reversed by shifting back. Undo reverses only the user's last operation: except for a pallet delete, which changed nothing in the bay, if the current pallet has been switched (e.g. by pallet create or deliver), its head has moved, or a consolidation or pick was started or finished since the journaled operation, it refuses instead of reaching past that. In a warehouse that has been served, a stack, consolidate or pick is not undone when it would move a user pallet back off the head it left, since the warehouse's clones may rely on that head: stack a parcel that reverts the change instead. An unreadable journal is reported by name, never read as empty. A pallet delete is reversed by bringing the pallet back at the head it was deleted at; if that name has been taken since, \"--as <new-name>\" brings it back under another name.",
+        "params": {
+          "as": {
+            "repeat": {
+              "arg": "--as",
+              "max": 1
+            },
+            "description": "When the last journaled operation is a pallet delete: bring the deleted pallet back under this name instead of its own. The bay stays where it is"
+          }
+        },
+        "run": "undo {as}",
         "interactive": false
       },
       {
         "id": "unload",
         "title": "Unstage a file or directory (keep your changes)",
-        "description": "Unstage a file or directory: reset its inventory entries to the pallet head, leaving the working directory untouched — the inverse of \"load\", and the same as \"restore --staged\". To stage a removal instead, use \"remove\".",
+        "description": "Unstage a file or directory: reset its inventory entries to the pallet head, leaving the working directory untouched — the inverse of \"forklift load\", and the same as \"forklift restore --staged\". To stage a removal instead, use \"forklift remove\".",
         "params": {
           "path": {
             "input": {},

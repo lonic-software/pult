@@ -1,8 +1,8 @@
 //! `pult tool <BIN> [COMMAND [ARGS…]] [--print]` — run a program's commands
-//! from that program's own `self-schema` document, with no manifest anywhere.
+//! from that program's own `self schema` document, with no manifest anywhere.
 //!
 //! BIN is resolved once to an absolute path and spawned twice from it: once
-//! for `BIN self-schema --json`, whose envelope carries the document, and
+//! for `BIN self schema --json`, whose envelope carries the document, and
 //! once for the run itself. A document is a manifest in a narrow subset of
 //! the vocabulary ([`check_subset`]), and each of its runs is an argument
 //! tail with a fixed grammar (see `resolver::resolve_tool`), so every run is
@@ -51,7 +51,7 @@ pub fn run_cli(rest: &[String]) -> Result<i32> {
 fn phase_one() -> clap::Command {
     clap::Command::new("pult tool")
         .bin_name("pult tool")
-        .about("Run a program's commands from its own self-schema document")
+        .about("Run a program's commands from its own `self schema` document")
         .arg(Arg::new("bin").required(true).value_name("BIN").help(
             "The program: a path (absolute, or relative to here), or a name looked up on PATH",
         ))
@@ -244,9 +244,9 @@ fn is_executable(path: &Path) -> bool {
 
 /// Fetch, parse, subset-check and resolve `program`'s document.
 fn load(program: &Path, cwd: &Path) -> Result<Resolved> {
-    let what = format!("`{} self-schema --json`", program.display());
+    let what = format!("`{} self schema --json`", program.display());
     let output = Command::new(program)
-        .args(["self-schema", "--json"])
+        .args(["self", "schema", "--json"])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .output()
@@ -277,11 +277,11 @@ struct ErrorBody {
     message: Option<String>,
 }
 
-/// The manifest inside a `self-schema --json` envelope. Every failure names
+/// The manifest inside a `self schema --json` envelope. Every failure names
 /// the program and carries what it said: its `error.message`, or else the
 /// end of its stderr.
 fn document(stdout: &[u8], stderr: &[u8], program: &Path) -> Result<Manifest> {
-    let what = format!("`{} self-schema --json`", program.display());
+    let what = format!("`{} self schema --json`", program.display());
     let envelope: Envelope = serde_json::from_slice(stdout).map_err(|e| {
         anyhow!(
             "{what} did not print one JSON document ({e}){}",
@@ -305,7 +305,7 @@ fn document(stdout: &[u8], stderr: &[u8], program: &Path) -> Result<Manifest> {
         .with_context(|| format!("{what} printed ok:true with no data"))?;
     manifest::parse_json(
         data.get(),
-        Path::new(&format!("{} self-schema", program.display())),
+        Path::new(&format!("{} self schema", program.display())),
     )
 }
 
@@ -418,7 +418,7 @@ mod tests {
     use super::*;
     use crate::resolver::ResolvedRun;
 
-    /// `forklift self-schema --json`, verbatim; provenance beside it.
+    /// `forklift self schema --json`, verbatim; provenance beside it.
     const FIXTURE: &str = include_str!("../tests/fixtures/forklift-self-schema.json");
 
     fn from_envelope(stdout: &str, program: &Path) -> Result<Resolved> {
@@ -498,7 +498,7 @@ mod tests {
 
     fn envelope(data: &str) -> String {
         format!(
-            r#"{{"lonic_json":1,"tool":"t","schema":7,"command":"self-schema","ok":true,"data":{data}}}"#
+            r#"{{"lonic_json":1,"tool":"t","schema":7,"command":"self","ok":true,"data":{data}}}"#
         )
     }
 
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn every_forklift_command_parses_into_the_tool_subset() {
         let resolved = forklift();
-        assert_eq!(resolved.commands.len(), 81);
+        assert_eq!(resolved.commands.len(), 101);
         assert_eq!(resolved.name, "forklift");
         assert!(
             resolved
@@ -527,17 +527,21 @@ mod tests {
     }
 
     #[test]
-    fn franchise_keeps_the_emitted_param_order() {
+    fn clone_keeps_the_emitted_param_order() {
         let resolved = forklift();
-        let franchise = resolved
-            .commands
-            .iter()
-            .find(|c| c.id == "franchise")
-            .unwrap();
-        let names: Vec<&str> = franchise.params.keys().map(String::as_str).collect();
+        let clone = resolved.commands.iter().find(|c| c.id == "clone").unwrap();
+        let names: Vec<&str> = clone.params.keys().map(String::as_str).collect();
         assert_eq!(
             names,
-            ["pallet", "token", "only", "expect", "url", "directory"]
+            [
+                "pallet",
+                "token",
+                "only",
+                "cache",
+                "expect",
+                "url",
+                "directory"
+            ]
         );
     }
 
@@ -552,7 +556,9 @@ mod tests {
         let diff = resolved.commands.iter().find(|c| c.id == "diff").unwrap();
         assert_eq!(
             diff.params["staged"].description.as_deref(),
-            Some("Compare the inventory against the pallet head (what \"stack\" would record)")
+            Some(
+                "Compare the inventory against the pallet head (what \"forklift stack\" would record)"
+            )
         );
     }
 
@@ -568,24 +574,17 @@ mod tests {
             ("diff", &[], &["diff", "--"]),
             (
                 "profile-create",
-                &["--display-name", "Ann Lee", "bob"],
-                &[
-                    "profile",
-                    "create",
-                    "--display-name",
-                    "Ann Lee",
-                    "--",
-                    "bob",
-                ],
+                &["--id", "u-1", "bob"],
+                &["profile", "create", "--id", "u-1", "--", "bob"],
             ),
             // A dash-leading value under a `--` option becomes one argument.
             ("query", &["--grep=-x"], &["query", "--grep=-x", "--"]),
             ("query", &["--grep", "x"], &["query", "--grep", "x", "--"]),
             (
-                "franchise",
+                "clone",
                 &["--only", "a", "--only=-b", "https://h/w", "dir"],
                 &[
-                    "franchise",
+                    "clone",
                     "--only",
                     "a",
                     "--only=-b",
@@ -593,6 +592,12 @@ mod tests {
                     "https://h/w",
                     "dir",
                 ],
+            ),
+            // A command inside a family nested in another.
+            (
+                "self-alias-install",
+                &["fl2"],
+                &["self", "alias", "install", "--", "fl2"],
             ),
             ("version", &[], &["version"]),
         ];
@@ -625,7 +630,7 @@ mod tests {
         let cases: &[(&str, &[u8], &str)] = &[
             (
                 "",
-                b"error: unrecognized subcommand 'self-schema'\n",
+                b"error: unrecognized subcommand 'self'\n",
                 "unrecognized subcommand",
             ),
             ("{} {}", b"", "did not print one JSON document"),
@@ -659,7 +664,7 @@ mod tests {
                 .unwrap_or_default();
             assert!(err.contains(want), "{stdout}: {err}");
             assert!(
-                err.contains("/opt/t self-schema --json") || err.contains("/opt/t self-schema"),
+                err.contains("/opt/t self schema --json") || err.contains("/opt/t self schema"),
                 "{err}"
             );
         }

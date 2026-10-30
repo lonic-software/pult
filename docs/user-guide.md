@@ -123,7 +123,7 @@ and shared with everyone who pulls the repo.
 ## Run a tool's own commands — `pult tool`
 
 Some programs describe their own commands in Pult's format: they print a
-manifest on `self-schema --json`. Forklift does this. For those, `pult tool`
+manifest on `self schema --json`. Forklift does this. For those, `pult tool`
 gives you the guided menu and prompts without any manifest at all:
 
 ```sh
