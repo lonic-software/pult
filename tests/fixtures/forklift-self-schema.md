@@ -7,7 +7,7 @@ composes to the argv Forklift's own CLI accepts, and every param carries its
 help as its description (one is pinned, so a change to that help shows up there).
 
 **Provenance.** Captured from lonic-software/forklift at commit
-`cdb95f8e2bdc28d1d78d7f79f51a5acf9a85d321` (`forklift version` 0.3.1, the
+`0b8d8742d2dd183eab4770a4e9497140fb965ec7` (`forklift version` 0.3.1, the
 command-surface redesign through its `self` family), debug build:
 
 ```sh
