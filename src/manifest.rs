@@ -568,7 +568,7 @@ pub fn parse(raw: &str, origin: &Path) -> Result<Manifest> {
     validate(manifest, origin)
 }
 
-/// [`parse`] for a manifest written as JSON — a tool's `self-schema`
+/// [`parse`] for a manifest written as JSON — a tool's `self schema`
 /// document. Read by a JSON parser, never by YAML's, which refuses valid
 /// JSON (a surrogate-pair escape). The same probe-first order: every struct
 /// denies unknown fields, so a probe after the deserialize would turn a

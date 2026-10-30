@@ -83,7 +83,7 @@ fn run(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str) == Some("x") {
         return x::run_cli(&args[1..]);
     }
-    // `pult tool` — a program's own commands, from its self-schema document.
+    // `pult tool` — a program's own commands, from its `self schema` document.
     // No manifest is involved at all (the id is reserved too).
     if args.first().map(String::as_str) == Some("tool") {
         return tool::run_cli(&args[1..]);
@@ -286,7 +286,7 @@ fn build_cli(resolved: &Resolved, scope: Scope) -> clap::Command {
                pult update [VERSION]        self-update to the latest (or given) release\n  \
                pult init [--user]           scaffold a starter manifest\n  \
                pult x <SOURCE> [COMMAND]    run a command straight from a module source (no manifest)\n  \
-               pult tool <BIN> [COMMAND]    run a program's commands from its own `self-schema`\n  \
+               pult tool <BIN> [COMMAND]    run a program's commands from its own `self schema`\n  \
                pult includes add <SOURCE>   pin a module and add it to a manifest (--user)\n  \
                pult includes verify         check every pin still resolves and no tag moved\n  \
                pult doctor [--json]         run every command's `check:` and report readiness\n  \

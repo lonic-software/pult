@@ -31,7 +31,7 @@ const RESERVED_IDS: [&str; 16] = [
     // ephemeral execution (`pult x`), and reserved for the decentralized
     // registry surface it feeds into (`pult tap`, `pult registry`).
     "x",
-    // a program's own commands from its self-schema document (`pult tool`).
+    // a program's own commands from its `self schema` document (`pult tool`).
     "tool",
     "tap",
     "registries",
@@ -81,7 +81,7 @@ pub enum Origin {
     /// showing one would misrepresent the scope). Not journaled: there is no
     /// durable repo identity to journal under.
     Module,
-    /// A program's own `self-schema` document, run by `pult tool`. No trust
+    /// A program's own `self schema` document, run by `pult tool`. No trust
     /// gate: the document's author is the program the user named, already
     /// executed to obtain it, and every run is that program spawned with
     /// arguments (see [`ResolvedRun::Argv`]). Not journaled (no manifest

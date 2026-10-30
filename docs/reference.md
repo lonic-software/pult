@@ -378,7 +378,7 @@ works where no `pult.yaml` exists.
 ### `pult tool` — a program's own commands
 
 `pult tool <BIN> [COMMAND] [args…]` runs a command that a program declares about
-itself: Pult runs `BIN self-schema --json` (stdin closed), reads the manifest in
+itself: Pult runs `BIN self schema --json` (stdin closed), reads the manifest in
 the `data` of the lonic JSON envelope it prints, and binds and runs `COMMAND` from
 it. With no `COMMAND` it opens the guided menu, or — non-interactively — lists
 the program's commands and exits `2`. No manifest is involved, so it works
@@ -492,7 +492,7 @@ pult x [--var N=V] <SOURCE>   run a command from a module source, no manifest (n
                                 included; --var only before the command; --trust / --print as
                                 elsewhere, but trust records only on a run; a bare source
                                 takes the latest tag
-pult tool <BIN> [COMMAND]      run a program's own commands from its `self-schema` document
+pult tool <BIN> [COMMAND]      run a program's own commands from its `self schema` document
      [args…] [--print]          (no manifest, no trust prompt, no journal; Pult's lines on stderr)
 pult includes add <SOURCE>    pin a module and append it to a manifest's includes
      [--prefix P] [--user]      (--user targets ~/.config/pult/pult.yaml, creating it)
