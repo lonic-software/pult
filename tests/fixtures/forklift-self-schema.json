@@ -1,7 +1,7 @@
 {
   "lonic_json": 1,
   "tool": "forklift",
-  "schema": 13,
+  "schema": 15,
   "command": "self",
   "ok": true,
   "data": {
@@ -453,39 +453,6 @@
         "interactive": false
       },
       {
-        "id": "haul-review",
-        "title": "Record a signed review (approve by default)",
-        "category": "haul",
-        "description": "Record a signed review of a haul's current head. Approves by default; pass --request-changes or --comment for the other verdicts. Because the review is signed, the approval carries your identity class — an agent's approval is distinguishable from a human's. Requires an enrolled signing key.",
-        "params": {
-          "request-changes": {
-            "flag": {
-              "arg": "--request-changes"
-            },
-            "description": "Request changes instead of approving"
-          },
-          "comment": {
-            "flag": {
-              "arg": "--comment"
-            },
-            "description": "A plain review comment (no approval)"
-          },
-          "message": {
-            "repeat": {
-              "arg": "--message",
-              "max": 1
-            },
-            "description": "The review message"
-          },
-          "id": {
-            "input": {},
-            "description": "The haul id (or a unique prefix)"
-          }
-        },
-        "run": "haul review {request-changes} {comment} {message} -- {id}",
-        "interactive": false
-      },
-      {
         "id": "haul-consolidate",
         "title": "Land a proposal: consolidate its source into the target",
         "category": "haul",
@@ -612,6 +579,12 @@
             },
             "description": "Resolve a metadata conflict: keep ours or theirs at a path (repeatable)"
           },
+          "confirm": {
+            "flag": {
+              "arg": "--confirm"
+            },
+            "description": "Drop the local changes a \"theirs\" resolution names (only a \"theirs\" --keep needs it)"
+          },
           "pallet": {
             "repeat": {
               "max": 1
@@ -619,7 +592,7 @@
             "description": "The pallet to lower (default: the current pallet); \"forklift pallet list --remote\" lists the remote's"
           }
         },
-        "run": "lower {expect} {keep} -- {pallet}",
+        "run": "lower {expect} {keep} {confirm} -- {pallet}",
         "interactive": false
       },
       {
@@ -832,7 +805,7 @@
         "id": "office",
         "title": "Manage the warehouse office: users and signing keys",
         "category": "office",
-        "description": "Manage the warehouse office: users and signing keys, tracked as metadata on the reserved \"office\" pallet. Without a subcommand, the users and their keys are listed.",
+        "description": "Manage the warehouse office: users and signing keys, tracked as metadata on the \"@office\" meta pallet. Without a subcommand, the users and their keys are listed.",
         "params": {},
         "run": "office",
         "interactive": false
@@ -1041,7 +1014,7 @@
             "flag": {
               "arg": "--confirm"
             },
-            "description": "Actually perform the reset (without it, a dry-run explanation is printed)"
+            "description": "Reset trust (without it, what the reset would do is shown and nothing changes)"
           }
         },
         "run": "office regenesis {confirm}",
@@ -1457,20 +1430,20 @@
       {
         "id": "restore",
         "title": "Restore a file or directory from the inventory (discard unstaged changes)",
-        "description": "Restore a file or directory in the working directory from the inventory (discard unstaged changes). With --staged, reset the inventory entries to the pallet head instead (unstage), leaving the working directory untouched.",
+        "description": "Restore a file or directory in the working directory from the inventory (discard unstaged changes). When that would overwrite a changed file, it lists the files whose changes would be lost, changes nothing and exits non-zero unless --confirm is given; restoring a missing file needs no --confirm. To unstage instead, leaving the working directory untouched, use \"forklift unload\".",
         "params": {
-          "staged": {
+          "confirm": {
             "flag": {
-              "arg": "--staged"
+              "arg": "--confirm"
             },
-            "description": "Reset the inventory entries to the pallet head instead (unstage)"
+            "description": "Discard the unstaged changes the restore would overwrite"
           },
           "path": {
             "input": {},
             "description": "The file or directory to restore"
           }
         },
-        "run": "restore {staged} -- {path}",
+        "run": "restore {confirm} -- {path}",
         "interactive": false
       },
       {
@@ -1569,14 +1542,15 @@
         "title": "Stack the inventory as a new parcel (commit) on the current pallet",
         "description": "Stack the inventory as a new parcel (commit) on the current pallet, with the configured operator recorded as the author. A consolidation in progress is completed by this command.",
         "params": {
-          "description": {
+          "message": {
             "repeat": {
+              "arg": "--message",
               "max": 1
             },
-            "description": "The description of the parcel"
+            "description": "The parcel's description"
           }
         },
-        "run": "stack -- {description}",
+        "run": "stack {message}",
         "interactive": false
       },
       {
@@ -1595,9 +1569,28 @@
         "interactive": false
       },
       {
-        "id": "expand",
+        "id": "scope",
+        "title": "Show and change the sparse scopes: this checkout's scope and the warehouse fetch scope",
+        "category": "scope",
+        "description": "Show and change the two sparse scopes. The checkout scope is what one checkout (a bay or the main tree) writes to disk; the fetch scope is what the warehouse's store holds, shared by every checkout. Without a subcommand, show both, as \"forklift scope status\" does. \"forklift scope narrow\" shrinks the checkout scope; \"forklift scope fetch\" widens the fetch scope and \"forklift scope prune\" shrinks it.",
+        "params": {},
+        "run": "scope",
+        "interactive": false
+      },
+      {
+        "id": "scope-status",
+        "title": "Show this checkout's scope and the warehouse fetch scope (the default)",
+        "category": "scope",
+        "description": "Show the two sparse scopes: this checkout's scope (the subtree path(s) the bay or the main tree checks out, stages and stacks) and the warehouse's fetch scope (what the store has fetched at all). An unscoped bay (or the main tree) reports a full checkout scope: the whole tree. A checkout scope is local to the checkout and never tracked. Read-only.",
+        "params": {},
+        "run": "scope status",
+        "interactive": false
+      },
+      {
+        "id": "scope-fetch",
         "title": "Widen a sparse warehouse's fetch scope and download the newly in-scope subtree(s)",
-        "description": "Widen a sparse warehouse's fetch scope: add subtree path(s) to what the store fetches, then download their content across the whole history from the remote. Cheap and incremental — only the newly in-scope objects are fetched; what is already present is skipped. After expanding, a bay can be scoped to the new path (\"forklift bay add --scope\"). A full (non-sparse) warehouse already holds everything, so there is nothing to expand.",
+        "category": "scope",
+        "description": "Widen a sparse warehouse's fetch scope: add subtree path(s) to what the store fetches, then download their content across the whole history from the remote. Cheap and incremental — only the newly in-scope objects are fetched; what is already present is skipped. Every checkout's scope stays as it is: after fetching, a bay can be scoped to the new path (\"forklift bay add --scope\"). A full (non-sparse) warehouse already holds everything, so there is nothing to fetch.",
         "params": {
           "paths": {
             "repeat": {
@@ -1606,13 +1599,14 @@
             "description": "The subtree path(s) to add to the fetch scope. Repeatable"
           }
         },
-        "run": "expand -- {paths}",
+        "run": "scope fetch -- {paths}",
         "interactive": false
       },
       {
-        "id": "narrow",
-        "title": "Narrow this checkout's materialization scope and de-materialize the dropped subtree(s)",
-        "description": "Narrow this checkout's materialization scope: drop subtree path(s) from what this bay (or the main tree) materializes, and remove the now out-of-scope files from the working directory. This frees nothing in the shared object store — the dropped content is still ordinary reachable history, not garbage — it only shrinks what this checkout shows. A checkout must keep at least one in-scope path; to stop scoping entirely, open a fresh full checkout.",
+        "id": "scope-narrow",
+        "title": "Narrow this checkout's scope and remove the dropped subtree(s) from the working directory",
+        "category": "scope",
+        "description": "Narrow this checkout's scope: drop subtree path(s) from what this bay (or the main tree) checks out, and remove the now out-of-scope files from the working directory. This frees nothing in the shared object store — the dropped content is still ordinary reachable history, not garbage — it only shrinks what this checkout shows, and the fetch scope stays as it is. A checkout must keep at least one in-scope path; to stop scoping entirely, open a fresh full checkout.",
         "params": {
           "paths": {
             "repeat": {
@@ -1621,36 +1615,20 @@
             "description": "The in-scope subtree path(s) to drop. Repeatable"
           }
         },
-        "run": "narrow -- {paths}",
-        "interactive": false
-      },
-      {
-        "id": "scope",
-        "title": "Show this bay's sparse materialization scope, and the warehouse fetch scope",
-        "category": "scope",
-        "description": "Show the sparse-workspace scope: this bay's materialization scope (the subtree path(s) it checks out, stages and stacks) and the warehouse's fetch scope (what the store has fetched at all). An unscoped bay (or the main tree) reports a full scope: the whole tree. Scope is local to the checkout and never tracked. Read-only.",
-        "params": {},
-        "run": "scope",
-        "interactive": false
-      },
-      {
-        "id": "scope-status",
-        "title": "Show the current bay's materialization scope and the warehouse fetch scope (the default)",
-        "category": "scope",
-        "params": {},
-        "run": "scope status",
+        "run": "scope narrow -- {paths}",
         "interactive": false
       },
       {
         "id": "scope-prune",
-        "title": "Reclaim disk from a sparse warehouse: forget a fetched path and free its content",
-        "description": "Reclaim disk from a sparse warehouse: drop a fetched path from the shared warehouse fetch scope and free the objects under it from the object store. This is the deliberate, destructive counterpart of \"forklift narrow\" — narrow is bay-local and frees nothing, because narrowed-away content is still reachable history that garbage collection correctly keeps; scope-prune forgets a path warehouse-wide and reclaims its disk. It is multi-bay-aware: it refuses to free a path any checkout (the main tree or a bay) still materializes. It frees only history the remote holds, so it asks the remote first and refuses, changing nothing, when it cannot; work never lifted keeps its content until it is lifted and the prune is run again. What it frees is sealed by hash afterwards — re-fetchable from the origin with \"forklift expand\". A full (non-sparse) warehouse has nothing to prune. If an earlier prune was interrupted before it finished freeing everything, running it again on the same path resumes and finishes the job rather than refusing. Use --dry-run to see what it would free without changing anything.",
+        "title": "Reclaim disk from a sparse warehouse: shrink its fetch scope and free the content",
+        "category": "scope",
+        "description": "Reclaim disk from a sparse warehouse: drop a fetched path from the shared warehouse fetch scope and free the objects under it from the object store. This is the deliberate, destructive counterpart of \"forklift scope narrow\": narrow shrinks one checkout's scope and frees nothing, because narrowed-away content is still reachable history that garbage collection correctly keeps; prune shrinks the fetch scope warehouse-wide and reclaims its disk. It is multi-bay-aware: it refuses to free a path any checkout (the main tree or a bay) still has in its scope. It frees only history the remote holds, so it asks the remote first and refuses, changing nothing, when it cannot; work never lifted keeps its content until it is lifted and the prune is run again. What it frees is sealed by hash afterwards — fetched again from the origin with \"forklift scope fetch\". A full (non-sparse) warehouse has nothing to prune. If an earlier prune was interrupted before it finished freeing everything, running it again on the same path resumes and finishes the job rather than refusing. Without --confirm it shows what it would free, changes nothing and exits non-zero; when there is nothing to free, it runs without --confirm. A confirmed run plans again, so if the remote moved meanwhile it may free a little more or less than the preview showed.",
         "params": {
-          "dry-run": {
+          "confirm": {
             "flag": {
-              "arg": "--dry-run"
+              "arg": "--confirm"
             },
-            "description": "Report what would be freed and change nothing"
+            "description": "Free the content (without it, what would be freed is shown and nothing changes)"
           },
           "paths": {
             "repeat": {
@@ -1659,7 +1637,7 @@
             "description": "The fetched path(s) to prune. Repeatable; also accepts a path an earlier, interrupted prune already dropped from the fetch scope, to resume and finish freeing it"
           }
         },
-        "run": "scope-prune {dry-run} -- {paths}",
+        "run": "scope prune {confirm} -- {paths}",
         "interactive": false
       },
       {
@@ -1840,8 +1818,8 @@
       },
       {
         "id": "undo",
-        "title": "Undo the last stack, consolidate, cherry-pick or shift (soft — keeps your changes)",
-        "description": "Undo the last journaled operation: a \"forklift stack\", \"forklift consolidate\", \"forklift pick\" or \"forklift shift\". A stack, consolidate or pick is reversed softly: the pallet head moves back while the working directory and the inventory stay as they are (like git's \"reset --soft HEAD~1\"), so the undone changes are staged again and can be re-stacked — e.g. with a corrected message or author. A shift is reversed by shifting back. Undo reverses only the user's last operation: except for a pallet delete, which changed nothing in the bay, if the current pallet has been switched (e.g. by pallet create or deliver), its head has moved, or a consolidation or pick was started or finished since the journaled operation, it refuses instead of reaching past that. In a warehouse that has been served, a stack, consolidate or pick is not undone when it would move a user pallet back off the head it left, since the warehouse's clones may rely on that head: stack a parcel that reverts the change instead. An unreadable journal is reported by name, never read as empty. A pallet delete is reversed by bringing the pallet back at the head it was deleted at; if that name has been taken since, \"--as <new-name>\" brings it back under another name.",
+        "title": "Undo the last stack, consolidate, pick, shift or pallet delete",
+        "description": "Undo the last journaled operation: a \"forklift stack\", \"forklift consolidate\", \"forklift pick\", \"forklift shift\" or \"forklift pallet delete\". A stack, consolidate or pick is reversed softly: the pallet head moves back while the working directory and the inventory stay as they are (like git's \"reset --soft HEAD~1\"), so the undone changes are staged again and can be re-stacked — e.g. with a corrected message or author. A shift is reversed by shifting back. Undo reverses only the user's last operation: except for a pallet delete, which changed nothing in the bay, if the current pallet has been switched (e.g. by pallet create or deliver), its head has moved, or a consolidation or pick was started or finished since the journaled operation, it refuses instead of reaching past that. In a warehouse that has been served, a stack, consolidate or pick is not undone when it would move a user pallet back off the head it left, since the warehouse's clones may rely on that head: stack a parcel that reverts the change instead. An unreadable journal is reported by name, never read as empty. A pallet delete is reversed by bringing the pallet back at the head it was deleted at; if that name has been taken since, \"--as <new-name>\" brings it back under another name.",
         "params": {
           "as": {
             "repeat": {
@@ -1857,7 +1835,7 @@
       {
         "id": "unload",
         "title": "Unstage a file or directory (keep your changes)",
-        "description": "Unstage a file or directory: reset its inventory entries to the pallet head, leaving the working directory untouched — the inverse of \"forklift load\", and the same as \"forklift restore --staged\". To stage a removal instead, use \"forklift remove\".",
+        "description": "Unstage a file or directory: reset its inventory entries to the pallet head, leaving the working directory untouched — the inverse of \"forklift load\". To stage a removal instead, use \"forklift remove\".",
         "params": {
           "path": {
             "input": {},
